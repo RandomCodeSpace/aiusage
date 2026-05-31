@@ -1,0 +1,20 @@
+# Build artifacts
+/aiusage
+/bin/
+/dist/
+*.test
+*.out
+
+# Local databases / state produced at runtime
+*.db
+*.db-shm
+*.db-wal
+
+# Agent-generated working docs (promote explicitly if they become deliverables)
+PLAN.md
+NOTES.md
+*.scratch.md
+/docs/superpowers/
+
+# Go
+/vendor/
