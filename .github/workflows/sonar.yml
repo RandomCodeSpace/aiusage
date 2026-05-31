@@ -1,0 +1,60 @@
+name: Sonar
+
+# SonarCloud static analysis (bugs, code smells, vulnerabilities, security
+# hotspots) with Go test coverage. Add a SONAR_TOKEN repository secret to enable
+# it (Settings → Secrets and variables → Actions). Until that secret exists the
+# scan step is skipped rather than failed, so this workflow is safe to merge
+# before the token is configured. Project/org are set in sonar-project.properties.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonar:
+    name: SonarCloud scan
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history lets Sonar attribute new code / blame accurately.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with coverage
+        if: env.SONAR_TOKEN != ''
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./... -count=1 -covermode=atomic -coverprofile=coverage.out
+
+      - name: SonarCloud scan
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Explain skipped scan
+        if: env.SONAR_TOKEN == ''
+        run: |
+          echo "SONAR_TOKEN is not configured, so the SonarCloud scan was skipped."
+          echo "Add a repository secret named SONAR_TOKEN to enable this check."

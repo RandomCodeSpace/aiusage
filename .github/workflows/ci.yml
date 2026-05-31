@@ -1,0 +1,97 @@
+name: CI
+
+# Build, vet, format-check, test (with coverage) and vulnerability scan on every
+# push to main and every pull request. Pure-Go, CGO disabled to match the
+# release build; a separate race job re-enables CGO for the concurrency-sensitive
+# packages only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Weekly run so newly-disclosed vulnerabilities in dependencies are caught even
+  # when there are no new commits (the govulncheck job below).
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (check formatting)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        env:
+          CGO_ENABLED: "0"
+        run: go vet ./...
+
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: test (with coverage)
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./... -count=1 -covermode=atomic -coverprofile=coverage.out
+
+      - name: upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The race detector needs CGO. Scope it to the packages with real
+      # concurrency (TUI ticks, the collection daemon, the store) to keep it fast.
+      - name: go test -race
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./internal/tui/... ./internal/collect/... ./internal/store/...
+
+  govulncheck:
+    name: vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        # govulncheck reports only vulns actually reachable from this code.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

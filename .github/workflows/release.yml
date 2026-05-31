@@ -1,0 +1,36 @@
+name: Release
+
+# Cuts a GitHub Release when a version tag (vX.Y.Z) is pushed: cross-compiles
+# linux/darwin/windows for amd64+arm64, builds archives + checksums, and injects
+# the tag version into the binary via ldflags (see .goreleaser.yaml). Versioning
+# is tag-driven — `git tag v1.2.3 && git push origin v1.2.3`.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
