@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -42,6 +43,11 @@ type Monitor struct {
 	diskPath   string // filesystem to statfs for the disk gauge
 	numCPU     int    // host CPU count, used when no CPU quota is set
 
+	// mu guards the CPU rate state below. The TUI shares a single *Monitor across
+	// bubbletea's value-copied Model, and Sample() runs from tick-driven Update
+	// handling, so the prev* fields are read/written from more than one goroutine
+	// over the program's life — the lock makes that access data-race-free.
+	mu          sync.Mutex
 	prevCPUUsec int64     // cgroup cpu usage (microseconds) at last sample
 	prevAt      time.Time // wall clock at last sample
 	havePrev    bool
@@ -61,6 +67,8 @@ func New(diskPath string) *Monitor {
 // Sample reads the current CPU/memory/disk usage. CPU is the average over the
 // interval since the previous Sample; the first call returns CPU.Known=false.
 func (m *Monitor) Sample() Snapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	now := time.Now()
 	var s Snapshot
 	s.Mem = m.memory()
