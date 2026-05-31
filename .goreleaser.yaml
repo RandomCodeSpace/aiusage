@@ -18,10 +18,13 @@ builds:
     binary: aiusage
     env:
       - CGO_ENABLED=0
+    # Linux and macOS only. aiusage is a Unix tool: the daemon uses flock
+    # (syscall.Flock) and the resource monitor uses statfs (syscall.Statfs),
+    # neither of which exists on Windows — and the monitor reads /sys/fs/cgroup,
+    # which is Linux-specific anyway. Windows is intentionally not a target.
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -33,10 +36,6 @@ builds:
 archives:
   - id: default
     formats: [tar.gz]
-    # Windows users expect zip.
-    format_overrides:
-      - goos: windows
-        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
