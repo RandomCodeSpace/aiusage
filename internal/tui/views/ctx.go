@@ -14,7 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // Ctx carries the styling and formatting the views need, injected by the root

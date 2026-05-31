@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
 // version.go tracks the build identity of the running daemon so the CLI can keep

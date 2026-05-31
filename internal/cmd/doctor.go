@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/config"
-	"aiusage/internal/model"
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // adapterNotes are operator-facing caveats surfaced by `doctor` for adapters

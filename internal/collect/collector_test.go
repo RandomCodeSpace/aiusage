@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // ---------------------------------------------------------------------------

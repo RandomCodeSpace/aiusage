@@ -11,9 +11,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	zone "github.com/lrstanley/bubblezone"
 
-	"aiusage/internal/model"
-	"aiusage/internal/store"
-	"aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // fakeData is a tiny in-test DataSource. It returns a fixed grouping for any

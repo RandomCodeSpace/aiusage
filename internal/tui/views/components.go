@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // components.go is the single source of truth for the four DB-backed token

@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // newSourcesCmd builds the `sources` command: lists the sources discovered by

@@ -21,17 +21,17 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/adapter/agy"
-	"aiusage/internal/adapter/claudecode"
-	"aiusage/internal/adapter/codex"
-	"aiusage/internal/adapter/copilot"
-	"aiusage/internal/adapter/gemini"
-	"aiusage/internal/adapter/hermes"
-	"aiusage/internal/adapter/opencode"
-	"aiusage/internal/config"
-	"aiusage/internal/store"
-	"aiusage/internal/tui"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/agy"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/gemini"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/tui"
 )
 
 // globalFlags holds the values bound to the root command's persistent flags.

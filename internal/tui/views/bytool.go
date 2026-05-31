@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // ByToolData feeds the By-Tool view: per-tool stacked fresh/cache bars on the

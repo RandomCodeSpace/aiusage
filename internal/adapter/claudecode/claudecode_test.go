@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // writeFixture creates <root>/projects/<seg>/<session>.jsonl with the given lines.

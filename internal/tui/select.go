@@ -3,7 +3,7 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // select.go centralises selection + scrub-sync helpers shared by the keyboard

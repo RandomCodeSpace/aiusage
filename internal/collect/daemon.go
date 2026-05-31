@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // DaemonOptions configures RunDaemon.

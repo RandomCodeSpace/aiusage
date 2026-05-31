@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // View renders the whole frame. The nav adapts to width (left rail → top tab

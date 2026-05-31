@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"aiusage/internal/model"
-	"aiusage/internal/store"
-	"aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // reload re-queries the store for whatever the active view needs and rebuilds

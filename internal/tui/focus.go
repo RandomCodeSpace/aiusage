@@ -1,6 +1,6 @@
 package tui
 
-import "aiusage/internal/tui/views"
+import "github.com/RandomCodeSpace/aiusage/internal/tui/views"
 
 // View identifies the active tab. The four views form the command-center spine;
 // 1..4 (and clicking a top tab) select them directly, and Tab / Shift+Tab cycle

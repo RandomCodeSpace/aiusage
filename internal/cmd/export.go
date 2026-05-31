@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/report"
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/report"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // exportOpts holds the flags for the export command.

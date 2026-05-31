@@ -16,7 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 //go:embed schema.sql

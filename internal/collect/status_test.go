@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"testing"
 
-	"aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
 // holdLock takes the same exclusive non-blocking flock the daemon takes on

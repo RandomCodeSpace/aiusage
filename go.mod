@@ -1,4 +1,4 @@
-module aiusage
+module github.com/RandomCodeSpace/aiusage
 
 go 1.25.10
 

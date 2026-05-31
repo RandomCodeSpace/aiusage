@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // sysgauge.go drives the container resource gauges (CPU/mem/disk for the current

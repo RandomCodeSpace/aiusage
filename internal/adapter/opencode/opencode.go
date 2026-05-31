@@ -41,9 +41,9 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (CGO_ENABLED=0)
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
-	"aiusage/internal/tokenutil"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/tokenutil"
 )
 
 const (

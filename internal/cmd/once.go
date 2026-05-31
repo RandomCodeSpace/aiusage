@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/collect"
+	"github.com/RandomCodeSpace/aiusage/internal/collect"
 )
 
 // newOnceCmd builds the `once` command: a single collection cycle, then exit.

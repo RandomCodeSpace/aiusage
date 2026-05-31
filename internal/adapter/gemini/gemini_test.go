@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // writeFile writes content to dir/name and returns the full path.

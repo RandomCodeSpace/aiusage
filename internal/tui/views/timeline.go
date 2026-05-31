@@ -3,7 +3,7 @@ package views
 import (
 	"strings"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // The Timeline view draws a full-width time-series chart across the active

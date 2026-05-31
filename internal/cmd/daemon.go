@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"aiusage/internal/buildinfo"
-	"aiusage/internal/collect"
-	"aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
+	"github.com/RandomCodeSpace/aiusage/internal/collect"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
 // spawnDaemon launches a detached background collection daemon (`aiusage run`).

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"aiusage/internal/model"
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 func sampleSummary() *store.Summary {

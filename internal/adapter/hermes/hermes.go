@@ -23,8 +23,8 @@ import (
 
 	_ "modernc.org/sqlite" // register the pure-Go "sqlite" driver
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 const (

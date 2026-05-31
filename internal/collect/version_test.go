@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
 func TestDaemonVersionRoundTrip(t *testing.T) {

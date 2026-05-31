@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"aiusage/internal/cmd"
+	"github.com/RandomCodeSpace/aiusage/internal/cmd"
 )
 
 func main() {

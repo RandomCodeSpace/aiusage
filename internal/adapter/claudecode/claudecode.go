@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // usageMarker fast-skips lines that cannot carry usage data.

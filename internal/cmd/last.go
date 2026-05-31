@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // newLastCmd builds the `last` command: usage over the trailing span DUR, where

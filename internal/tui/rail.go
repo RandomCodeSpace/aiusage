@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // rail.go renders the top navigation: a full tab strip when the labels fit, and

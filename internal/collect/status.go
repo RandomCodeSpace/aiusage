@@ -6,7 +6,7 @@ import (
 	"strings"
 	"syscall"
 
-	"aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
 // DaemonStatus reports whether a collection daemon is currently running for the

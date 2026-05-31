@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"aiusage/internal/adapter"
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // codexHome returns the default codex home (<home>/.codex) for a user home dir,

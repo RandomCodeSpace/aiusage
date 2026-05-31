@@ -9,7 +9,7 @@ import (
 	"context"
 	"time"
 
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // Filter selects and groups usage for reporting.

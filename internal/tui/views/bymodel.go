@@ -1,7 +1,7 @@
 package views
 
 import (
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // ByModelData feeds the By-Model view: per-model stacked fresh/cache bars

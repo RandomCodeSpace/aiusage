@@ -3,7 +3,7 @@ package tui
 import (
 	"github.com/charmbracelet/lipgloss"
 
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // Theme holds the intentional palette and the reusable lipgloss styles for the

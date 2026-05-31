@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // openTemp opens a fresh SQLite store in a temp dir.

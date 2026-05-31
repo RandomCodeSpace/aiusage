@@ -1,6 +1,6 @@
 package claudecode
 
-import "aiusage/internal/model"
+import "github.com/RandomCodeSpace/aiusage/internal/model"
 
 // deduper implements ccusage-equivalent in-cycle deduplication for Claude Code
 // transcript lines.

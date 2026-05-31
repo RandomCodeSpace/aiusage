@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/buildinfo"
-	"aiusage/internal/collect"
-	"aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
+	"github.com/RandomCodeSpace/aiusage/internal/collect"
+	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
 // stampCurrentVersion records the running build's identity as the daemon version

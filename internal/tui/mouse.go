@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // doubleClickWindow is the max gap between two presses on the same zone to

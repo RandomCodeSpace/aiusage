@@ -3,7 +3,7 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"aiusage/internal/buildinfo"
+	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 )
 
 // newVersionCmd prints the build identity used to keep the CLI and daemon in

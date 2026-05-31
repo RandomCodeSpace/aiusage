@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // claudeFixture is one realistic Claude Code transcript line: a Direct-shape

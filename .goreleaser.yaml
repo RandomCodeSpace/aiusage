@@ -31,7 +31,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X aiusage/internal/buildinfo.Version={{ .Version }}
+      - -s -w -X github.com/RandomCodeSpace/aiusage/internal/buildinfo.Version={{ .Version }}
 
 archives:
   - id: default
