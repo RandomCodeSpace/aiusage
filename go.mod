@@ -1,6 +1,6 @@
 module aiusage
 
-go 1.25.0
+go 1.25.10
 
 require (
 	github.com/NimbleMarkets/ntcharts v0.5.1
