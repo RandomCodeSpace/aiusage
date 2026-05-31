@@ -48,6 +48,10 @@ jobs:
 
       - name: SonarCloud scan
         if: env.SONAR_TOKEN != ''
+        # Non-blocking: if the SonarCloud project is not yet provisioned (or the
+        # token/org/key do not match), report it but do not fail the build. Once
+        # SonarCloud is set up, the scan's own quality gate governs PR status.
+        continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
