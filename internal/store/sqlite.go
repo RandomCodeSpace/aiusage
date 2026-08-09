@@ -1,8 +1,8 @@
 // SQLite-backed implementation of the Store interface. Pure Go via
 // modernc.org/sqlite (CGO_ENABLED=0). The append-only guarantee is enforced by
 // schema.sql (UNIQUE(dedup_key) + no-UPDATE/no-DELETE triggers); this file only
-// ever INSERTs OR IGNOREs into usage_events and upserts mutable accumulator
-// state into aggregate_state.
+// ever appends to usage_events (INSERT .. ON CONFLICT(dedup_key) DO NOTHING)
+// and upserts mutable accumulator state into aggregate_state.
 package store
 
 import (
@@ -105,7 +105,10 @@ func (s *SQLite) Close() error { return s.db.Close() }
 
 // InsertEvents appends events idempotently in a single transaction. Returns the
 // count of rows actually inserted (new dedup keys). Existing dedup keys are
-// ignored; rows are never updated or deleted.
+// ignored; rows are never updated or deleted. A row that fails its own insert
+// (CHECK violation, empty dedup key) is skipped and reported in the returned
+// error while the rest of the batch still commits — one poison row must not
+// abort a batch that is re-read and retried every cycle.
 func (s *SQLite) InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error) {
 	if len(events) == 0 {
 		return 0, nil
@@ -116,44 +119,121 @@ func (s *SQLite) InsertEvents(ctx context.Context, events []model.UsageEvent) (i
 	}
 	defer tx.Rollback()
 
+	inserted, skipErr, err := insertEventsTx(ctx, tx, events)
+	if err != nil {
+		return inserted, err
+	}
+	if err := tx.Commit(); err != nil {
+		return inserted, fmt.Errorf("store: commit: %w", err)
+	}
+	return inserted, skipErr
+}
+
+// insertEventsTx runs the idempotent event insert inside an existing
+// transaction, so ApplySnapshot (and future collection-scoped writes such as
+// cycle checkpoints) can combine it with other statements atomically.
+// ON CONFLICT(dedup_key) DO NOTHING keeps the dedup ignore silent while a
+// CHECK violation still errors (blanket OR IGNORE would swallow it). Per-row
+// failures are skipped (a failed statement does not abort the SQLite
+// transaction) and summarised in skipErr; err is reserved for failures of the
+// batch itself, after which the transaction must not be committed.
+func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) (inserted int, skipErr, err error) {
+	if len(events) == 0 {
+		return 0, nil, nil
+	}
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO usage_events (
+		INSERT INTO usage_events (
 			dedup_key, tool, model, session_id, project,
 			event_time_unix, observed_time_unix,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			reasoning_tokens, total_tokens,
 			request_id, message_id, source_path, kind, raw
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(dedup_key) DO NOTHING`)
 	if err != nil {
-		return 0, fmt.Errorf("store: prepare insert: %w", err)
+		return 0, nil, fmt.Errorf("store: prepare insert: %w", err)
 	}
 	defer stmt.Close()
 
-	inserted := 0
+	var (
+		skipped   int
+		firstSkip error
+	)
+	skip := func(rowErr error) {
+		skipped++
+		if firstSkip == nil {
+			firstSkip = rowErr
+		}
+	}
 	for _, e := range events {
+		if err := ctx.Err(); err != nil {
+			return inserted, nil, err
+		}
 		if e.DedupKey == "" {
-			return inserted, fmt.Errorf("store: event with empty dedup key (tool=%s)", e.Tool)
+			skip(fmt.Errorf("store: event with empty dedup key (tool=%s)", e.Tool))
+			continue
 		}
 		kind := e.Kind
 		if kind == "" {
 			kind = model.KindUsage
 		}
-		res, err := stmt.ExecContext(ctx,
+		res, execErr := stmt.ExecContext(ctx,
 			e.DedupKey, e.Tool, e.Model, e.SessionID, e.Project,
 			e.EventTime.UTC().Unix(), observedUnix(e),
 			e.InputTokens, e.OutputTokens, e.CacheCreationTokens, e.CacheReadTokens,
 			e.ReasoningTokens, e.TotalTokens,
 			e.RequestID, e.MessageID, e.SourcePath, string(kind), nullString(e.Raw),
 		)
-		if err != nil {
-			return inserted, fmt.Errorf("store: insert event %s: %w", e.DedupKey, err)
+		if execErr != nil {
+			skip(fmt.Errorf("store: insert event %s: %w", e.DedupKey, execErr))
+			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
 		}
 	}
+	if skipped > 0 {
+		return inserted, fmt.Errorf("store: skipped %d of %d event(s); first: %w", skipped, len(events), firstSkip), nil
+	}
+	return inserted, nil, nil
+}
+
+// applySnapshotFault, when non-nil, runs between the event insert and the
+// state upsert inside ApplySnapshot's transaction. Test-only seam simulating a
+// crash in the window that used to double count (events committed, state not).
+var applySnapshotFault func() error
+
+// ApplySnapshot atomically appends the delta events and records the new
+// accumulator state in one transaction — see Store.ApplySnapshot for the
+// contract, including the skipped state write on a fully-collided insert.
+func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	inserted, skipErr, err := insertEventsTx(ctx, tx, events)
+	if err != nil {
+		return 0, err
+	}
+	if skipErr != nil {
+		// A skipped delta event must not advance the baseline: rolling back
+		// keeps the delta re-derivable next cycle.
+		return 0, skipErr
+	}
+	if applySnapshotFault != nil {
+		if err := applySnapshotFault(); err != nil {
+			return 0, err
+		}
+	}
+	if len(events) == 0 || inserted > 0 {
+		if err := upsertState(ctx, tx, state); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
-		return inserted, fmt.Errorf("store: commit: %w", err)
+		return 0, fmt.Errorf("store: commit: %w", err)
 	}
 	return inserted, nil
 }
@@ -205,7 +285,17 @@ func (s *SQLite) LastState(ctx context.Context, tool, key string) (*model.Aggreg
 // UpsertState records the latest observed counters for (tool, key), replacing
 // any previous value. This is mutable accumulator state, not history.
 func (s *SQLite) UpsertState(ctx context.Context, st model.AggregateSnapshot) error {
-	_, err := s.db.ExecContext(ctx, `
+	return upsertState(ctx, s.db, st)
+}
+
+// execer is the ExecContext subset shared by *sql.DB and *sql.Tx, so the state
+// upsert can run standalone (autocommit) or inside ApplySnapshot's transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func upsertState(ctx context.Context, db execer, st model.AggregateSnapshot) error {
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO aggregate_state (
 			tool, acc_key, model, session_id, project, observed_time_unix,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,

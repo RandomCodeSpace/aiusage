@@ -9,8 +9,10 @@
 // When Version is left at its "dev" default, Identity() first consults the module
 // version embedded by the Go toolchain (set for `go install <module>@vX.Y.Z`), and
 // otherwise falls back to a stamp derived from the running executable's size +
-// modtime, so a freshly built or reinstalled binary always has a distinct identity
-// and the daemon is restarted automatically — no manual version bump required.
+// modtime, so every rebuild/reinstall gets a distinct identity. Dev stamps are
+// informational only: cmd.ensureDaemon deliberately does not auto-restart on
+// dev-stamp mismatches (`go run` is a fresh temp binary each time — acting on
+// those would flap the daemon on every invocation).
 package buildinfo
 
 import (

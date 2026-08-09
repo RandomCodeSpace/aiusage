@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -233,6 +234,89 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 }
 
+// TestApplySnapshotAtomicCrashWindow injects a failure between the event
+// insert and the state upsert — the exact window where the old two-step write
+// left a committed delta with a stale baseline, so the next poll re-derived
+// and re-inserted the same delta forever. The whole transaction must roll
+// back, and the recovery poll must materialise the delta exactly once.
+func TestApplySnapshotAtomicCrashWindow(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+
+	snap := model.AggregateSnapshot{
+		Tool: model.ToolHermes, Key: "cell", SessionID: "cell",
+		InputTokens: 900_000, TotalTokens: 900_000, ObservedTime: now,
+	}
+	delta := ev("agg|hermes|cell|1", model.ToolHermes, now, 900_000)
+
+	applySnapshotFault = func() error { return errors.New("injected crash") }
+	defer func() { applySnapshotFault = nil }()
+
+	if _, err := st.ApplySnapshot(ctx, []model.UsageEvent{delta}, snap); err == nil {
+		t.Fatalf("expected the injected crash to surface")
+	}
+
+	// Neither side of the write may be visible after the rollback.
+	if got := windowTot(t, st, time.Time{}, time.Time{}); got != 0 {
+		t.Fatalf("crashed apply leaked %d tokens into usage_events", got)
+	}
+	if v, err := st.LastState(ctx, model.ToolHermes, "cell"); err != nil || v != nil {
+		t.Fatalf("crashed apply leaked state: %+v err=%v", v, err)
+	}
+
+	// Recovery poll: the unchanged (nil) baseline re-derives the full delta
+	// under a fresh dedup key; it must land exactly once, together with state.
+	applySnapshotFault = nil
+	delta2 := ev("agg|hermes|cell|2", model.ToolHermes, now.Add(time.Minute), 900_000)
+	if n, err := st.ApplySnapshot(ctx, []model.UsageEvent{delta2}, snap); err != nil || n != 1 {
+		t.Fatalf("recovery apply n=%d err=%v want 1,nil", n, err)
+	}
+	if got := windowTot(t, st, time.Time{}, time.Time{}); got != 900_000 {
+		t.Fatalf("total=%d want exactly 900,000 (no double count)", got)
+	}
+	v, err := st.LastState(ctx, model.ToolHermes, "cell")
+	if err != nil || v == nil || v.TotalTokens != 900_000 {
+		t.Fatalf("state after recovery = %+v err=%v want total 900,000", v, err)
+	}
+}
+
+// TestApplySnapshotCollisionKeepsBaseline: when every supplied event collides
+// on dedup_key (two polls at the same observed instant), the state write must
+// be skipped so the next poll re-derives the delta instead of dropping it; an
+// event-free apply (zero delta) must still advance the state.
+func TestApplySnapshotCollisionKeepsBaseline(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+
+	first := model.AggregateSnapshot{
+		Tool: model.ToolHermes, Key: "cell",
+		InputTokens: 100, TotalTokens: 100, ObservedTime: now,
+	}
+	if n, err := st.ApplySnapshot(ctx, []model.UsageEvent{ev("agg|k", model.ToolHermes, now, 100)}, first); err != nil || n != 1 {
+		t.Fatalf("first apply n=%d err=%v want 1,nil", n, err)
+	}
+
+	grown := first
+	grown.InputTokens = 250
+	grown.TotalTokens = 250
+	n, err := st.ApplySnapshot(ctx, []model.UsageEvent{ev("agg|k", model.ToolHermes, now, 150)}, grown)
+	if err != nil || n != 0 {
+		t.Fatalf("collided apply n=%d err=%v want 0,nil", n, err)
+	}
+	if v, _ := st.LastState(ctx, model.ToolHermes, "cell"); v == nil || v.TotalTokens != 100 {
+		t.Fatalf("collided apply advanced state to %+v; baseline must stay at 100", v)
+	}
+
+	if n, err := st.ApplySnapshot(ctx, nil, grown); err != nil || n != 0 {
+		t.Fatalf("state-only apply n=%d err=%v want 0,nil", n, err)
+	}
+	if v, _ := st.LastState(ctx, model.ToolHermes, "cell"); v == nil || v.TotalTokens != 250 {
+		t.Fatalf("state-only apply did not advance state: %+v", v)
+	}
+}
+
 // TestStatsAndSourceStats checks the diagnostic aggregates.
 func TestStatsAndSourceStats(t *testing.T) {
 	st := openTemp(t)
@@ -317,5 +401,56 @@ func TestOpenRestrictsPermissions(t *testing.T) {
 		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 			t.Errorf("%s mode = %03o, want no group/other bits", side, perm)
 		}
+	}
+}
+
+// TestInsertEventsSkipsPoisonRow: a row violating the CHECK constraint is
+// skipped and reported while the rest of the batch commits — sources are
+// re-read every cycle, so a whole-batch abort would retry the poison forever.
+func TestInsertEventsSkipsPoisonRow(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+
+	bad := ev("bad", model.ToolCodex, time.Now(), 5)
+	bad.InputTokens = -5 // violates the CHECK constraint
+	batch := []model.UsageEvent{
+		ev("good-1", model.ToolCodex, time.Now(), 10),
+		bad,
+		ev("good-2", model.ToolCodex, time.Now(), 20),
+	}
+
+	n, err := st.InsertEvents(ctx, batch)
+	if n != 2 {
+		t.Fatalf("inserted = %d, want 2", n)
+	}
+	if err == nil || !strings.Contains(err.Error(), "skipped 1 of 3") {
+		t.Fatalf("want skip report, got %v", err)
+	}
+
+	// The good rows are durably committed: re-inserting is a no-op.
+	n, err = st.InsertEvents(ctx, []model.UsageEvent{ev("good-1", model.ToolCodex, time.Now(), 10)})
+	if err != nil || n != 0 {
+		t.Fatalf("re-insert good-1 n=%d err=%v want 0,nil", n, err)
+	}
+	// The poison row was NOT stored: a fixed row under the same key inserts.
+	n, err = st.InsertEvents(ctx, []model.UsageEvent{ev("bad", model.ToolCodex, time.Now(), 5)})
+	if err != nil || n != 1 {
+		t.Fatalf("fixed row n=%d err=%v want 1,nil", n, err)
+	}
+}
+
+// TestInsertEventsEmptyKeyRowSkippedNotBatch: the empty-dedup-key rejection
+// still fires per row without dragging valid rows down with it.
+func TestInsertEventsEmptyKeyRowSkippedNotBatch(t *testing.T) {
+	st := openTemp(t)
+	n, err := st.InsertEvents(context.Background(), []model.UsageEvent{
+		ev("", model.ToolCodex, time.Now(), 1),
+		ev("ok", model.ToolCodex, time.Now(), 2),
+	})
+	if n != 1 {
+		t.Fatalf("inserted = %d, want 1", n)
+	}
+	if err == nil || !strings.Contains(err.Error(), "empty dedup key") {
+		t.Fatalf("want empty-dedup-key report, got %v", err)
 	}
 }

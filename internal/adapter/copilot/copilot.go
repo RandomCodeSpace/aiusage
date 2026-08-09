@@ -19,8 +19,11 @@ package copilot
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -323,12 +326,12 @@ func toCandidate(rec map[string]any, index int, fallbackTS time.Time, traceModel
 		session = "unknown-session"
 	}
 
-	ts, ok := timestampFromRecord(rec)
-	if !ok {
+	ts, hasTS := timestampFromRecord(rec)
+	if !hasTS {
 		ts = fallbackTS
 	}
 
-	dedup := dedupKeyForRecord(source, rec, attrs, trace, hasTrace, session, ts, index)
+	dedup := dedupKeyForRecord(source, rec, attrs, trace, hasTrace, session, ts, hasTS, index)
 
 	return &candidate{
 		source:        source,
@@ -447,20 +450,26 @@ func candidatesToEvents(cands []*candidate, path string) []model.UsageEvent {
 }
 
 // dedupKeyForRecord builds the per-record key string (without the tool prefix).
-func dedupKeyForRecord(source recordSource, rec, attrs map[string]any, trace string, hasTrace bool, session string, ts time.Time, index int) string {
+// Timestamp-less records (hasTS false) get a content-derived stamp instead of
+// ts: ts is then the file mtime, which advances on every append and would mint
+// a fresh key per poll — an unbounded recount.
+func dedupKeyForRecord(source recordSource, rec, attrs map[string]any, trace string, hasTrace bool, session string, ts time.Time, hasTS bool, index int) string {
 	span, hasSpan := spanIDFromRecord(rec)
-	millis := ts.UnixMilli()
+	stamp := strconv.FormatInt(ts.UnixMilli(), 10)
+	if !hasTS {
+		stamp = contentStamp(rec)
+	}
 	switch source {
 	case srcChatSpan, srcAgentSummarySpan:
 		if hasTrace && hasSpan {
 			return trace + ":" + span
 		}
-		return "span:" + session + ":" + strconv.FormatInt(millis, 10) + ":" + strconv.Itoa(index)
+		return "span:" + session + ":" + stamp + ":" + strconv.Itoa(index)
 	case srcInferenceLog:
 		if hasTrace && hasSpan {
 			return "log:" + trace + ":" + span
 		}
-		return "log:" + session + ":" + strconv.FormatInt(millis, 10) + ":" + strconv.Itoa(index)
+		return "log:" + session + ":" + stamp + ":" + strconv.Itoa(index)
 	default: // srcAgentTurnLog
 		turnIdx := ""
 		if v, ok := numberValue(attrs["turn.index"]); ok {
@@ -475,6 +484,18 @@ func dedupKeyForRecord(source recordSource, rec, attrs map[string]any, trace str
 		}
 		return "agent-turn:" + session + ":" + turnIdx + ":" + strconv.Itoa(index)
 	}
+}
+
+// contentStamp hashes the record's own content — never the file mtime — so a
+// timestamp-less record keeps a stable dedup key across polls. json.Marshal
+// serialises map keys sorted, so the hash is deterministic per record.
+func contentStamp(rec map[string]any) string {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return "unhashable"
+	}
+	sum := sha1.Sum(b)
+	return fmt.Sprintf("c%x", sum[:8])
 }
 
 // --- record-shape detection (mirrors ccusage parser.rs) ---
@@ -603,11 +624,13 @@ func stringField(v any) (string, bool) {
 
 // numberValue parses a non-negative integer from a JSON number or numeric
 // string. encoding/json decodes numbers as float64; numeric strings are also
-// accepted (OTEL exporters sometimes stringify values).
+// accepted (OTEL exporters sometimes stringify values). Floats at or above
+// MaxInt64 are rejected: Go's out-of-range conversion is implementation-
+// specific (MinInt64 on amd64).
 func numberValue(v any) (int64, bool) {
 	switch n := v.(type) {
 	case float64:
-		if n < 0 {
+		if math.IsNaN(n) || n < 0 || n >= math.MaxInt64 {
 			return 0, false
 		}
 		return int64(n), true
@@ -618,7 +641,7 @@ func numberValue(v any) (int64, bool) {
 			}
 			return i, true
 		}
-		if f, err := n.Float64(); err == nil && f >= 0 {
+		if f, err := n.Float64(); err == nil && f >= 0 && f < math.MaxInt64 {
 			return int64(f), true
 		}
 		return 0, false

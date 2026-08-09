@@ -27,10 +27,18 @@ var nowFn = func() time.Time { return time.Now().UTC() }
 type CycleStats struct {
 	Adapters       int      // adapters iterated
 	Sources        int      // sources discovered + collected
+	SourcesFailed  int      // sources that recorded errors and stored nothing
 	EventsInserted int      // new dedup keys actually written (event + synthetic)
 	EventsSeen     int      // observed event-level records (pre-dedup)
 	Snapshots      int      // aggregate snapshots observed
 	Errors         []string // non-fatal per-adapter / per-source errors
+}
+
+// AllFailed reports whether the cycle produced only errors: every discovered
+// source failed outright, or discovery itself yielded nothing but errors.
+// `once` maps this to its nonzero exit for cron use; partial failure stays 0.
+func (s CycleStats) AllFailed() bool {
+	return len(s.Errors) > 0 && s.SourcesFailed == s.Sources
 }
 
 // RunCycle performs one full collection pass. Per-source and per-adapter errors
@@ -59,6 +67,8 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				return stats, err
 			}
 			stats.Sources++
+			errsBefore := len(stats.Errors)
+			progressed := false
 
 			obs, err := ad.Collect(ctx, src)
 			if err != nil {
@@ -67,11 +77,16 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				// process whatever observations were returned.
 			}
 
-			if n, sErr := storeEvents(ctx, st, obs.Events, observedAt); sErr != nil {
+			// InsertEvents commits per-row: a non-nil error may accompany a
+			// partial insert (skipped poison rows), so n counts regardless.
+			n, sErr := storeEvents(ctx, st, obs.Events, observedAt)
+			stats.EventsSeen += len(obs.Events)
+			stats.EventsInserted += n
+			if sErr != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("insert events %s %s: %v", ad.ID(), src.Path, sErr))
-			} else {
-				stats.EventsSeen += len(obs.Events)
-				stats.EventsInserted += n
+			}
+			if n > 0 || (sErr == nil && len(obs.Events) > 0) {
+				progressed = true
 			}
 
 			for _, s := range obs.Snapshots {
@@ -82,6 +97,11 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 					continue
 				}
 				stats.EventsInserted += n
+				progressed = true
+			}
+
+			if len(stats.Errors) > errsBefore && !progressed {
+				stats.SourcesFailed++
 			}
 		}
 	}
@@ -106,7 +126,11 @@ func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent,
 }
 
 // storeSnapshot materialises the positive monotonic-with-reset delta for one
-// aggregate cell as a synthetic immutable event, then records the new state.
+// aggregate cell as a synthetic immutable event and records the new state in
+// one atomic store operation — a crash between the two would re-derive the
+// same delta next cycle under a fresh dedup key, double counting it forever.
+// A dedup collision (two cycles at the same observed instant) is handled by
+// ApplySnapshot, which keeps the old baseline so the delta is re-derivable.
 // Returns the number of new dedup keys inserted (0 or 1).
 func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapshot, observedAt time.Time) (int, error) {
 	last, err := st.LastState(ctx, s.Tool, s.Key)
@@ -116,30 +140,19 @@ func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapsho
 
 	d := snapshotDelta(last, s)
 
-	inserted := 0
+	var events []model.UsageEvent
 	if d.hasPositive() {
-		ev := syntheticEvent(s, d, observedAt)
-		n, err := st.InsertEvents(ctx, []model.UsageEvent{ev})
-		if err != nil {
-			return 0, fmt.Errorf("insert synthetic: %w", err)
-		}
-		inserted = n
-		if n == 0 {
-			// The synthetic delta collided with an existing dedup_key (two cycles
-			// at the same observed instant). Do NOT advance state: leaving the
-			// baseline unchanged lets the next poll re-derive this positive delta
-			// and insert it under a fresh timestamp, so it can never be lost.
-			return inserted, nil
-		}
+		events = []model.UsageEvent{syntheticEvent(s, d, observedAt)}
 	}
 
-	// Advance state so subsequent polls diff against the latest counters, even
-	// when this poll produced no positive delta.
+	// State advances even without a positive delta, so subsequent polls diff
+	// against the latest counters.
 	s.ObservedTime = observedAt
-	if err := st.UpsertState(ctx, s); err != nil {
-		return inserted, fmt.Errorf("upsert state: %w", err)
+	n, err := st.ApplySnapshot(ctx, events, s)
+	if err != nil {
+		return 0, fmt.Errorf("apply snapshot: %w", err)
 	}
-	return inserted, nil
+	return n, nil
 }
 
 // delta carries the per-field positive change for one aggregate cell.
@@ -198,17 +211,25 @@ func maxZero(v int64) int64 {
 }
 
 // syntheticEvent builds the immutable usage event representing one aggregate
-// delta. EventTime == ObservedTime because aggregate sources carry no real
-// per-record event time. The DedupKey uses nanosecond resolution so distinct
-// polls never collide; an exact-instant collision (frozen clock) is handled by
-// the caller, which refuses to advance state on a failed insert.
+// delta. EventTime is the adapter-populated per-record time when present
+// (gemini/agy record real turn timestamps) so a downtime gap's delta does not
+// land as a spike at the restart second; it falls back to the cycle instant.
+// The DedupKey stays on the cycle instant at nanosecond resolution so distinct
+// polls never collide even when the record timestamp is unchanged; an
+// exact-instant collision (frozen clock) is handled by the store's
+// ApplySnapshot, which refuses to advance state when the insert was fully
+// ignored.
 func syntheticEvent(s model.AggregateSnapshot, d delta, observedAt time.Time) model.UsageEvent {
+	eventTime := s.ObservedTime
+	if eventTime.IsZero() {
+		eventTime = observedAt
+	}
 	return model.UsageEvent{
 		Tool:                s.Tool,
 		Model:               s.Model,
 		SessionID:           s.SessionID,
 		Project:             s.Project,
-		EventTime:           observedAt,
+		EventTime:           eventTime,
 		ObservedTime:        observedAt,
 		InputTokens:         d.input,
 		OutputTokens:        d.output,

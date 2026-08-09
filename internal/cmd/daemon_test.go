@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -78,7 +82,7 @@ func TestEnsureDaemonNoSpawnWhenRunning(t *testing.T) {
 
 	cfg := config.Config{PIDPath: pidPath}
 	stampCurrentVersion(t, cfg) // same build → no restart
-	if err := ensureDaemon(cfg); err != nil {
+	if err := ensureDaemon(cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon: %v", err)
 	}
 	if *calls != 0 {
@@ -96,7 +100,7 @@ func TestEnsureDaemonSpawnsWhenNotRunning(t *testing.T) {
 	defer restore()
 
 	cfg := config.Config{PIDPath: pidPath}
-	if err := ensureDaemon(cfg); err != nil {
+	if err := ensureDaemon(cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon: %v", err)
 	}
 	if *calls != 1 {
@@ -119,10 +123,10 @@ func TestEnsureDaemonSelfHeal(t *testing.T) {
 	defer restore()
 
 	cfg := config.Config{PIDPath: pidPath}
-	if err := ensureDaemon(cfg); err != nil {
+	if err := ensureDaemon(cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (1): %v", err)
 	}
-	if err := ensureDaemon(cfg); err != nil {
+	if err := ensureDaemon(cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (2): %v", err)
 	}
 	if *calls != 2 {
@@ -143,7 +147,7 @@ func TestEnsureDaemonSingletonAfterSpawn(t *testing.T) {
 	cfg := config.Config{PIDPath: pidPath}
 
 	// First call: no daemon yet -> spawn.
-	if err := ensureDaemon(cfg); err != nil {
+	if err := ensureDaemon(cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (1): %v", err)
 	}
 	// Simulate the spawned daemon taking the lock + recording its version.
@@ -151,7 +155,7 @@ func TestEnsureDaemonSingletonAfterSpawn(t *testing.T) {
 	defer release()
 	stampCurrentVersion(t, cfg) // same build → no restart
 	// Second call: lock held + version matches -> no spawn.
-	if err := ensureDaemon(cfg); err != nil {
+	if err := ensureDaemon(cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (2): %v", err)
 	}
 	if *calls != 1 {
@@ -159,34 +163,158 @@ func TestEnsureDaemonSingletonAfterSpawn(t *testing.T) {
 	}
 }
 
-// TestEnsureDaemonRestartsOnVersionMismatch: a running daemon built from a
-// different version is stopped and respawned, keeping CLI + daemon in lockstep.
-func TestEnsureDaemonRestartsOnVersionMismatch(t *testing.T) {
+// TestEnsureDaemonDuringOnceCycle covers the once-holds-the-lock direction:
+// a concurrent data-facing command's ensureDaemon sees the collection lock
+// held and must treat the identity-stamped one-shot as a same-build daemon —
+// no stop (a 3s stall aimed at a pid that is not a daemon), no spawn, no
+// notice.
+func TestEnsureDaemonDuringOnceCycle(t *testing.T) {
 	dir := t.TempDir()
-	pidPath := seedLock(t, dir)
-	release := holdLock(t, pidPath)
+	pidPath := filepath.Join(dir, "aiusage.pid")
+	release, err := collect.AcquireCollectionLock(pidPath, buildinfo.Identity())
+	if err != nil {
+		t.Fatalf("acquire collection lock: %v", err)
+	}
 	defer release()
-
-	cfg := config.Config{PIDPath: pidPath}
-	collect.WriteDaemonVersion(cfg, "some-old-build") // != current identity
 
 	calls, restore := stubSpawn(t)
 	defer restore()
-
-	// Stub stopDaemon so we don't block on the test-held flock; record the call.
 	stopped := 0
 	prevStop := stopDaemon
 	stopDaemon = func(config.Config, int) error { stopped++; return nil }
 	defer func() { stopDaemon = prevStop }()
 
-	if err := ensureDaemon(cfg); err != nil {
-		t.Fatalf("ensureDaemon: %v", err)
+	var warn bytes.Buffer
+	if err := ensureDaemon(config.Config{PIDPath: pidPath}, &warn); err != nil {
+		t.Fatalf("ensureDaemon during once cycle: %v", err)
 	}
-	if stopped != 1 {
-		t.Fatalf("stopDaemon calls = %d, want 1", stopped)
+	if stopped != 0 || *calls != 0 || warn.Len() != 0 {
+		t.Fatalf("ensureDaemon during once cycle: stops=%d spawns=%d warn=%q, want 0/0/empty",
+			stopped, *calls, warn.String())
 	}
-	if *calls != 1 {
-		t.Fatalf("spawn calls = %d, want 1 (respawn after stop)", *calls)
+}
+
+// TestRestartOnMismatchDecision is the identity-mismatch decision table:
+// release↔release mismatches restart, anything involving a dev identity does
+// not (a `go run` temp binary is a new identity every invocation — restarting
+// would flap the daemon), and an unrecorded version restarts once.
+func TestRestartOnMismatchDecision(t *testing.T) {
+	tests := []struct {
+		name           string
+		recorded, self string
+		want           bool
+	}{
+		{"release vs release", "v1.0.0", "v1.1.0", true},
+		{"unrecorded vs release", "", "v1.1.0", true},
+		{"unrecorded vs dev stamp", "", "dev-100-200", true},
+		{"dev stamp vs release", "dev-100-200", "v1.1.0", false},
+		{"release vs dev stamp", "v1.0.0", "dev-100-200", false},
+		{"dev stamp vs dev stamp", "dev-100-200", "dev-300-400", false},
+		{"bare dev vs release", "dev", "v1.1.0", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := restartOnMismatch(tc.recorded, tc.self); got != tc.want {
+				t.Fatalf("restartOnMismatch(%q, %q) = %v, want %v", tc.recorded, tc.self, got, tc.want)
+			}
+		})
+	}
+}
+
+// setVersion pins buildinfo.Version for the test's duration so
+// buildinfo.Identity() returns a chosen release identity.
+func setVersion(t *testing.T, v string) {
+	t.Helper()
+	prev := buildinfo.Version
+	buildinfo.Version = v
+	t.Cleanup(func() { buildinfo.Version = prev })
+}
+
+// TestEnsureDaemonIdentityMismatch drives ensureDaemon through the mismatch
+// policy against a live (lock-held) fake daemon: release mismatches stop and
+// respawn; dev-stamp mismatches leave the daemon alone and only write a notice.
+func TestEnsureDaemonIdentityMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		recorded  string // "" = no daemon.version file (pre-stamping daemon)
+		version   string // pinned buildinfo.Version; "dev" = executable stamp
+		wantStop  int
+		wantSpawn int
+		wantWarn  bool
+	}{
+		{name: "release upgrade restarts", recorded: "v1.0.0", version: "v1.1.0", wantStop: 1, wantSpawn: 1},
+		{name: "unrecorded version restarts once", recorded: "", version: "v1.1.0", wantStop: 1, wantSpawn: 1},
+		{name: "dev daemon vs release CLI only warns", recorded: "dev-100-200", version: "v1.1.0", wantWarn: true},
+		{name: "release daemon vs dev CLI only warns", recorded: "v1.0.0", version: "dev", wantWarn: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setVersion(t, tc.version)
+			if tc.version == "dev" && !isDevIdentity(buildinfo.Identity()) {
+				// Identity() may pick up a module version in some build modes;
+				// the dev-CLI case is only meaningful with a dev identity.
+				t.Skipf("test binary identity %q is not a dev stamp", buildinfo.Identity())
+			}
+
+			dir := t.TempDir()
+			pidPath := seedLock(t, dir)
+			release := holdLock(t, pidPath)
+			defer release()
+
+			cfg := config.Config{PIDPath: pidPath}
+			if tc.recorded != "" {
+				collect.WriteDaemonVersion(cfg, tc.recorded)
+			}
+
+			calls, restore := stubSpawn(t)
+			defer restore()
+
+			// Stub stopDaemon so we don't block on the test-held flock.
+			stopped := 0
+			prevStop := stopDaemon
+			stopDaemon = func(config.Config, int) error { stopped++; return nil }
+			defer func() { stopDaemon = prevStop }()
+
+			var warn bytes.Buffer
+			if err := ensureDaemon(cfg, &warn); err != nil {
+				t.Fatalf("ensureDaemon: %v", err)
+			}
+			if stopped != tc.wantStop {
+				t.Errorf("stopDaemon calls = %d, want %d", stopped, tc.wantStop)
+			}
+			if *calls != tc.wantSpawn {
+				t.Errorf("spawn calls = %d, want %d", *calls, tc.wantSpawn)
+			}
+			if gotWarn := strings.Contains(warn.String(), "not auto-restarted"); gotWarn != tc.wantWarn {
+				t.Errorf("warn output = %q, wantWarn %v", warn.String(), tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestDaemonArgsForwardsFlags: the spawned `self run` must carry the parent's
+// --db/--config/--home so the daemon collects into the same DB the CLI reads.
+func TestDaemonArgsForwardsFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		f    globalFlags
+		want []string
+	}{
+		{name: "no flags", f: globalFlags{}, want: []string{"run"}},
+		{name: "db only", f: globalFlags{db: "/tmp/x.db"}, want: []string{"run", "--db", "/tmp/x.db"}},
+		{
+			name: "all forwarded",
+			f:    globalFlags{db: "/tmp/x.db", config: "/tmp/c.json", home: "/tmp/h"},
+			want: []string{"run", "--db", "/tmp/x.db", "--config", "/tmp/c.json", "--home", "/tmp/h"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := daemonArgs(tc.f); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("daemonArgs(%+v) = %v, want %v", tc.f, got, tc.want)
+			}
+		})
 	}
 }
 

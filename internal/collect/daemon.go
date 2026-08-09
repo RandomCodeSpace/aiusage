@@ -2,7 +2,9 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -91,6 +93,36 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc ad
 			runOne()
 		}
 	}
+}
+
+// AcquireCollectionLock takes the same advisory lock RunDaemon holds, for a
+// one-shot cycle (`once`). Without it a one-shot races the daemon: both read
+// the same aggregate baseline and insert the same delta under different
+// nano-timestamped dedup keys, doubling the count. Contention fails fast with
+// an actionable message.
+//
+// While held, the holder is indistinguishable from a running daemon to
+// cmd.ensureDaemon (same flock), so the one-shot stamps its pid and build
+// identity the way RunDaemon does: with no recorded version a concurrent CLI
+// hits the forced-restart path — a stop that stalls up to 3s and a SIGTERM
+// aimed at whatever stale pid the pidfile holds. The returned release func
+// removes both stamps and must be called when the cycle finishes.
+func AcquireCollectionLock(pidPath, version string) (func(), error) {
+	lock, err := acquireLock(pidPath)
+	if err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("the aiusage daemon is already collecting (lock held on %s.lock); skipping this run to avoid double counting", pidPath)
+		}
+		return nil, err
+	}
+	_ = writePID(pidPath) // best-effort: the version stamp below averts the restart path
+	writeDaemonVersion(pidPath, version)
+	quiet := log.New(io.Discard, "", 0)
+	return func() {
+		os.Remove(daemonVersionPath(pidPath))
+		removePID(pidPath, quiet)
+		lock.release(quiet)
+	}, nil
 }
 
 // fileLock holds an advisory (flock) lock on an open lock file.

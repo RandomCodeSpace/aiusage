@@ -95,7 +95,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureDaemon(cfg); err != nil {
+			if err := ensureDaemon(cfg, c.ErrOrStderr()); err != nil {
 				fmt.Fprintf(c.ErrOrStderr(), "warning: could not start daemon: %v\n", err)
 			}
 			return nil
@@ -149,9 +149,10 @@ func Execute() error {
 
 // loadConfig resolves the effective configuration: config.Load over the
 // --config path (an empty path means "use the default config location, which
-// may legitimately not exist"), then applies the --db/--interval/--home
-// overrides. The interval is re-clamped after a flag override so the documented
-// [60,1800] bound always holds.
+// may legitimately not exist"), then applies the --home/--db/--interval
+// overrides (--home re-derives the DB/PID/log paths it moves; see
+// config.SetHome). The interval is re-clamped after a flag override so the
+// documented [60,1800] bound always holds.
 func loadConfig() (config.Config, error) {
 	path := flags.config
 	if path == "" {
@@ -163,11 +164,14 @@ func loadConfig() (config.Config, error) {
 		return config.Config{}, fmt.Errorf("load config: %w", err)
 	}
 
+	// Home first: SetHome moves the still-derived DB/PID/log paths with it, and
+	// the explicit --db below must override the home-derived DB path, not the
+	// other way around.
+	if flags.home != "" {
+		cfg.SetHome(flags.home)
+	}
 	if flags.db != "" {
 		cfg.DBPath = flags.db
-	}
-	if flags.home != "" {
-		cfg.Home = flags.home
 	}
 	if flags.interval > 0 {
 		cfg.IntervalSeconds = clampInterval(flags.interval)

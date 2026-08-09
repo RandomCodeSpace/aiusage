@@ -79,7 +79,10 @@ type DBStats struct {
 type Store interface {
 	// InsertEvents appends usage events idempotently (INSERT OR IGNORE on
 	// dedup_key) in a single transaction. Returns the count actually inserted
-	// (i.e. new dedup keys). Never updates or deletes existing rows.
+	// (i.e. new dedup keys). Never updates or deletes existing rows. A row
+	// whose own insert fails (CHECK violation, empty dedup key) is skipped and
+	// reported via the returned error while the rest of the batch commits, so
+	// the count is meaningful even when the error is non-nil.
 	InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error)
 
 	// LastState returns the most recent observed counters for an aggregate
@@ -91,6 +94,17 @@ type Store interface {
 	// UpsertState records the latest observed counters for (tool, key),
 	// replacing any previous value (one row per cell).
 	UpsertState(ctx context.Context, s model.AggregateSnapshot) error
+
+	// ApplySnapshot atomically appends an aggregate cell's delta events and
+	// records its new accumulator state in ONE transaction, so a crash can
+	// never persist the events without the state (the next cycle would
+	// re-derive the same delta under a fresh dedup key — a permanent double
+	// count). When events is non-empty but every dedup key already exists,
+	// the state write is skipped: an unchanged baseline lets the next poll
+	// re-derive the colliding delta instead of dropping it. Returns the
+	// number of events actually inserted. Future collection-scoped writes
+	// (e.g. cycle checkpoints) are expected to join this same transaction.
+	ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot) (int, error)
 
 	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
 	Summarize(ctx context.Context, f Filter) (*Summary, error)

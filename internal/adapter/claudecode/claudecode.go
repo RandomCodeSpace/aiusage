@@ -80,6 +80,13 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		if abs, err := filepath.Abs(root); err == nil {
 			root = abs
 		}
+		// The no-message-id dedup fallback embeds transcript paths, so resolve
+		// symlinks: a re-pointed root would otherwise mint new keys for those
+		// lines. A genuinely moved root still re-adds them once — irreducible
+		// without state migration.
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
 		if _, dup := seen[root]; dup {
 			continue
 		}

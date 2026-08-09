@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -107,7 +108,7 @@ func asInt(raw json.RawMessage) (int64, bool) {
 			return i, true
 		}
 		if f, err := num.Float64(); err == nil {
-			return int64(f), true
+			return floatToInt64(f)
 		}
 	}
 	// Then a quoted numeric string with whitespace.
@@ -121,8 +122,18 @@ func asInt(raw json.RawMessage) (int64, bool) {
 			return i, true
 		}
 		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			return int64(f), true
+			return floatToInt64(f)
 		}
 	}
 	return 0, false
+}
+
+// floatToInt64 converts f only when it fits in int64. Go's conversion of an
+// out-of-range float is implementation-specific (MinInt64 on amd64), which
+// would turn one garbage value into a schema-violating negative.
+func floatToInt64(f float64) (int64, bool) {
+	if math.IsNaN(f) || f < math.MinInt64 || f >= math.MaxInt64 {
+		return 0, false
+	}
+	return int64(f), true
 }

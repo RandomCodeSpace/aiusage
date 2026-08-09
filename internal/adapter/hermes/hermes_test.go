@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -136,8 +137,9 @@ func TestCollectSingleSession(t *testing.T) {
 	if s.TotalTokens != 370 {
 		t.Errorf("Total = %d, want 370 (in+out+cacheC+cacheR; reasoning excluded)", s.TotalTokens)
 	}
-	if s.ObservedTime.IsZero() {
-		t.Errorf("ObservedTime is zero, want set to now")
+	// No ended_at in the fixture, so the record's started_at is the timestamp.
+	if want := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC); !s.ObservedTime.Equal(want) {
+		t.Errorf("ObservedTime = %v, want started_at %v", s.ObservedTime, want)
 	}
 	if !strings.Contains(s.Raw, `"billing_provider":"anthropic"`) {
 		t.Errorf("Raw missing billing_provider: %q", s.Raw)
@@ -183,6 +185,64 @@ func TestCollectFiltersBlankModelAndCountsRows(t *testing.T) {
 	}
 }
 
+// TestCollectUsesRecordTimestamps: ObservedTime must carry the row's real
+// timestamp — ended_at first, started_at as fallback, poll time only when the
+// row has neither — so a downtime gap's delta lands in the session's window,
+// not as a spike at the restart second. SQLite's zoneless datetime() layout
+// must parse too (taken as UTC).
+func TestCollectUsesRecordTimestamps(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, ".hermes")
+	makeStateDB(t, home, func(db *sql.DB) {
+		insert := func(id, startedAt, endedAt string) {
+			_, err := db.Exec(`INSERT INTO sessions
+				(id, model, billing_provider, started_at, ended_at,
+				 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)
+				VALUES (?,?,?,?,?,1,1,0,0,0)`, id, "model-t", "prov", startedAt, endedAt)
+			if err != nil {
+				t.Fatalf("insert session %s: %v", id, err)
+			}
+		}
+		insert("ended", "2026-05-29T10:00:00Z", "2026-05-29T12:34:56Z")
+		insert("ended-sqlite", "", "2026-05-29 12:34:56")
+		insert("live", "2026-05-29T10:00:00Z", "")
+		insert("bare", "", "")
+	})
+
+	before := time.Now().UTC().Add(-time.Second)
+	a := New()
+	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{Home: dir})
+	if err != nil || len(srcs) != 1 {
+		t.Fatalf("Discover: err=%v sources=%d", err, len(srcs))
+	}
+	obs, err := a.Collect(context.Background(), srcs[0])
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	byKey := map[string]model.AggregateSnapshot{}
+	for _, s := range obs.Snapshots {
+		byKey[s.Key] = s
+	}
+	if len(byKey) != 4 {
+		t.Fatalf("got %d snapshots, want 4", len(byKey))
+	}
+
+	endedAt := time.Date(2026, 5, 29, 12, 34, 56, 0, time.UTC)
+	if got := byKey["ended"].ObservedTime; !got.Equal(endedAt) {
+		t.Errorf("ended ObservedTime = %v, want ended_at %v", got, endedAt)
+	}
+	if got := byKey["ended-sqlite"].ObservedTime; !got.Equal(endedAt) {
+		t.Errorf("ended-sqlite ObservedTime = %v, want ended_at %v (SQLite layout, UTC)", got, endedAt)
+	}
+	startedAt := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
+	if got := byKey["live"].ObservedTime; !got.Equal(startedAt) {
+		t.Errorf("live ObservedTime = %v, want started_at %v", got, startedAt)
+	}
+	if got := byKey["bare"].ObservedTime; got.Before(before) {
+		t.Errorf("bare ObservedTime = %v, want poll-time fallback >= %v", got, before)
+	}
+}
+
 func TestDiscoverHonorsEnvOverride(t *testing.T) {
 	dir := t.TempDir()
 	envHome := filepath.Join(dir, "custom-hermes")
@@ -225,5 +285,41 @@ func TestCollectReadOnlyDoesNotCreateDB(t *testing.T) {
 	}
 	if _, statErr := os.Stat(missing); statErr == nil {
 		t.Fatalf("read-only Collect created the db file at %s", missing)
+	}
+}
+
+// TestCollectWALModeLiveDB: hermes keeps state.db open in WAL mode while we
+// poll. The read-only open must work against the live WAL file — immutable=1
+// gives documented wrong results on a concurrently-written DB and was dropped.
+func TestCollectWALModeLiveDB(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, ".hermes")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	dbPath := filepath.Join(home, dbName)
+	writer, err := sql.Open(driverName, "file:"+dbPath+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	defer writer.Close()
+	if _, err := writer.Exec(`CREATE TABLE sessions (
+		id TEXT PRIMARY KEY, model TEXT, billing_provider TEXT,
+		started_at TEXT, ended_at TEXT,
+		input_tokens INTEGER, output_tokens INTEGER,
+		cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER
+	)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	insertSession(t, writer, "live-1", "model-y", "prov", "", 7, 3, 0, 0, 0)
+
+	a := New()
+	src := adapter.Source{Tool: model.ToolHermes, Class: model.Aggregate, Path: dbPath}
+	obs, err := a.Collect(context.Background(), src)
+	if err != nil {
+		t.Fatalf("Collect against live WAL db: %v", err)
+	}
+	if len(obs.Snapshots) != 1 || obs.Snapshots[0].Key != "live-1" {
+		t.Fatalf("snapshots = %+v, want one for live-1", obs.Snapshots)
 	}
 }

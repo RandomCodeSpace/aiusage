@@ -152,13 +152,23 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		// (per the spec) not added into the authoritative total.
 		total := in + out + cCreate + cRead
 
+		// Prefer the row's real timestamps so a delta accrued while the daemon
+		// was down lands inside the session's window, not as a spike at the
+		// restart second: ended_at first, started_at next, poll time last.
+		obs := now
+		if ts := parseTime(endedAt.String); !ts.IsZero() {
+			obs = ts
+		} else if ts := parseTime(startedAt.String); !ts.IsZero() {
+			obs = ts
+		}
+
 		snaps = append(snaps, model.AggregateSnapshot{
 			Tool:                model.ToolHermes,
 			Key:                 id,
 			Model:               mdl,
 			SessionID:           id,
 			Project:             metaProject,
-			ObservedTime:        now,
+			ObservedTime:        obs,
 			InputTokens:         in,
 			OutputTokens:        out,
 			CacheCreationTokens: cCreate,
@@ -178,21 +188,37 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 	return adapter.Observation{Snapshots: snaps}, nil
 }
 
-// openReadOnly opens a SQLite database strictly read-only. The mode=ro DSN
-// prevents any write/create/lock; busy_timeout keeps a transient lock from
-// failing the poll.
+// openReadOnly opens a SQLite database strictly read-only. mode=ro prevents
+// create/write/lock; query_only additionally refuses any write statement on
+// the connection; busy_timeout keeps a transient lock from failing the poll.
+// immutable=1 is deliberately NOT used: state.db is written concurrently by
+// Hermes, and SQLite documents wrong results when an immutable-flagged file
+// changes — a stale read below the stored baseline trips the collector's
+// reset branch and re-adds the full current value as new usage, forever.
 func openReadOnly(path string) (*sql.DB, error) {
-	// immutable=1 (matching the opencode adapter) is required: opening a WAL-mode
-	// DB with mode=ro alone makes SQLite create -wal/-shm sidecar files in the
-	// agent's directory, which would breach the strictly-read-only guarantee.
-	// immutable=1 promises the file will not change under us and suppresses that.
-	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=busy_timeout(5000)", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path)
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	return db, nil
+}
+
+// parseTime tries RFC3339 (with and without nanoseconds) and SQLite's
+// datetime() layout, returning the zero time when the stamp is empty or
+// unparseable. A naked SQLite datetime carries no zone and is taken as UTC.
+func parseTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, time.DateTime} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 // rawJSON builds the audit blob carrying provider + start time. Built by hand

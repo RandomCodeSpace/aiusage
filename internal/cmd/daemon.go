@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
@@ -25,13 +27,31 @@ import (
 // blocks on the kernel lock, which a flock-based fake holds for the whole test).
 var stopDaemon = collect.StopDaemon
 
+// daemonArgs builds the argv for the spawned `self run`. The parent's
+// --db/--config/--home must be forwarded: dropped, the daemon resolves the
+// default config and collects into the default DB while the CLI reads the
+// flagged one.
+func daemonArgs(f globalFlags) []string {
+	args := []string{"run"}
+	if f.db != "" {
+		args = append(args, "--db", f.db)
+	}
+	if f.config != "" {
+		args = append(args, "--config", f.config)
+	}
+	if f.home != "" {
+		args = append(args, "--home", f.home)
+	}
+	return args
+}
+
 var spawnDaemon = func(cfg config.Config) error {
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
 
-	c := exec.Command(self, "run")
+	c := exec.Command(self, daemonArgs(flags)...)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	c.Stdin = nil
 
@@ -82,17 +102,62 @@ var spawnDaemon = func(cfg config.Config) error {
 // Version sync: if a daemon is running but was built from a different binary
 // than this CLI (detected via buildinfo.Identity vs the recorded daemon.version),
 // it is stopped and respawned so the collector always runs the same code as the
-// CLI that manages it. A daemon with no recorded version (older build) counts as
-// a mismatch and is restarted once.
-func ensureDaemon(cfg config.Config) error {
+// CLI that manages it — except for dev-stamp identities, which only get a notice
+// on warn (see restartOnMismatch). A daemon with no recorded version (older
+// build) counts as a mismatch and is restarted once.
+func ensureDaemon(cfg config.Config, warn io.Writer) error {
 	running, pid := collect.DaemonStatus(cfg)
-	if running {
-		if collect.ReadDaemonVersion(cfg) == buildinfo.Identity() {
-			return nil
+	if !running {
+		return spawnDaemon(cfg)
+	}
+	recorded := collect.ReadDaemonVersion(cfg)
+	self := buildinfo.Identity()
+	if recorded == self {
+		return nil
+	}
+	if !restartOnMismatch(recorded, self) {
+		// The old daemon holds the flock, so a bare `aiusage run` cannot
+		// replace it — the kill step is part of the advice. pid 0 means the
+		// pidfile was unreadable; `kill 0` signals the caller's own process
+		// group, so never advise it.
+		if pid > 0 {
+			fmt.Fprintf(warn, "notice: daemon build %s differs from CLI build %s; dev builds are not auto-restarted (kill %d, then run `aiusage run` to replace it)\n", recorded, self, pid)
+		} else {
+			fmt.Fprintf(warn, "notice: daemon build %s differs from CLI build %s; dev builds are not auto-restarted (stop the process holding %s.lock, then run `aiusage run` to replace it)\n", recorded, self, cfg.PIDPath)
 		}
-		if err := stopDaemon(cfg, pid); err != nil {
-			return fmt.Errorf("restart daemon after upgrade: %w", err)
+		return nil
+	}
+	if err := stopDaemon(cfg, pid); err != nil {
+		if pid > 0 {
+			return fmt.Errorf("daemon (pid %d, build %s) still running and collecting with the old build — stop it manually (kill %d): %w", pid, recorded, pid, err)
 		}
+		return fmt.Errorf("daemon (build %s) still running and collecting with the old build — stop the process holding %s.lock: %w", recorded, cfg.PIDPath, err)
 	}
 	return spawnDaemon(cfg)
+}
+
+// restartOnMismatch decides whether an identity mismatch between the recorded
+// daemon build and this CLI warrants an automatic stop+respawn.
+//
+// Release identities restart: an upgraded install must not leave an old
+// collector running. Dev identities ("dev", or the dev-<size>-<mtime>
+// executable stamp) never auto-restart: `go run` produces a fresh temp binary
+// every time, so acting on those mismatches flaps the daemon on each
+// invocation — a synchronous stop of up to 3s inside PersistentPreRunE plus an
+// immediate full collection cycle per respawn. A dev CLI meeting a release
+// daemon is left alone for the same reason (and a go-run temp executable is a
+// poor thing to respawn from: the path vanishes when the parent exits). An
+// unrecorded version ("") predates version stamping and restarts once so the
+// replacement daemon records one.
+func restartOnMismatch(recorded, self string) bool {
+	if recorded == "" {
+		return true
+	}
+	return !isDevIdentity(recorded) && !isDevIdentity(self)
+}
+
+// isDevIdentity reports whether id is an unstamped build identity: the literal
+// "dev" default or the dev-<size>-<mtime> executable fallback stamp.
+func isDevIdentity(id string) bool {
+	return id == "dev" || strings.HasPrefix(id, "dev-")
 }

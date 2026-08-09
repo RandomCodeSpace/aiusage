@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -348,5 +349,53 @@ func TestTimestampFallbackToMTime(t *testing.T) {
 	}
 	if evs[0].EventTime.IsZero() {
 		t.Error("event time should fall back to file mtime, got zero")
+	}
+}
+
+// TestNegativeTokenClamp verifies negative provider values are clamped to zero
+// so one corrupt record cannot violate the schema CHECK and poison its batch.
+func TestNegativeTokenClamp(t *testing.T) {
+	home := t.TempDir()
+	sess := filepath.Join(codexHome(home), "sessions", "neg.jsonl")
+	writeSession(t, sess, []string{
+		`{"type":"event_msg","timestamp":"2026-05-29T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":-500,"cached_input_tokens":-10,"output_tokens":200,"reasoning_output_tokens":-3,"total_tokens":-1}}}}`,
+	})
+
+	evs := collectAll(t, adapter.DiscoverConfig{Home: home})
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	e := evs[0]
+	for name, v := range map[string]int64{
+		"input": e.InputTokens, "output": e.OutputTokens,
+		"cacheCreation": e.CacheCreationTokens, "cacheRead": e.CacheReadTokens,
+		"reasoning": e.ReasoningTokens, "total": e.TotalTokens,
+	} {
+		if v < 0 {
+			t.Errorf("%s = %d, want >= 0", name, v)
+		}
+	}
+	if e.OutputTokens != 200 {
+		t.Errorf("output = %d, want 200", e.OutputTokens)
+	}
+	// Non-positive total falls back to clamped input+output = 0+200.
+	if e.TotalTokens != 200 {
+		t.Errorf("total = %d, want 200", e.TotalTokens)
+	}
+}
+
+// TestAsIntOutOfRangeRejected verifies floats outside int64 range are rejected
+// instead of converting to an implementation-specific value (MinInt64).
+func TestAsIntOutOfRangeRejected(t *testing.T) {
+	for _, raw := range []string{`1e300`, `-1e300`, `"1e300"`} {
+		if v, ok := asInt(json.RawMessage(raw)); ok {
+			t.Errorf("asInt(%s) = %d, ok=true; want rejected", raw, v)
+		}
+	}
+	if v, ok := asInt(json.RawMessage(`1.5`)); !ok || v != 1 {
+		t.Errorf("asInt(1.5) = %d,%v; want 1,true", v, ok)
+	}
+	if v, ok := asInt(json.RawMessage(`" 42 "`)); !ok || v != 42 {
+		t.Errorf(`asInt(" 42 ") = %d,%v; want 42,true`, v, ok)
 	}
 }

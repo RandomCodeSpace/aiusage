@@ -211,3 +211,32 @@ func TestDiscoverMissingDir(t *testing.T) {
 		t.Fatalf("want 0 sources for missing dir, got %d", len(srcs))
 	}
 }
+
+// TestDiscoverResolvesSymlinkedRoot: aggregate keys embed absolute file paths,
+// so a symlinked root must resolve to its target or a re-point would mint new
+// identities and re-add full cumulative totals.
+func TestDiscoverResolvesSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	writeFile(t, real, "s.jsonl", `{"id":"t1","model":"m","tokens":{"input":1,"output":1}}`+"\n")
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatalf("eval real root: %v", err)
+	}
+
+	a := New()
+	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{Overrides: map[string]string{toolID: link}})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(srcs) != 1 {
+		t.Fatalf("want 1 source, got %d", len(srcs))
+	}
+	if want := filepath.Join(resolved, "s.jsonl"); srcs[0].Path != want {
+		t.Errorf("Path = %q, want resolved %q", srcs[0].Path, want)
+	}
+}

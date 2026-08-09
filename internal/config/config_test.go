@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -245,6 +246,195 @@ func TestLoadIgnoresMalformedEnvInterval(t *testing.T) {
 	if cfg.IntervalSeconds != defaultInterval {
 		t.Errorf("IntervalSeconds = %d, want default %d", cfg.IntervalSeconds, defaultInterval)
 	}
+}
+
+// TestLoadRejectsUnknownConfigKeys: a typoed key must fail loudly (naming the
+// key), not silently leave the default in place.
+func TestLoadRejectsUnknownConfigKeys(t *testing.T) {
+	clearXDG(t)
+	t.Setenv("HOME", t.TempDir())
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeJSON(t, path, map[string]any{"db_pth": "/typo/usage.db"})
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(unknown key) error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "db_pth") {
+		t.Fatalf("error does not name the unknown key: %v", err)
+	}
+}
+
+// TestHomeOverrideDerivation is the derivation table: an overridden home (file
+// or env) moves DBPath/PIDPath/LogPath with it, unless a path was explicitly
+// overridden (file/env pin it) or an absolute XDG_*_HOME env dir claims it.
+func TestHomeOverrideDerivation(t *testing.T) {
+	realHome := t.TempDir()
+	override := t.TempDir()
+	stateDir := t.TempDir()
+
+	derivedDB := filepath.Join(override, ".local", "share", "aiusage", "usage.db")
+	derivedPID := filepath.Join(override, ".local", "state", "aiusage", "aiusage.pid")
+	derivedLog := filepath.Join(override, ".local", "state", "aiusage", "aiusage.log")
+
+	tests := []struct {
+		name                     string
+		file                     map[string]any
+		env                      map[string]string
+		wantDB, wantPID, wantLog string
+	}{
+		{
+			name:    "no override keeps real-home defaults",
+			wantDB:  filepath.Join(realHome, ".local", "share", "aiusage", "usage.db"),
+			wantPID: filepath.Join(realHome, ".local", "state", "aiusage", "aiusage.pid"),
+			wantLog: filepath.Join(realHome, ".local", "state", "aiusage", "aiusage.log"),
+		},
+		{
+			name:    "env home moves all derived paths",
+			env:     map[string]string{"AIUSAGE_HOME": override},
+			wantDB:  derivedDB,
+			wantPID: derivedPID,
+			wantLog: derivedLog,
+		},
+		{
+			name:    "file home moves all derived paths",
+			file:    map[string]any{"home": override},
+			wantDB:  derivedDB,
+			wantPID: derivedPID,
+			wantLog: derivedLog,
+		},
+		{
+			name:    "explicit env DB stays pinned",
+			env:     map[string]string{"AIUSAGE_HOME": override, "AIUSAGE_DB": "/pinned/usage.db"},
+			wantDB:  "/pinned/usage.db",
+			wantPID: derivedPID,
+			wantLog: derivedLog,
+		},
+		{
+			name:    "explicit file pid_path stays pinned",
+			file:    map[string]any{"home": override, "pid_path": "/pinned/aiusage.pid"},
+			wantDB:  derivedDB,
+			wantPID: "/pinned/aiusage.pid",
+			wantLog: derivedLog,
+		},
+		{
+			name:    "absolute XDG_STATE_HOME wins over home derivation",
+			env:     map[string]string{"AIUSAGE_HOME": override, "XDG_STATE_HOME": stateDir},
+			wantDB:  derivedDB,
+			wantPID: filepath.Join(stateDir, "aiusage", "aiusage.pid"),
+			wantLog: filepath.Join(stateDir, "aiusage", "aiusage.log"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearXDG(t)
+			t.Setenv("HOME", realHome)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			path := ""
+			if tc.file != nil {
+				path = filepath.Join(t.TempDir(), "config.json")
+				writeJSON(t, path, tc.file)
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load error = %v", err)
+			}
+			if cfg.DBPath != tc.wantDB {
+				t.Errorf("DBPath = %q, want %q", cfg.DBPath, tc.wantDB)
+			}
+			if cfg.PIDPath != tc.wantPID {
+				t.Errorf("PIDPath = %q, want %q", cfg.PIDPath, tc.wantPID)
+			}
+			if cfg.LogPath != tc.wantLog {
+				t.Errorf("LogPath = %q, want %q", cfg.LogPath, tc.wantLog)
+			}
+		})
+	}
+}
+
+// TestSetHomeRespectsExplicitOverrides: SetHome (the --home flag path) moves
+// only still-derived paths.
+func TestSetHomeRespectsExplicitOverrides(t *testing.T) {
+	clearXDG(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AIUSAGE_DB", "/pinned/usage.db")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load error = %v", err)
+	}
+
+	home := t.TempDir()
+	cfg.SetHome(home)
+
+	if cfg.Home != home {
+		t.Errorf("Home = %q, want %q", cfg.Home, home)
+	}
+	if cfg.DBPath != "/pinned/usage.db" {
+		t.Errorf("DBPath = %q, want pinned /pinned/usage.db", cfg.DBPath)
+	}
+	if want := filepath.Join(home, ".local", "state", "aiusage", "aiusage.pid"); cfg.PIDPath != want {
+		t.Errorf("PIDPath = %q, want %q", cfg.PIDPath, want)
+	}
+	if want := filepath.Join(home, ".local", "state", "aiusage", "aiusage.log"); cfg.LogPath != want {
+		t.Errorf("LogPath = %q, want %q", cfg.LogPath, want)
+	}
+}
+
+// TestLoadResolvesRelativeEnvDB: a relative AIUSAGE_DB resolves against the
+// config's home (env home when set, real home otherwise), never the process
+// cwd — the CLI and the daemon it spawns must agree on the target.
+func TestLoadResolvesRelativeEnvDB(t *testing.T) {
+	t.Run("against env home", func(t *testing.T) {
+		clearXDG(t)
+		t.Setenv("HOME", t.TempDir())
+		override := t.TempDir()
+		t.Setenv("AIUSAGE_HOME", override)
+		t.Setenv("AIUSAGE_DB", "sub/usage.db")
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("Load error = %v", err)
+		}
+		if want := filepath.Join(override, "sub", "usage.db"); cfg.DBPath != want {
+			t.Errorf("DBPath = %q, want %q", cfg.DBPath, want)
+		}
+	})
+
+	t.Run("against real home", func(t *testing.T) {
+		clearXDG(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("AIUSAGE_DB", "sub/usage.db")
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("Load error = %v", err)
+		}
+		if want := filepath.Join(home, "sub", "usage.db"); cfg.DBPath != want {
+			t.Errorf("DBPath = %q, want %q", cfg.DBPath, want)
+		}
+	})
+
+	t.Run("absolute stays verbatim", func(t *testing.T) {
+		clearXDG(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("AIUSAGE_DB", "/abs/usage.db")
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("Load error = %v", err)
+		}
+		if cfg.DBPath != "/abs/usage.db" {
+			t.Errorf("DBPath = %q, want /abs/usage.db", cfg.DBPath)
+		}
+	})
 }
 
 func TestLoadMalformedFileErrors(t *testing.T) {

@@ -97,6 +97,13 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		if root == "" || !isDir(root) {
 			continue
 		}
+		// Aggregate keys embed absolute file paths, so resolve symlinks: a
+		// re-pointed root would otherwise mint new identities and re-add full
+		// cumulative totals. A genuinely moved root still re-adds once —
+		// irreducible without state migration.
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
 		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil // skip unreadable entries, keep walking

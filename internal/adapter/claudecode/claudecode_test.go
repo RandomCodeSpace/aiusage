@@ -160,3 +160,36 @@ func TestDiscoverSkipsRootWithoutProjects(t *testing.T) {
 		t.Fatalf("want 0 sources (no projects/ dir), got %d", len(srcs))
 	}
 }
+
+// TestDiscoverResolvesSymlinkedRoot: the no-message-id dedup fallback embeds
+// transcript paths, so a symlinked config root must resolve to its target or a
+// re-point would mint new keys for those lines.
+func TestDiscoverResolvesSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, "projects"), 0o755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatalf("eval real root: %v", err)
+	}
+
+	a := New()
+	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{
+		Overrides: map[string]string{model.ToolClaudeCode: link},
+	})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(srcs) != 1 {
+		t.Fatalf("want 1 source, got %d", len(srcs))
+	}
+	if srcs[0].Path != resolved {
+		t.Errorf("Path = %q, want resolved %q", srcs[0].Path, resolved)
+	}
+}

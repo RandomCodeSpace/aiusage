@@ -266,9 +266,29 @@ func satSub(a, b int64) int64 {
 	return 0
 }
 
-// buildEvent maps raw tokens (cached ⊆ input) onto a UsageEvent. Returns ok=false
-// for all-zero records.
+// clamped floors every field at zero. A negative provider value would violate
+// the schema CHECK and poison the insert batch it rides in.
+func (r rawTokens) clamped() rawTokens {
+	return rawTokens{
+		input:     nonNeg(r.input),
+		cached:    nonNeg(r.cached),
+		output:    nonNeg(r.output),
+		reasoning: nonNeg(r.reasoning),
+		total:     nonNeg(r.total),
+	}
+}
+
+func nonNeg(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// buildEvent maps raw tokens (cached ⊆ input) onto a UsageEvent. Negative
+// components are clamped to zero first. Returns ok=false for all-zero records.
 func buildEvent(t rawTokens, mdl, session, path string, when time.Time) (model.UsageEvent, bool) {
+	t = t.clamped()
 	cached := t.cached
 	if cached > t.input {
 		cached = t.input // clamp: cached must be a subset of input

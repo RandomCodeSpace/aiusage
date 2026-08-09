@@ -2,10 +2,12 @@ package copilot
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/model"
@@ -278,5 +280,61 @@ func TestZeroTokenRecordDropped(t *testing.T) {
 	evs := collectAll(t, home)
 	if len(evs) != 0 {
 		t.Fatalf("want 0 events (no tokens), got %d", len(evs))
+	}
+}
+
+// TestTimestampLessDedupStableAcrossPolls: a record carrying no timestamp
+// fields must keep the same dedup key when the file mtime advances — the OTEL
+// file's mtime moves on every append, and an mtime-derived key would recount
+// the record each poll.
+func TestTimestampLessDedupStableAcrossPolls(t *testing.T) {
+	recA := `{"_body":"GenAI inference: m1","attributes":{` +
+		`"event.name":"gen_ai.client.inference.operation.details",` +
+		`"gen_ai.response.model":"m1","gen_ai.conversation.id":"c1",` +
+		`"gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":5}}`
+	recB := `{"_body":"GenAI inference: m1","attributes":{` +
+		`"event.name":"gen_ai.client.inference.operation.details",` +
+		`"gen_ai.response.model":"m1","gen_ai.conversation.id":"c1",` +
+		`"gen_ai.usage.input_tokens":99,"gen_ai.usage.output_tokens":7}}`
+	home := writeOTEL(t, recA, recB)
+
+	evs1 := collectAll(t, home)
+	if len(evs1) != 2 {
+		t.Fatalf("want 2 events, got %d", len(evs1))
+	}
+	if evs1[0].DedupKey == evs1[1].DedupKey {
+		t.Fatalf("distinct records share dedup key %q", evs1[0].DedupKey)
+	}
+
+	// Advance the file mtime — what a later poll of an appended-to file sees.
+	path := filepath.Join(home, ".copilot", "otel", "copilot.jsonl")
+	later := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	evs2 := collectAll(t, home)
+	if len(evs2) != 2 {
+		t.Fatalf("want 2 events after mtime change, got %d", len(evs2))
+	}
+	for i := range evs1 {
+		if evs1[i].DedupKey != evs2[i].DedupKey {
+			t.Errorf("event %d dedup key changed across polls: %q -> %q",
+				i, evs1[i].DedupKey, evs2[i].DedupKey)
+		}
+	}
+}
+
+// TestNumberValueOverflowRejected verifies floats at or above MaxInt64 are
+// rejected instead of converting to an implementation-specific value.
+func TestNumberValueOverflowRejected(t *testing.T) {
+	if v, ok := numberValue(float64(1e300)); ok {
+		t.Errorf("numberValue(1e300) = %d, ok=true; want rejected", v)
+	}
+	if v, ok := numberValue(json.Number("1e300")); ok {
+		t.Errorf(`numberValue(json.Number("1e300")) = %d, ok=true; want rejected`, v)
+	}
+	if v, ok := numberValue(float64(12)); !ok || v != 12 {
+		t.Errorf("numberValue(12) = %d,%v; want 12,true", v, ok)
 	}
 }

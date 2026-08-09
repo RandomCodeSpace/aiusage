@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,10 +31,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeStore struct {
-	mu     sync.Mutex
-	dedup  map[string]struct{}
-	events []model.UsageEvent
-	state  map[string]model.AggregateSnapshot // key: tool|key
+	mu      sync.Mutex
+	dedup   map[string]struct{}
+	events  []model.UsageEvent
+	state   map[string]model.AggregateSnapshot // key: tool|key
+	upserts int                                // standalone UpsertState calls (snapshot path must not use it)
 }
 
 var _ store.Store = (*fakeStore)(nil)
@@ -48,6 +50,10 @@ func newFakeStore() *fakeStore {
 func (s *fakeStore) InsertEvents(_ context.Context, events []model.UsageEvent) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.insertLocked(events)
+}
+
+func (s *fakeStore) insertLocked(events []model.UsageEvent) (int, error) {
 	inserted := 0
 	for _, e := range events {
 		if e.DedupKey == "" {
@@ -76,8 +82,24 @@ func (s *fakeStore) LastState(_ context.Context, tool, key string) (*model.Aggre
 func (s *fakeStore) UpsertState(_ context.Context, st model.AggregateSnapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.upserts++
 	s.state[st.Tool+"|"+st.Key] = st
 	return nil
+}
+
+// ApplySnapshot mirrors the SQLite contract: events + state land together, and
+// a fully-collided insert leaves the baseline untouched.
+func (s *fakeStore) ApplySnapshot(_ context.Context, events []model.UsageEvent, st model.AggregateSnapshot) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inserted, err := s.insertLocked(events)
+	if err != nil {
+		return 0, err
+	}
+	if len(events) == 0 || inserted > 0 {
+		s.state[st.Tool+"|"+st.Key] = st
+	}
+	return inserted, nil
 }
 
 // Summarize sums total_tokens over events whose EventTime is in [Since, Until).
@@ -413,6 +435,131 @@ func TestAggregateInvariantMonotonicWithReset(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// (e) atomic snapshot apply: crash window must not double count.
+// ---------------------------------------------------------------------------
+
+// crashStore wraps fakeStore and fails ApplySnapshot once, persisting nothing —
+// the transactional equivalent of the old crash between the committed event
+// insert and the separate state upsert.
+type crashStore struct {
+	*fakeStore
+	fail bool
+}
+
+func (s *crashStore) ApplySnapshot(ctx context.Context, events []model.UsageEvent, st model.AggregateSnapshot) (int, error) {
+	if s.fail {
+		s.fail = false
+		return 0, errors.New("injected crash")
+	}
+	return s.fakeStore.ApplySnapshot(ctx, events, st)
+}
+
+// TestSnapshotCrashWindowNoDoubleCount drives the collector through a failed
+// snapshot apply. The old two-step write committed the delta event, crashed
+// before the state upsert, and the next cycle re-derived the same delta under
+// a fresh nano dedup key — a permanent double count. With the atomic apply the
+// failed cycle persists nothing and the retry lands the delta exactly once.
+func TestSnapshotCrashWindowNoDoubleCount(t *testing.T) {
+	ad := &fakeAdapter{
+		id: model.ToolHermes, class: model.Aggregate,
+		emit: func(int) adapter.Observation {
+			return adapter.Observation{Snapshots: []model.AggregateSnapshot{{
+				Tool: model.ToolHermes, Key: "cell", SessionID: "cell",
+				InputTokens: 900_000, TotalTokens: 900_000,
+			}}}
+		},
+	}
+	reg := adapter.NewRegistry(ad)
+	st := &crashStore{fakeStore: newFakeStore(), fail: true}
+	ctx := context.Background()
+
+	clock := refDay.Add(6 * time.Hour)
+	restore := setNow(func() time.Time { return clock })
+	defer restore()
+
+	stats, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+	if err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	if len(stats.Errors) == 0 {
+		t.Fatalf("crashed apply should surface a non-fatal error")
+	}
+	if got := windowTotal(t, st.fakeStore, time.Time{}, time.Time{}); got != 0 {
+		t.Fatalf("crashed cycle persisted %d tokens, want 0 (atomic rollback)", got)
+	}
+	if v, _ := st.LastState(ctx, model.ToolHermes, "cell"); v != nil {
+		t.Fatalf("crashed cycle advanced state: %+v", v)
+	}
+
+	clock = clock.Add(time.Minute)
+	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if got := windowTotal(t, st.fakeStore, time.Time{}, time.Time{}); got != 900_000 {
+		t.Fatalf("total=%d want exactly 900,000 (no double count)", got)
+	}
+	if st.upserts != 0 {
+		t.Fatalf("snapshot path called UpsertState %d times; state must only advance inside ApplySnapshot", st.upserts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (f) AllFailed: the exit-code contract for `once`.
+// ---------------------------------------------------------------------------
+
+func TestRunCycleAllFailed(t *testing.T) {
+	bad := &fakeAdapter{
+		id: model.ToolCodex, class: model.EventLevel,
+		collectErr: errors.New("boom"),
+		emit:       func(int) adapter.Observation { return adapter.Observation{} },
+	}
+	stats, err := RunCycle(context.Background(), adapter.NewRegistry(bad), newFakeStore(), adapter.DiscoverConfig{})
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if stats.SourcesFailed != 1 {
+		t.Fatalf("SourcesFailed=%d want 1", stats.SourcesFailed)
+	}
+	if !stats.AllFailed() {
+		t.Fatalf("every source failed but AllFailed=false: %+v", stats)
+	}
+}
+
+func TestRunCyclePartialFailureNotAllFailed(t *testing.T) {
+	bad := &fakeAdapter{
+		id: model.ToolCodex, class: model.EventLevel,
+		collectErr: errors.New("boom"),
+		emit:       func(int) adapter.Observation { return adapter.Observation{} },
+	}
+	good := &fakeAdapter{
+		id: model.ToolClaudeCode, class: model.EventLevel,
+		emit: func(int) adapter.Observation {
+			return adapter.Observation{Events: []model.UsageEvent{{
+				Tool: model.ToolClaudeCode, EventTime: refDay.Add(6 * time.Hour),
+				TotalTokens: 10, DedupKey: "cc|partial-1", Kind: model.KindUsage,
+			}}}
+		},
+	}
+	stats, err := RunCycle(context.Background(), adapter.NewRegistry(bad, good), newFakeStore(), adapter.DiscoverConfig{})
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if len(stats.Errors) == 0 {
+		t.Fatalf("expected the bad source's error to stay visible")
+	}
+	if stats.AllFailed() {
+		t.Fatalf("partial failure reported as all-failed: %+v", stats)
+	}
+}
+
+func TestRunCycleNoErrorsNotAllFailed(t *testing.T) {
+	var stats CycleStats
+	if stats.AllFailed() {
+		t.Fatalf("empty cycle (no sources, no errors) must not report all-failed")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // daemon: single-instance lock + immediate first cycle + graceful stop.
 // ---------------------------------------------------------------------------
 
@@ -470,6 +617,71 @@ func TestRunDaemonSingleInstanceAndImmediateCycle(t *testing.T) {
 	}
 }
 
+// TestAcquireCollectionLockContention proves a one-shot cycle cannot interleave
+// with a lock-holding daemon (the cross-process aggregate double count), gets an
+// actionable error, and that the lock is usable again after release — in both
+// directions.
+func TestAcquireCollectionLockContention(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "aiusage.pid")
+
+	daemonLock, err := acquireLock(pidPath)
+	if err != nil {
+		t.Fatalf("daemon lock: %v", err)
+	}
+
+	if _, err := AcquireCollectionLock(pidPath, "v-test"); err == nil {
+		t.Fatalf("one-shot acquired the lock while the daemon holds it")
+	} else if !strings.Contains(err.Error(), "already collecting") {
+		t.Fatalf("contention error not actionable: %v", err)
+	}
+
+	daemonLock.release(log.New(discard{}, "", 0))
+
+	release, err := AcquireCollectionLock(pidPath, "v-test")
+	if err != nil {
+		t.Fatalf("lock after daemon release: %v", err)
+	}
+	// While `once` holds the lock, a starting daemon must fail fast too.
+	if _, err := acquireLock(pidPath); err == nil {
+		t.Fatalf("daemon acquired the lock while a one-shot holds it")
+	}
+	release()
+
+	lock, err := acquireLock(pidPath)
+	if err != nil {
+		t.Fatalf("daemon lock after one-shot release: %v", err)
+	}
+	lock.release(log.New(discard{}, "", 0))
+}
+
+// TestAcquireCollectionLockStampsIdentity: while a one-shot holds the
+// collection lock it is indistinguishable from a running daemon (same flock),
+// so it must stamp its own pid + build identity — otherwise a concurrent
+// ensureDaemon reads an unrecorded version and force-restarts against a stale
+// pid. Both stamps must be gone after release.
+func TestAcquireCollectionLockStampsIdentity(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "aiusage.pid")
+
+	release, err := AcquireCollectionLock(pidPath, "v-test")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if got := readPID(pidPath); got != os.Getpid() {
+		t.Errorf("pidfile pid = %d, want own pid %d", got, os.Getpid())
+	}
+	if data, err := os.ReadFile(daemonVersionPath(pidPath)); err != nil || string(data) != "v-test" {
+		t.Errorf("recorded version = %q (err=%v), want v-test", data, err)
+	}
+
+	release()
+	if fileExists(pidPath) {
+		t.Errorf("pidfile %s not removed on release", pidPath)
+	}
+	if fileExists(daemonVersionPath(pidPath)) {
+		t.Errorf("version stamp %s not removed on release", daemonVersionPath(pidPath))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -503,4 +715,48 @@ func setNow(fn func() time.Time) func() {
 	prev := nowFn
 	nowFn = fn
 	return func() { nowFn = prev }
+}
+
+// TestSyntheticEventKeepsRecordTime: an adapter-populated snapshot timestamp
+// becomes the synthetic event's EventTime (a downtime gap's delta must not
+// land as a spike at the restart second); the cycle instant is only the
+// fallback and always stamps ObservedTime.
+func TestSyntheticEventKeepsRecordTime(t *testing.T) {
+	recorded := refDay.Add(2 * time.Hour)
+	cycle := refDay.Add(9 * time.Hour)
+	restore := setNow(func() time.Time { return cycle })
+	defer restore()
+
+	ad := &fakeAdapter{
+		id: model.ToolHermes, class: model.Aggregate,
+		emit: func(int) adapter.Observation {
+			return adapter.Observation{Snapshots: []model.AggregateSnapshot{
+				{Tool: model.ToolHermes, Key: "with-ts", SessionID: "with-ts",
+					ObservedTime: recorded, InputTokens: 10, TotalTokens: 10},
+				{Tool: model.ToolHermes, Key: "no-ts", SessionID: "no-ts",
+					InputTokens: 5, TotalTokens: 5},
+			}}
+		},
+	}
+	st := newFakeStore()
+	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	evs, _ := st.ListEvents(context.Background(), store.Filter{})
+	if len(evs) != 2 {
+		t.Fatalf("stored %d events, want 2", len(evs))
+	}
+	byKey := map[string]model.UsageEvent{}
+	for _, e := range evs {
+		byKey[e.SessionID] = e
+	}
+	if got := byKey["with-ts"].EventTime; !got.Equal(recorded) {
+		t.Errorf("EventTime = %v, want record time %v", got, recorded)
+	}
+	if got := byKey["with-ts"].ObservedTime; !got.Equal(cycle) {
+		t.Errorf("ObservedTime = %v, want cycle time %v", got, cycle)
+	}
+	if got := byKey["no-ts"].EventTime; !got.Equal(cycle) {
+		t.Errorf("fallback EventTime = %v, want cycle time %v", got, cycle)
+	}
 }
