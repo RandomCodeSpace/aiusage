@@ -225,6 +225,11 @@ func openStore(cfg config.Config) (store.Store, error) {
 }
 
 // discoverConfig builds the adapter DiscoverConfig from the resolved config.
+// discoveryBudget caps the startup discovery sweep. It is generous enough for a
+// cold cache on a large home directory and short enough that a hung or
+// unreachable source root cannot keep the dashboard from opening.
+const discoveryBudget = 2 * time.Second
+
 func discoverConfig(cfg config.Config) adapter.DiscoverConfig {
 	return adapter.DiscoverConfig{Home: cfg.Home, Overrides: cfg.SourceRoots}
 }
@@ -237,13 +242,22 @@ func discoverConfig(cfg config.Config) adapter.DiscoverConfig {
 // internal/tui must not import internal/adapter.
 //
 // An adapter whose discovery ERRORS is left out of the map entirely: unknown is
-// not zero, and a failed glob must not be reported as an absent source.
+// not zero, and a failed glob must not be reported as an absent source. A
+// discovery cut short by the deadline below is an error for this purpose, so a
+// slow home directory yields "unknown" rather than a false "no data source".
+//
+// Discovery walks the filesystem, so it is bounded: the dashboard's contract is
+// that nothing blocks the first frame, and this runs before it. Whatever has
+// not answered by then is simply unknown, which every caller already handles.
 func discoveredSources(ctx context.Context, cfg config.Config) map[string]int {
+	ctx, cancel := context.WithTimeout(ctx, discoveryBudget)
+	defer cancel()
+
 	dc := discoverConfig(cfg)
 	out := make(map[string]int)
 	for _, ad := range defaultRegistry().All() {
 		srcs, err := ad.Discover(ctx, dc)
-		if err != nil {
+		if err != nil || ctx.Err() != nil {
 			continue
 		}
 		out[ad.ID()] = len(srcs)
