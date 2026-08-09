@@ -323,6 +323,49 @@ func TestDaemonArgsForwardsFlags(t *testing.T) {
 	}
 }
 
+// TestDaemonArgsAbsolutizesConfigPath covers the working-directory split: the
+// CLI resolves a relative --config against the shell the user is standing in,
+// while the daemon it spawns keeps whatever CWD it inherited. Forwarded
+// verbatim the two processes read DIFFERENT files - and since config.Load
+// anchors the relative paths written inside a config file to that file's own
+// directory, they would then disagree about the database as well. The failure
+// is silent, because a missing config file is not an error: the daemon would
+// quietly collect into the default DB while the CLI reports on the configured
+// one. So the forwarded value must be absolute.
+func TestDaemonArgsAbsolutizesConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	// Read the CWD back rather than trusting dir: Getwd reports the resolved
+	// path, and filepath.Abs builds on exactly that.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	got := daemonArgs(globalFlags{config: filepath.Join("cfg", "aiusage.json")})
+	idx := indexOf(got, "--config")
+	if idx < 0 || idx+1 >= len(got) {
+		t.Fatalf("daemonArgs = %v, want a forwarded --config with its value", got)
+	}
+	if value := got[idx+1]; !filepath.IsAbs(value) {
+		t.Fatalf("--config forwarded as %q: a relative path resolves against the daemon's CWD, not the CLI's", value)
+	} else if want := filepath.Join(wd, "cfg", "aiusage.json"); value != want {
+		t.Errorf("--config = %q, want %q", value, want)
+	}
+
+	// An already-absolute path is the common case and must pass through
+	// unchanged, so the daemon still receives the exact file the user named.
+	abs := filepath.Join(dir, "explicit.json")
+	got = daemonArgs(globalFlags{config: abs})
+	idx = indexOf(got, "--config")
+	if idx < 0 || idx+1 >= len(got) {
+		t.Fatalf("daemonArgs = %v, want a forwarded --config with its value", got)
+	}
+	if value := got[idx+1]; value != abs {
+		t.Errorf("--config = %q, want the untouched %q", value, abs)
+	}
+}
+
 // flagRole classifies one globalFlags field for the spawned-daemon argv.
 type flagRole struct {
 	flag      string // persistent flag bound to the field

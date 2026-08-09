@@ -381,11 +381,73 @@ func TestOpenUnstampedLegacyTableRefused(t *testing.T) {
 			t.Errorf("refusal %q does not name %s", err, want)
 		}
 	}
+	// The table is empty, so the interrupted-first-run recovery applies and the
+	// message may say so.
+	if !strings.Contains(err.Error(), "delete it") {
+		t.Errorf("refusal for an empty half-created database withholds the recovery: %v", err)
+	}
 
 	raw := rawDB(t, path)
 	v, err := readSchemaVersion(ctx, raw)
 	if err != nil || v != 0 {
 		t.Fatalf("post-refusal version=%d err=%v want 0,nil (a short table must not be stamped)", v, err)
+	}
+}
+
+// TestOpenUnstampedLegacyTableWithRowsKeepsTheFile is the counterpart refusal:
+// the same short, unstamped usage_events, but holding a committed event. The
+// "delete it" recovery is only correct for an interrupted first run, and an
+// unstamped table with rows in it is not one, so the message must refuse
+// without advising deletion - the ledger is append-only and the file is the
+// only copy of it.
+func TestOpenUnstampedLegacyTableWithRowsKeepsTheFile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "usage.db")
+	db := rawDB(t, path)
+	if _, err := db.Exec(legacyDBSchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO usage_events (dedup_key, tool, model, event_time_unix, observed_time_unix,
+			input_tokens, output_tokens, total_tokens)
+		VALUES ('unstamped-1', ?, 'claude-sonnet-4-6', 1750000000, 1750000000, 10, 20, 30)`,
+		model.ToolClaudeCode); err != nil {
+		t.Fatalf("seed unstamped row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	st, err := Open(path)
+	if err == nil {
+		st.Close()
+		t.Fatalf("expected refusal opening an unstamped pre-v3 database")
+	}
+	msg := err.Error()
+	for _, want := range []string{"provider", "cost_micro_usd", path, "do NOT delete it"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not mention %s", msg, want)
+		}
+	}
+	// The destructive advice belongs to the empty case only.
+	for _, unwanted := range []string{"delete it (", "interrupted first run"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("refusal advises %q for a database holding events: %s", unwanted, msg)
+		}
+	}
+
+	// The refusal must not have touched the file it told the user to keep.
+	raw := rawDB(t, path)
+	v, err := readSchemaVersion(ctx, raw)
+	if err != nil || v != 0 {
+		t.Fatalf("post-refusal version=%d err=%v want 0,nil (a short table must not be stamped)", v, err)
+	}
+	var n int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM usage_events`).Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rows after refusal = %d, want the seeded 1", n)
 	}
 }
 

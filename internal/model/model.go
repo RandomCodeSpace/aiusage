@@ -155,8 +155,15 @@ type UsageEvent struct {
 	// a stamped 0 would claim the request was free.
 	CostMicroUSD *int64
 	// PriceSource names the table that produced CostMicroUSD ("override",
-	// "litellm-<fetch date>", "embedded-<snapshot date>"). Empty when unpriced,
-	// so a later correction knows which table it corrects.
+	// "litellm-<fetch date>", "embedded-<snapshot date>"), or the "+"-joined
+	// composite of the tables that produced it together
+	// ("override+litellm-<fetch date>") when a partial override was completed
+	// from the rung it displaced. Empty when unpriced, so a later correction
+	// knows which table it corrects.
+	//
+	// The vocabulary is open: the value is stored, exported and displayed
+	// verbatim and nothing parses it, so a new rung or a new composite may
+	// appear without a schema change. Treat it as an opaque label.
 	PriceSource string
 
 	RequestID  string // provider request id (if any)

@@ -38,6 +38,15 @@ var stopDaemon = collect.StopDaemon
 // through unclamped; the child re-clamps it in loadConfig exactly as the parent
 // did, so both ends land on the same value.
 //
+// --config is absolutized first. A relative one means "relative to the shell
+// the user is standing in", and the child does not inherit that: it keeps the
+// CWD it was spawned with. Forwarded verbatim it would resolve to a different
+// file - and config.Load anchors every relative path IN that file to the
+// directory holding it, so the two processes would disagree about the database
+// as well. Worse, mergeFile treats a missing config as "use the defaults", so
+// the miss is silent: the daemon would collect into the default DB while the
+// CLI reports on the configured one, with no error at either end.
+//
 // TestDaemonArgsCoversEveryPersistentFlag enumerates globalFlags and fails on
 // any field this function has not been taught about.
 func daemonArgs(f globalFlags) []string {
@@ -46,7 +55,7 @@ func daemonArgs(f globalFlags) []string {
 		args = append(args, "--db", f.db)
 	}
 	if f.config != "" {
-		args = append(args, "--config", f.config)
+		args = append(args, "--config", absPath(f.config))
 	}
 	if f.home != "" {
 		args = append(args, "--home", f.home)
@@ -55,6 +64,18 @@ func daemonArgs(f globalFlags) []string {
 		args = append(args, "--interval", strconv.Itoa(f.interval))
 	}
 	return args
+}
+
+// absPath resolves p against the current working directory. A path that cannot
+// be resolved (Getwd failed) is returned unchanged: forwarding the user's own
+// spelling is no worse than what we had, and refusing to spawn a daemon over it
+// would be.
+func absPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
 }
 
 // maxDaemonLogBytes caps the daemon log: persistent per-source errors repeat

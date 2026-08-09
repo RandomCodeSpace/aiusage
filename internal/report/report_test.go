@@ -203,32 +203,87 @@ func TestWriteSummaryJSONMatchesTableCost(t *testing.T) {
 // TestWriteSummaryJSONUnpricedIsNotZero checks the third state survives the
 // JSON surface: a bucket nothing could price reports CostKnown=false, so a
 // consumer cannot read its 0 as a free request (the table prints "-").
+//
+// Asserting only that is worthless, because a payload MISSING the cost keys
+// unmarshals into exactly the false/0 the unpriced bucket wants. So the summary
+// carries a second, priceable bucket whose keys must come back non-zero and
+// known, and the raw document is checked for the key names before anything is
+// decoded into a struct that would invent them.
 func TestWriteSummaryJSONUnpricedIsNotZero(t *testing.T) {
 	sum := &store.Summary{
 		GroupBy: []string{"tool"},
 		Buckets: []store.Bucket{
 			{Keys: map[string]string{"tool": model.ToolCopilot}, Events: 4, UnpricedEvents: 4},
+			{Keys: map[string]string{"tool": model.ToolCodex}, Events: 1, UnpricedEvents: 1},
 		},
-		Totals: store.Bucket{Events: 4, UnpricedEvents: 4},
+		Totals: store.Bucket{Events: 5, UnpricedEvents: 5},
 	}
-	groups := []store.UnpricedGroup{{
-		Keys:  map[string]string{"tool": model.ToolCopilot},
-		Tool:  model.ToolCopilot,
-		Model: "mystery-model",
-		Input: 9_999,
-	}}
+	groups := []store.UnpricedGroup{
+		{
+			Keys:   map[string]string{"tool": model.ToolCopilot},
+			Tool:   model.ToolCopilot,
+			Model:  "mystery-model",
+			Events: 4,
+			Input:  9_999,
+		},
+		{
+			Keys:   map[string]string{"tool": model.ToolCodex},
+			Tool:   model.ToolCodex,
+			Model:  "gpt-5",
+			Events: 1,
+			Input:  700,
+		},
+	}
 	costs := ResolveCosts(sum, groups, fixedPricer{miss: map[string]bool{"mystery-model": true}})
+	if costs.Buckets[1].MicroUSD == 0 || !costs.Buckets[1].Known {
+		t.Fatalf("test setup: the priceable bucket resolved to %+v, which cannot tell an absent key apart", costs.Buckets[1])
+	}
 
 	var buf bytes.Buffer
 	if err := WriteSummaryJSON(&buf, sum, costs); err != nil {
 		t.Fatalf("WriteSummaryJSON: %v", err)
 	}
+
+	// The keys must be in the document, not merely in the struct we decode into.
+	var doc struct {
+		Buckets []map[string]json.RawMessage
+		Totals  map[string]json.RawMessage
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if len(doc.Buckets) != len(sum.Buckets) {
+		t.Fatalf("payload has %d buckets, want %d", len(doc.Buckets), len(sum.Buckets))
+	}
+	for _, key := range []string{"CostKnown", "CostApproximate", "DisplayCostMicroUSD"} {
+		if _, ok := doc.Totals[key]; !ok {
+			t.Errorf("totals payload omits %s; an absent key decodes to the same zero an unpriced bucket reports", key)
+		}
+		for i, b := range doc.Buckets {
+			if _, ok := b[key]; !ok {
+				t.Errorf("bucket %d payload omits %s", i, key)
+			}
+		}
+	}
+
 	var got summaryJSON
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.Totals.CostKnown || got.Totals.DisplayCostMicroUSD != 0 {
-		t.Errorf("totals = %+v, want an explicitly unknown cost", got.Totals)
+	// The unpriceable bucket: unknown, not free.
+	if got.Buckets[0].CostKnown || got.Buckets[0].DisplayCostMicroUSD != 0 {
+		t.Errorf("unpriceable bucket = %+v, want an explicitly unknown cost", got.Buckets[0])
+	}
+	// The priceable one: the values a missing key could not have produced.
+	if !got.Buckets[1].CostKnown || got.Buckets[1].DisplayCostMicroUSD != costs.Buckets[1].MicroUSD {
+		t.Errorf("display-priced bucket = %+v, want known and %d", got.Buckets[1], costs.Buckets[1].MicroUSD)
+	}
+	if !got.Buckets[1].CostApproximate {
+		t.Errorf("display-priced bucket = %+v, want the approximate marker", got.Buckets[1])
+	}
+	// Totals mix the two: known and approximate, and short of the mystery rows.
+	if !got.Totals.CostKnown || got.Totals.DisplayCostMicroUSD != costs.Totals.MicroUSD || !got.Totals.CostApproximate {
+		t.Errorf("totals = %+v, want known/approximate at %d", got.Totals, costs.Totals.MicroUSD)
 	}
 }
 

@@ -75,21 +75,48 @@ type Privacy struct {
 	NoRaw bool `json:"no_raw"`
 }
 
+// TUI configures dashboard presentation policy — the readings a user may
+// reasonably disagree with. Nothing here affects collection, pricing, or what
+// is written to the ledger.
+type TUI struct {
+	// LeverageInputFloor is the per-bucket input token count below which the
+	// hero's cache-leverage ratio (cache-read / input) is suppressed as noise
+	// rather than plotted: a large cache read against a tiny input is an idle
+	// bucket, not working leverage.
+	//
+	// Zero — the default — derives the floor from the bucket span instead of
+	// pinning one number across every grouping, so an hour bucket and a day
+	// bucket are each judged against their own plausible input. Set it when
+	// your own spend makes the derived figure wrong in either direction. A
+	// negative value is treated as unset.
+	LeverageInputFloor int64 `json:"leverage_input_floor,omitempty"`
+}
+
 // Config holds resolved runtime settings.
 //
 // Path rule: db_path, pid_path, log_path, home and every source_roots value may
 // be written relative in a config file, and a relative value is resolved
 // against the directory holding that config file — never the process working
 // directory, which differs between the CLI (wherever the user stands) and the
-// daemon it spawns (the CWD of the shell that started it). Every field below is
-// absolute once Load returns.
+// daemon it spawns (the CWD of the shell that started it). Every value the
+// config FILE supplied is therefore absolute once Load returns.
+//
+// The rule covers config-file values only. Nothing else is rewritten: a
+// relative AIUSAGE_HOME (or --home, applied by the caller) is used as given,
+// which leaves Home and the DBPath/PIDPath/LogPath SetHome derives from it
+// relative too. That is deliberate - an env var or a flag is read in the shell
+// the user is standing in, so its own working directory is the right anchor -
+// but it means a caller that hands those values to another process must
+// absolutize them itself.
 type Config struct {
-	// DBPath, PIDPath and LogPath are absolute; a relative value in a config
-	// file is anchored at that file's directory (see the path rule above).
+	// DBPath, PIDPath and LogPath default to absolute XDG locations; a relative
+	// value in a config file is anchored at that file's directory (see the path
+	// rule above), while one derived from a relative Home stays relative.
 	DBPath  string `json:"db_path,omitempty"`
 	PIDPath string `json:"pid_path,omitempty"`
 	LogPath string `json:"log_path,omitempty"`
-	// Home is the discovery root, absolute under the same path rule.
+	// Home is the discovery root, anchored under the path rule when the config
+	// file set it.
 	Home            string `json:"home,omitempty"`
 	IntervalSeconds int    `json:"interval_seconds,omitempty"`
 	// SourceRoots overrides an adapter's discovery root; values follow the
@@ -97,6 +124,7 @@ type Config struct {
 	SourceRoots map[string]string `json:"source_roots,omitempty"`
 	Pricing     Pricing           `json:"pricing,omitzero"`
 	Privacy     Privacy           `json:"privacy,omitzero"`
+	TUI         TUI               `json:"tui,omitzero"`
 
 	// derived* track which path fields still hold values derived from Home
 	// rather than explicit overrides (config file, env, or flag). Only derived
@@ -187,6 +215,12 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Pricing.Overrides == nil {
 		cfg.Pricing.Overrides = map[string]ModelRates{}
+	}
+	// A negative floor is not a smaller floor, it is a nonsense one; normalize
+	// it to unset so the consumer's "derive from the bucket span" default runs
+	// instead of comparing token counts against a negative number.
+	if cfg.TUI.LeverageInputFloor < 0 {
+		cfg.TUI.LeverageInputFloor = 0
 	}
 	return cfg, nil
 }

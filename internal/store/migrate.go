@@ -199,9 +199,14 @@ var eventColumns = []string{
 // predates it. It only ever runs on an UNSTAMPED database (ensureSchema's
 // current == 0 branch): with no recorded version there is nothing that says
 // which migrations the table has seen, so guessing one and running ALTERs on a
-// ledger of unknown provenance is not on offer. The recovery is to remove the
-// half-created file — an interrupted first run has no committed events to lose,
-// which is the only way an unstamped table can exist.
+// ledger of unknown provenance is not on offer.
+//
+// Both refusals leave the file untouched, but only one of them may advise
+// deleting it, so the table is checked for rows rather than argued about. Empty
+// is the interrupted first run the recovery assumes: nothing committed, nothing
+// to lose. A short table that DOES hold events is a ledger of unknown
+// provenance, and telling its owner to delete it would destroy the history this
+// package exists to keep, so that case says to move it aside instead.
 func verifyEventColumns(ctx context.Context, db *sql.DB, path string) error {
 	have, err := columnSet(ctx, db, "usage_events")
 	if err != nil {
@@ -216,10 +221,36 @@ func verifyEventColumns(ctx context.Context, db *sql.DB, path string) error {
 	if len(missing) == 0 {
 		return nil
 	}
+	empty, err := tableEmpty(ctx, db, "usage_events")
+	if err != nil {
+		return err
+	}
+	if !empty {
+		return fmt.Errorf(
+			"store: %s has a usage_events table with no recorded schema version and missing column(s) %s, "+
+				"and it holds recorded events, so it is not a half-created database; "+
+				"do NOT delete it - move it aside (with its -wal/-shm sidecars) to start a fresh ledger, "+
+				"and keep the file: the aiusage build that wrote it can still read it",
+			path, strings.Join(missing, ", "))
+	}
 	return fmt.Errorf(
 		"store: %s has a usage_events table with no recorded schema version and missing column(s) %s; "+
-			"this is a half-created database from an interrupted first run — delete it (with its -wal/-shm sidecars) and rerun",
+			"the table is empty, so this is a half-created database from an interrupted first run - "+
+			"delete it (with its -wal/-shm sidecars) and rerun",
 		path, strings.Join(missing, ", "))
+}
+
+// tableEmpty reports whether a table holds no rows. EXISTS stops at the first
+// row, so it stays cheap on a large ledger where COUNT(*) would scan the lot.
+func tableEmpty(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	// The table name cannot be a placeholder; every caller passes a literal.
+	var found int
+	err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM "`+table+`")`).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("store: check whether %s is empty: %w", table, err)
+	}
+	return found == 0, nil
 }
 
 // columnSet returns the column names of a table.

@@ -120,6 +120,74 @@ func TestPartialOverrideKeepsLowerRungRates(t *testing.T) {
 	}
 }
 
+// TestPartialOverrideFillsCacheAndBatchRates pins the rest of the merge. The
+// override names input and output, so those two are settled by the user; every
+// rate it left unset - cache read, both cache writes, and the two batch rates -
+// must still come from the rung the override displaced.
+//
+// Without that, Cost's documented fallbacks take over and bill cache and batch
+// tokens at the OVERRIDE's input/output rate. For the common override (a user
+// correcting the standard rates upward) that silently prices a cache read, the
+// cheapest token there is, at the dearest rate in the table. Each case carries
+// the number the unfilled merge would have produced, so a regression cannot
+// pass by coincidence.
+func TestPartialOverrideFillsCacheAndBatchRates(t *testing.T) {
+	const m = "claude-sonnet-4-6"
+	e := New(Options{Overrides: map[string]Rates{m: {Input: 1e-05, Output: 4e-05}}})
+	e.refreshed = &Table{Source: "litellm-2026-08-09", Models: map[string]Rates{
+		m: {
+			Input: 3e-06, Output: 1.5e-05,
+			CacheRead: 3e-07, CacheWrite5m: 3.75e-06, CacheWrite1h: 6e-06,
+			InputBatch: 1.5e-06, OutputBatch: 7.5e-06,
+		},
+	}}
+
+	tests := []struct {
+		name   string
+		charge Charge
+		want   int64
+		// unfilled is the same charge priced by a merge that stopped at
+		// input/output: the number this test exists to reject.
+		unfilled int64
+	}{
+		{"cache read", Charge{CacheRead: 1_000_000}, 300_000, 10_000_000},
+		{"cache write 5m", Charge{CacheWrite5m: 1_000_000}, 3_750_000, 10_000_000},
+		{"cache write 1h", Charge{CacheWrite1h: 1_000_000}, 6_000_000, 10_000_000},
+		{"batch input", Charge{ServiceTier: "batch", Input: 1_000_000}, 1_500_000, 10_000_000},
+		{"batch output", Charge{ServiceTier: "batch", Output: 1_000_000}, 7_500_000, 40_000_000},
+		{
+			name:     "override input with table cache read",
+			charge:   Charge{Input: 1_000_000, CacheRead: 1_000_000},
+			want:     10_300_000,
+			unfilled: 20_000_000,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.want == tc.unfilled {
+				t.Fatalf("case cannot tell a filled merge from an unfilled one")
+			}
+			c := tc.charge
+			c.Model, c.Provider = m, model.ProviderAnthropic
+
+			micro, source, ok := e.Price(c)
+			if !ok {
+				t.Fatalf("charge %+v went unpriced", c)
+			}
+			if micro == tc.unfilled {
+				t.Fatalf("cost = %d, the unfilled merge's number: the lower rung's rate was dropped", micro)
+			}
+			if micro != tc.want {
+				t.Fatalf("cost = %d, want %d", micro, tc.want)
+			}
+			// The lower rung moved the price, so it must be named in the stamp.
+			if source != SourceOverride+"+litellm-2026-08-09" {
+				t.Errorf("source = %q, want the composite stamp", source)
+			}
+		})
+	}
+}
+
 // TestPartialOverrideWithoutLowerRungStillPrices keeps the merge honest when
 // there is nothing to merge with: an override for a model no table knows still
 // prices what it can, and still refuses to invent a zero for what it cannot.
