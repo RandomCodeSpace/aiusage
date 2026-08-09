@@ -155,3 +155,36 @@ func newSizedModel(t *testing.T, w, h int) Model {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return loadOnce(tm.(Model))
 }
+
+// TestBrowseFitsUnderStallBanner: the dead-collector banner claims a body row
+// with no resize, no help toggle and no load behind it, and Browse is the one
+// view that HOLDS its layout instead of taking bodyLayout() per frame. It must
+// shrink with the body, or render() clamps its bottom row (and the panel's last
+// line with it) for as long as the banner shows — issue #31. Checked at three
+// sizes: the reserve is one row at every one of them.
+func TestBrowseFitsUnderStallBanner(t *testing.T) {
+	for _, sz := range []struct{ w, h int }{{160, 44}, {120, 40}, {80, 24}} {
+		m := newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("4"))
+		if m.bannerRows() != 0 {
+			t.Fatalf("%dx%d: the banner is already up before the collector stalls", sz.w, sz.h)
+		}
+		bl := m.bodyLayout()
+		if got := lipgloss.Height(m.renderBody(bl)); got != bl.BodyH {
+			t.Fatalf("%dx%d: Browse renders %d rows into a %d-row body before the banner",
+				sz.w, sz.h, got, bl.BodyH)
+		}
+
+		// One observed write, long enough ago to cross the escalation threshold:
+		// the banner appears without any of the events that refresh the layout.
+		m.ingestMTime = m.data.now().Add(-4 * m.collectEvery)
+		if m.bannerRows() != 1 {
+			t.Fatalf("%dx%d: the collector is stalled but no banner row is reserved", sz.w, sz.h)
+		}
+		bl = m.bodyLayout()
+		if got := lipgloss.Height(m.renderBody(bl)); got != bl.BodyH {
+			t.Fatalf("%dx%d: Browse renders %d rows into the %d-row body left by the banner — the bottom row is clipped",
+				sz.w, sz.h, got, bl.BodyH)
+		}
+	}
+}

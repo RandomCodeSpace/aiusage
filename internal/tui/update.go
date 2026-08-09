@@ -191,6 +191,7 @@ func (m Model) handleRightKey() (tea.Model, tea.Cmd) {
 // handleHome jumps to the start of the focused scrollable / scrubs to the first
 // bucket.
 func (m *Model) handleHome() {
+	m.rowChosen = false // moved by key, not by a press (see Model.rowChosen)
 	switch m.view {
 	case ViewOverview:
 		m.scrubIndex = 0
@@ -206,6 +207,7 @@ func (m *Model) handleHome() {
 
 // handleEnd jumps to the end / scrubs to the live edge (unpins scrub).
 func (m *Model) handleEnd() {
+	m.rowChosen = false // moved by key, not by a press (see Model.rowChosen)
 	switch m.view {
 	case ViewOverview:
 		n := len(m.tlData.Buckets)
@@ -231,8 +233,10 @@ func (m Model) forward(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ViewBrowse:
 		m.browse, cmd = m.browse.Update(msg)
 		m.syncBrowsePreview()
+		m.rowChosen = false // moved by key, not by a press (see Model.rowChosen)
 	case ViewByTool, ViewByModel:
 		m.moveSelectionFromKey(msg)
+		m.rowChosen = false
 	}
 	return m, cmd
 }

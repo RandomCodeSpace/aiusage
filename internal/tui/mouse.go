@@ -19,8 +19,13 @@ import (
 // The contract, uniform across EVERY surface that has rows:
 //
 //   - A left press SELECTS the row and syncs its detail pane.
-//   - A left press on the row that is ALREADY selected DRILLS. Touch therefore
+//   - A left press on the row a PREVIOUS PRESS selected DRILLS. Touch therefore
 //     has a complete path (tap, tap again) that depends on no double-tap timing.
+//     The qualifier is load-bearing: every view opens with a default selection
+//     the reader never made, and drilling on cursor equality alone would let the
+//     first tap on the top row of a fresh view descend a level (issue #43).
+//     m.rowChosen carries "a press put the selection here"; the wheel, the
+//     keyboard and any reload clear it.
 //   - A double press within doubleClickWindow DRILLS outright.
 //   - A right press BACKS OUT, exactly as Escape does.
 //
@@ -128,9 +133,13 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 	case strings.HasPrefix(zid, "bar:"):
 		name := strings.TrimPrefix(zid, "bar:")
-		drill := dbl || m.barSelected(name)
+		drill := dbl || (m.rowChosen && m.barSelected(name))
 		m.selectBar(name)
+		m.rowChosen = true
 		if drill {
+			// The drill dispatches a load, and startLoad clears rowChosen: the
+			// level that opens has its own default selection, which is again not
+			// one the reader made.
 			return m.drill()
 		}
 		return m, nil
@@ -140,9 +149,10 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			return m, nil
 		}
-		drill := dbl || m.browse.Cursor() == idx
+		drill := dbl || (m.rowChosen && m.browse.Cursor() == idx)
 		m.browse.SetCursor(idx)
 		m.syncBrowsePreview()
+		m.rowChosen = true
 		if drill {
 			return m.drill()
 		}
@@ -171,15 +181,19 @@ const (
 )
 
 // wheel routes a scroll (dir -1 up / +1 down) to whatever the notch resolved to.
+// Scrolling is not choosing: a notch moves the selection off the row a press put
+// it on, so the drill flag is dropped and the next press selects again.
 func (m Model) wheel(msg tea.MouseMsg, dir int) Model {
 	switch m.wheelTarget(msg) {
 	case wheelScrub:
 		m.scrubBy(dir)
 	case wheelBars:
 		m.moveSelection(dir)
+		m.rowChosen = false
 	case wheelTable:
 		m.browse.SetCursor(m.browse.Cursor() + dir)
 		m.syncBrowsePreview()
+		m.rowChosen = false
 	}
 	return m
 }

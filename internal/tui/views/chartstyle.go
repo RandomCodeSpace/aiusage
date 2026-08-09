@@ -104,7 +104,12 @@ func trendChart(c Ctx, buckets []store.Bucket, dim string, w, h, scrubIdx int) s
 // never redraws braille. ok=false when no bucket carries a parseable time key.
 func buildTrendChart(c Ctx, buckets []store.Bucket, dim string, w, h int) (*timeserieslinechart.Model, []time.Time, bool) {
 	times := bucketTimes(buckets, dim)
-	if len(times) == 0 {
+	// bucketTimes DROPS a bucket whose key does not parse, so a single bad key
+	// leaves times shorter than buckets — and the push loop below indexes
+	// times[i] over buckets, i.e. out of range inside View(). Fall back on the
+	// same length guard buildHeroFrame applies rather than plot a series whose
+	// points are silently shifted onto the wrong timestamps.
+	if len(times) == 0 || len(times) != len(buckets) {
 		return nil, nil, false
 	}
 

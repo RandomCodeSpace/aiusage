@@ -9,19 +9,38 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
+// CopilotSourceState is what ADAPTER DISCOVERY knows about copilot's local data
+// source, which is a fact about the machine. It is deliberately not derived from
+// the loaded rows: an empty range says nothing about whether the source exists,
+// and a footnote that confuses the two tells a user with telemetry enabled and
+// data on disk that they have no data source (issue #44).
+type CopilotSourceState int
+
+const (
+	// CopilotUnknown: no discovery result reached the view (headless embedding,
+	// or discovery itself failed). Claim nothing.
+	CopilotUnknown CopilotSourceState = iota
+	// CopilotNoSource: discovery ran and located no copilot source.
+	CopilotNoSource
+	// CopilotIdle: a source exists, but nothing landed in the shown range.
+	CopilotIdle
+	// CopilotActive: a source exists and the range carries its usage.
+	CopilotActive
+)
+
 // ByToolData feeds the By-Tool view: per-tool stacked fresh/cache bars on the
 // left, a detail card for the selected tool on the right (trend sparkline +
-// stats). CopilotAbsent triggers the "no data source" footnote.
+// stats). Copilot carries the discovery-sourced footnote state.
 type ByToolData struct {
-	Rows          []store.Bucket // grouped by tool, sorted
-	Grand         int64          // grand total for share %
-	Selected      int            // index of the selected/focused bar
-	SelTrend      []store.Bucket // selected tool's daily trend (ascending)
-	SelTrendErr   bool           // the trend query failed (distinct from "no rows")
-	SelSessions   int64          // distinct sessions for the selected tool
-	RangeLbl      string
-	ActivePane    int  // PaneByX* — which pane wears the ring
-	CopilotAbsent bool // append the absent-source note
+	Rows        []store.Bucket // grouped by tool, sorted
+	Grand       int64          // grand total for share %
+	Selected    int            // index of the selected/focused bar
+	SelTrend    []store.Bucket // selected tool's daily trend (ascending)
+	SelTrendErr bool           // the trend query failed (distinct from "no rows")
+	SelSessions int64          // distinct sessions for the selected tool
+	RangeLbl    string
+	ActivePane  int                // PaneByX* — which pane wears the ring
+	Copilot     CopilotSourceState // drives the absent/idle source footnote
 }
 
 // By-Tool / By-Model view panes (pane 0 = rail).
@@ -42,7 +61,7 @@ func ByTool(c Ctx, d ByToolData, lay Layout) string {
 		selErr:     d.SelTrendErr,
 		selSess:    d.SelSessions,
 		activePane: d.ActivePane,
-		footnote:   copilotFootnote(c, d.CopilotAbsent),
+		footnote:   copilotFootnote(c, d.Copilot),
 	}, lay)
 }
 
@@ -301,12 +320,17 @@ func displayName(c Ctx, name string, width int) string {
 	return name
 }
 
-// copilotFootnote states the absent source when copilot has no recorded usage.
-// Zeros alone read as "you used nothing"; the honest reading is that no data
-// source exists yet. `doctor` carries the enablement checklist.
-func copilotFootnote(c Ctx, absent bool) string {
-	if !absent {
-		return ""
+// copilotFootnote states what discovery found. Zeros alone read as "you used
+// nothing"; when no source exists the honest reading is that there is nothing
+// to read yet (`doctor` carries the enablement checklist). When a source DOES
+// exist the note says only what is true — this range is empty — and when
+// discovery has nothing to say, neither does the footnote.
+func copilotFootnote(c Ctx, st CopilotSourceState) string {
+	switch st {
+	case CopilotNoSource:
+		return c.Faint.Render("copilot: configured, no data source")
+	case CopilotIdle:
+		return c.Faint.Render("copilot: source present, no usage in this range")
 	}
-	return c.Faint.Render("copilot: configured, no data source")
+	return ""
 }

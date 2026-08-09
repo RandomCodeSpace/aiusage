@@ -118,6 +118,11 @@ func fileMTime(path string) time.Time {
 func (m *Model) startLoad() tea.Cmd {
 	m.loadGen++
 	m.loadNow = m.data.now()
+	// A load replaces the rows under the selection — a drill, a range or sort
+	// change, a live refresh — so whatever a press selected is gone. Dropping the
+	// drill flag here covers every one of those paths at their single choke
+	// point; the cost of being wrong is one extra tap, never a stray descent.
+	m.rowChosen = false
 	if m.fresh != FreshCold {
 		m.fresh = FreshCutIn
 	}

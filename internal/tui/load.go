@@ -125,7 +125,7 @@ func (m *Model) loadByToolBase() {
 	m.byTool.Grand = grandOf(m.data, m.qnow(), m.span(), m.crumbs, rows)
 	m.byTool.RangeLbl = m.spanLabel()
 	m.byTool.ActivePane = views.PaneByXBars
-	m.byTool.CopilotAbsent = copilotAbsent(rows)
+	m.byTool.Copilot = m.copilotState(rows)
 	if m.byTool.Selected >= len(rows) {
 		m.byTool.Selected = 0
 	}
@@ -526,15 +526,26 @@ func cloneCrumbs(c []Crumb) []Crumb {
 	return out
 }
 
-// copilotAbsent reports whether copilot has zero recorded usage among the rows
-// (triggers the absent-source note). Returns false if copilot has any total.
-func copilotAbsent(rows []store.Bucket) bool {
+// copilotState resolves the By-Tool copilot footnote state. Whether a data
+// SOURCE exists comes from startup adapter discovery (Options.Sources — the
+// signal `doctor` prints), never from the loaded rows: a range with no copilot
+// usage is not evidence that copilot is unconfigured (issue #44). The rows only
+// decide the second question, whether that source produced anything in the
+// range currently on screen.
+func (m Model) copilotState(rows []store.Bucket) views.CopilotSourceState {
+	n, known := m.sources[model.ToolCopilot]
+	if !known {
+		return views.CopilotUnknown
+	}
+	if n == 0 {
+		return views.CopilotNoSource
+	}
 	for _, b := range rows {
 		if b.Keys["tool"] == model.ToolCopilot && b.Total > 0 {
-			return false
+			return views.CopilotActive
 		}
 	}
-	return true
+	return views.CopilotIdle
 }
 
 // filterBuckets keeps buckets whose dim value contains the (case-insensitive)

@@ -120,6 +120,7 @@ func newRootCmd() *cobra.Command {
 				DBPath:          cfg.DBPath,
 				StatePath:       uiStatePath(cfg),
 				CollectInterval: time.Duration(cfg.IntervalSeconds) * time.Second,
+				Sources:         discoveredSources(cmdContext(c), cfg),
 			})
 		},
 	}
@@ -226,6 +227,28 @@ func openStore(cfg config.Config) (store.Store, error) {
 // discoverConfig builds the adapter DiscoverConfig from the resolved config.
 func discoverConfig(cfg config.Config) adapter.DiscoverConfig {
 	return adapter.DiscoverConfig{Home: cfg.Home, Overrides: cfg.SourceRoots}
+}
+
+// discoveredSources runs every adapter's read-only discovery once and reports
+// how many sources each located, keyed by tool id — the same signal `doctor`
+// prints. The TUI takes it at startup so a statement like "no data source" is a
+// fact about the machine instead of an inference from an empty range
+// (issue #44); it is resolved here because cmd is the composition root and
+// internal/tui must not import internal/adapter.
+//
+// An adapter whose discovery ERRORS is left out of the map entirely: unknown is
+// not zero, and a failed glob must not be reported as an absent source.
+func discoveredSources(ctx context.Context, cfg config.Config) map[string]int {
+	dc := discoverConfig(cfg)
+	out := make(map[string]int)
+	for _, ad := range defaultRegistry().All() {
+		srcs, err := ad.Discover(ctx, dc)
+		if err != nil {
+			continue
+		}
+		out[ad.ID()] = len(srcs)
+	}
+	return out
 }
 
 // defaultRegistry returns the registry wired with every built-in adapter.

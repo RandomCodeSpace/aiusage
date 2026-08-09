@@ -282,6 +282,15 @@ func (m Model) renderBody(lay views.Layout) string {
 		return views.ByModel(m.vctx, m.byModel, lay)
 	case ViewBrowse:
 		b := m.browse
+		// Browse holds its geometry (table height, columns) instead of deriving it
+		// per frame, and the stored copy is refreshed only on resize / help toggle
+		// / load. The stall banner claims a body row WITHOUT any of those, so the
+		// panel would render one row taller than the region render() clamps it to
+		// and lose its bottom row for as long as the banner shows. Re-applying the
+		// per-frame layout here gives Browse the same treatment the other views
+		// get from bodyLayout(); SetLayout no-ops when the geometry is unchanged,
+		// which is every frame the banner is not moving.
+		b.SetLayout(lay)
 		// The chevron must state the truth for the CURRENT depth, and the depth is
 		// navigation state rather than loaded data, so it is injected at render
 		// time (like the Overview sys gauges) instead of being carried through the

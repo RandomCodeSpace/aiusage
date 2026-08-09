@@ -600,3 +600,89 @@ func TestDoubleClickWindowBounds(t *testing.T) {
 		t.Fatal("a press outside the window counted as a double-click")
 	}
 }
+
+// TestFirstPressOnPreSelectedRowSelects: every view opens with a selection
+// nobody made — Browse on row 0, the bars on bar 0 — so the FIRST press on it
+// must select, not drill. Testing the drill on cursor equality alone let one
+// stray tap on the top row of a fresh view descend a level (issue #43), which is
+// precisely the "tap, tap again, no timing" story the model was chosen for. Run
+// at two sizes because the row and bar geometry moves with the layout while the
+// state contract must not.
+func TestFirstPressOnPreSelectedRowSelects(t *testing.T) {
+	for _, sz := range []struct{ w, h int }{{160, 44}, {120, 40}} {
+		// Browse: the cursor sits on row 0 and no press has touched it.
+		m := newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("4"))
+		if m.browse.Cursor() != 0 {
+			t.Fatalf("%dx%d: setup cursor = %d, want the default 0", sz.w, sz.h, m.browse.Cursor())
+		}
+
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 0 {
+			t.Fatalf("%dx%d: the first press on the pre-selected row drilled to %v", sz.w, sz.h, m.crumbs)
+		}
+		if m.browse.Cursor() != 0 {
+			t.Fatalf("%dx%d: the first press left the cursor at %d, want 0", sz.w, sz.h, m.browse.Cursor())
+		}
+
+		// Now the row IS one a press selected, so the next press drills.
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 1 || m.crumbs[0].Dim != "tool" || m.crumbs[0].Value != "claude-code" {
+			t.Fatalf("%dx%d: second press on the selected row: crumbs = %v, want [tool:claude-code]",
+				sz.w, sz.h, m.crumbs)
+		}
+
+		// By-Tool: bar 0 is selected before the reader has touched anything.
+		m = newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("2"))
+		if m.byTool.Selected != 0 {
+			t.Fatalf("%dx%d: setup selection = %d, want the default 0", sz.w, sz.h, m.byTool.Selected)
+		}
+
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("claude-code"), tea.MouseLeft)
+		if m.view != ViewByTool {
+			t.Fatalf("%dx%d: the first press on the pre-selected bar drilled into %v", sz.w, sz.h, m.view)
+		}
+		if m.byTool.Selected != 0 {
+			t.Fatalf("%dx%d: the first press left the selection at %d, want 0", sz.w, sz.h, m.byTool.Selected)
+		}
+
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("claude-code"), tea.MouseLeft)
+		if m.view != ViewBrowse || len(m.crumbs) != 1 || m.crumbs[0].Value != "claude-code" {
+			t.Fatalf("%dx%d: second press on the selected bar: view = %v crumbs = %v, want Browse [tool:claude-code]",
+				sz.w, sz.h, m.view, m.crumbs)
+		}
+	}
+}
+
+// TestWheelDoesNotConferSelection: a notch scrolls, it does not choose. If the
+// wheel counted as the selecting press, the next press on the row it landed on
+// would drill on first touch — the same stray descent as issue #43, one row
+// down. The keyboard is held to the same rule by the same flag.
+func TestWheelDoesNotConferSelection(t *testing.T) {
+	m := newTestModelWH(t, &fakeData{}, 160, 44)
+	m = step(t, m, keyMsg("4"))
+
+	m = expireClick(m)
+	m = mustPress(t, m, views.RowZone(0), tea.MouseLeft) // row 0 chosen by press
+	m = wheelOver(t, m, views.ZoneTable, tea.MouseWheelDown)
+	if m.browse.Cursor() != 1 {
+		t.Fatalf("setup: wheel left the cursor at %d, want 1", m.browse.Cursor())
+	}
+
+	m = expireClick(m)
+	m = mustPress(t, m, views.RowZone(1), tea.MouseLeft)
+	if len(m.crumbs) != 0 {
+		t.Fatalf("a press on the row the WHEEL moved to drilled: crumbs = %v", m.crumbs)
+	}
+
+	m = expireClick(m)
+	m = mustPress(t, m, views.RowZone(1), tea.MouseLeft)
+	if len(m.crumbs) != 1 || m.crumbs[0].Value != "codex" {
+		t.Fatalf("second press on the pressed row: crumbs = %v, want [tool:codex]", m.crumbs)
+	}
+}

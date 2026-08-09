@@ -1,6 +1,7 @@
 package views
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,5 +36,32 @@ func TestParseBucketTimeWeekKeys(t *testing.T) {
 		if got.Format("2006-01-02") != c.want || got.Location() != time.Local {
 			t.Errorf("parseBucketTime(%q, week) = %v, want %s local", c.key, got, c.want)
 		}
+	}
+}
+
+// TestTrendChartSurvivesUnparseableBucketKey pins the length guard in
+// buildTrendChart (issue #32). bucketTimes drops a bucket whose key does not
+// parse, so times can be shorter than buckets — and the push loop indexes
+// times[i] over buckets. Unguarded that is an index-out-of-range inside View(),
+// which takes the whole TUI down, so the trend path falls back exactly as the
+// frame path already does.
+func TestTrendChartSurvivesUnparseableBucketKey(t *testing.T) {
+	c := heroTestCtx()
+	lay := ComputeLayout(120, 30)
+	const w, h = 60, 8
+
+	buckets := heroTestBuckets(6)
+	if _, _, ok := buildTrendChart(c, buckets, "day", w, h); !ok {
+		t.Fatal("a fully parseable timeline must still build a trend chart")
+	}
+
+	// One unparseable key is enough to desynchronise the two slices.
+	buckets[2].Keys["day"] = "not-a-date"
+	if _, _, ok := buildTrendChart(c, buckets, "day", w, h); ok {
+		t.Fatal("buildTrendChart accepted a timeline whose keys do not all parse")
+	}
+	got := heroBody(c, buckets, "day", lay, w, h, -1)
+	if n := len(strings.Split(got, "\n")); n != h {
+		t.Fatalf("heroBody over a partly unparseable timeline = %d lines, want %d", n, h)
 	}
 }

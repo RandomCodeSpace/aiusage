@@ -28,12 +28,19 @@ import (
 // across launches (empty disables persistence — e.g. in tests).
 // CollectInterval is the daemon's collection cadence, used to scale the
 // dead-collector escalation threshold (0 falls back to the config default).
+// Sources carries the adapter-discovery result — how many read-only sources
+// each tool id has on this machine — so the TUI can state whether a tool has a
+// data source at all. It is threaded in here rather than discovered by the TUI
+// because internal/tui must not import internal/adapter (layering), the same
+// reason CollectInterval arrives from the caller. A tool MISSING from the map
+// is unknown, not zero: an adapter whose discovery failed says nothing.
 type Options struct {
 	DBPath          string
 	StatePath       string
 	Since           time.Time
 	Until           time.Time
 	CollectInterval time.Duration
+	Sources         map[string]int
 }
 
 // defaultCollectInterval mirrors the config layer's 300s default for when the
@@ -103,6 +110,11 @@ type Model struct {
 	loadNow    time.Time // clock of the current generation; all its queries key off this
 	dataGen    uint64    // generation whose data is APPLIED to the views (render-memo key)
 
+	// sources is the startup adapter-discovery count per tool id (Options.Sources).
+	// Static for the life of the process — discovery is a fact about the machine,
+	// not about the loaded range.
+	sources map[string]int
+
 	// Ingest liveness (heartbeat cell + dead-collector banner, freshness.go).
 	ingestMTime  time.Time     // latest observed daemon write (db mtime)
 	beat         uint64        // heartbeat frame counter; advances per observed write
@@ -121,6 +133,15 @@ type Model struct {
 	// Double-click tracking for mouse drill.
 	lastClickZone string
 	lastClickAt   time.Time
+
+	// rowChosen records that the current cursor / bar selection is where a LEFT
+	// PRESS put it, which is what makes the next press on it a drill. Every view
+	// opens with a default selection (Browse cursor 0, bar 0) that the reader
+	// never chose, so "already selected" cannot be inferred from the cursor
+	// alone: one stray tap on the top row of a fresh view would descend a level
+	// (issue #43). Anything that moves the selection without a press — wheel,
+	// keyboard, a reload that replaces the rows — clears it again.
+	rowChosen bool
 
 	// Drag-to-scrub state (mouse.go): dragging marks a held left button that is
 	// over the hero chart, dragX the column it was last seen at. Cell-motion
@@ -215,6 +236,7 @@ func NewModel(src DataSource, opt Options) Model {
 		browse:        b,
 		help:          h,
 		spin:          sp,
+		sources:       opt.Sources,
 		collectEvery:  collectEvery,
 		mon:           sysmon.New(wd),
 		heroMemo:      views.NewHeroMemo(),
