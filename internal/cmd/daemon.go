@@ -45,6 +45,21 @@ func daemonArgs(f globalFlags) []string {
 	return args
 }
 
+// maxDaemonLogBytes caps the daemon log: persistent per-source errors repeat
+// every cycle and would otherwise grow it without bound.
+const maxDaemonLogBytes = 10 << 20
+
+// rotateDaemonLog renames an oversized log to <path>.old before the daemon
+// appends to it, replacing any previous rotation. Best-effort: a failed stat
+// or rename just leaves the current log in place.
+func rotateDaemonLog(path string) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() <= maxDaemonLogBytes {
+		return
+	}
+	_ = os.Rename(path, path+".old")
+}
+
 var spawnDaemon = func(cfg config.Config) error {
 	self, err := os.Executable()
 	if err != nil {
@@ -63,6 +78,8 @@ var spawnDaemon = func(cfg config.Config) error {
 			return fmt.Errorf("create daemon log dir %s: %w", dir, err)
 		}
 	}
+
+	rotateDaemonLog(cfg.LogPath)
 
 	// 0600: cycle logs can echo adapter errors that include source paths.
 	logf, err := os.OpenFile(cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
