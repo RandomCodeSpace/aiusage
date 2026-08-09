@@ -157,6 +157,39 @@ func (s *fakeStore) Summarize(_ context.Context, f store.Filter) (*store.Summary
 	return &store.Summary{GroupBy: f.GroupBy, Totals: b}, nil
 }
 
+// UnpricedGroups aggregates the stored events with no stamped cost, grouped by
+// the attributes a display-time price lookup needs. The collector never calls
+// it; it exists so the fake still satisfies store.Store.
+func (s *fakeStore) UnpricedGroups(_ context.Context, _ store.Filter) ([]store.UnpricedGroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byKey := map[string]*store.UnpricedGroup{}
+	var order []string
+	for _, e := range s.events {
+		if _, priced := e.Cost(); priced {
+			continue
+		}
+		k := e.Tool + "|" + e.Model + "|" + e.Provider + "|" + e.ServiceTier
+		g, ok := byKey[k]
+		if !ok {
+			g = &store.UnpricedGroup{Tool: e.Tool, Model: e.Model, Provider: e.Provider, ServiceTier: e.ServiceTier}
+			byKey[k] = g
+			order = append(order, k)
+		}
+		g.Events++
+		g.Input += e.InputTokens
+		g.Output += e.OutputTokens
+		g.CacheCreation += e.CacheCreationTokens
+		g.CacheRead += e.CacheReadTokens
+		g.Reasoning += e.ReasoningTokens
+	}
+	out := make([]store.UnpricedGroup, 0, len(order))
+	for _, k := range order {
+		out = append(out, *byKey[k])
+	}
+	return out, nil
+}
+
 func (s *fakeStore) ListEvents(_ context.Context, _ store.Filter) ([]model.UsageEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -622,7 +655,7 @@ func TestSnapshotZeroDeltaStillLandsCheckpoint(t *testing.T) {
 	}
 
 	cp := &model.SourceCheckpoint{Tool: model.ToolHermes, SourcePath: "src", State: "gate"}
-	n, advanced, err := storeSnapshot(ctx, st, cell, refDay.Add(6*time.Hour), cp)
+	n, advanced, err := storeSnapshot(ctx, st, cell, refDay.Add(6*time.Hour), cp, nil)
 	if err != nil || n != 0 || !advanced {
 		t.Fatalf("storeSnapshot n=%d advanced=%v err=%v, want 0,true,nil", n, advanced, err)
 	}

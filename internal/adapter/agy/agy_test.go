@@ -113,6 +113,9 @@ func TestParseGeminiShapedUsage(t *testing.T) {
 	if s.Tool != model.ToolAgy {
 		t.Errorf("Tool = %q, want %q", s.Tool, model.ToolAgy)
 	}
+	if s.Provider != model.ProviderGoogle {
+		t.Errorf("Provider = %q, want %q", s.Provider, model.ProviderGoogle)
+	}
 	if s.InputTokens != 150 || s.OutputTokens != 40 || s.ReasoningTokens != 8 {
 		t.Errorf("max snapshot wrong: in=%d out=%d thoughts=%d", s.InputTokens, s.OutputTokens, s.ReasoningTokens)
 	}

@@ -60,11 +60,13 @@ func sourceByKind(srcs []adapter.Source, kind string) (adapter.Source, bool) {
 func TestDBMappingAndProject(t *testing.T) {
 	dir := t.TempDir()
 	// cache.write -> CacheCreation, cache.read -> CacheRead, additive total.
-	// input(100)+output(50)+write(20)+read(30)=200 == total, no fallback fill.
+	// Reasoning is additive too, matching every observed opencode row:
+	// input(100)+output(50)+reasoning(7)+write(20)+read(30)=207 == total, so
+	// nothing is redistributed.
 	data := `{
 		"id":"msg_1","sessionID":"sess_json","providerID":"anthropic","modelID":"claude-sonnet-4",
 		"time":{"created":1730000000000},
-		"tokens":{"input":100,"output":50,"reasoning":7,"cache":{"read":30,"write":20},"total":200},
+		"tokens":{"input":100,"output":50,"reasoning":7,"cache":{"read":30,"write":20},"total":207},
 		"cost":0.01,"path":{"cwd":"/home/dev/projects/myapp","root":"/home/dev"}
 	}`
 	writeDB(t, dir, [][3]string{{"msg_1", "sess_db", data}})
@@ -113,8 +115,11 @@ func TestDBMappingAndProject(t *testing.T) {
 	if ev.ReasoningTokens != 7 {
 		t.Errorf("ReasoningTokens = %d, want 7", ev.ReasoningTokens)
 	}
-	if ev.TotalTokens != 200 {
-		t.Errorf("TotalTokens = %d, want 200", ev.TotalTokens)
+	if ev.TotalTokens != 207 {
+		t.Errorf("TotalTokens = %d, want 207", ev.TotalTokens)
+	}
+	if ev.Provider != "anthropic" {
+		t.Errorf("Provider = %q, want anthropic (providerID)", ev.Provider)
 	}
 	if ev.DedupKey != "opencode|msg_1" {
 		t.Errorf("DedupKey = %q, want opencode|msg_1", ev.DedupKey)
@@ -163,6 +168,85 @@ func TestTotalFallbackFillsOutput(t *testing.T) {
 	// Components must sum to the authoritative total.
 	if got := ev.InputTokens + ev.OutputTokens + ev.CacheCreationTokens + ev.CacheReadTokens; got != ev.TotalTokens {
 		t.Errorf("component sum = %d, want %d (== TotalTokens)", got, ev.TotalTokens)
+	}
+}
+
+// TestReasoningIsAdditive pins the accounting rule verified against real
+// opencode data: total = input + output + reasoning + cache.read + cache.write.
+// The row with output == 0 and reasoning > 0 is the regression guard — with
+// reasoning left out of the fallback's known sum the gap fill would copy the
+// reasoning count into OutputTokens while ReasoningTokens still carried it,
+// billing those tokens twice.
+func TestReasoningIsAdditive(t *testing.T) {
+	dir := t.TempDir()
+	rows := [][3]string{
+		// output == 0, reasoning > 0, total fully explained: no gap to fill.
+		{"r_gap", "s", `{"id":"r_gap","sessionID":"s","providerID":"anthropic","modelID":"claude-sonnet-4",
+			"tokens":{"input":1000,"output":0,"reasoning":400,"cache":{"read":200,"write":100},"total":1700},
+			"path":{"cwd":"/w"}}`},
+		// reasoning > output: impossible if reasoning were a subset of output.
+		{"r_big", "s", `{"id":"r_big","sessionID":"s","providerID":"openai","modelID":"gpt-5",
+			"tokens":{"input":50,"output":10,"reasoning":900,"cache":{"read":0,"write":0},"total":960},
+			"path":{"cwd":"/w"}}`},
+		// output == 0, reasoning > 0 AND a genuine remainder: the fill takes the
+		// remainder only (200 - 100 - 40), never the reasoning count.
+		{"r_fill", "s", `{"id":"r_fill","sessionID":"s","providerID":"openai","modelID":"gpt-5",
+			"tokens":{"input":100,"output":0,"reasoning":40,"cache":{"read":0,"write":0},"total":200},
+			"path":{"cwd":"/w"}}`},
+	}
+	writeDB(t, dir, rows)
+
+	srcs := discover(t, dir)
+	dbSrc, _ := sourceByKind(srcs, kindDB)
+	obs, err := New().Collect(context.Background(), dbSrc)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(obs.Events) != 3 {
+		t.Fatalf("want 3 events, got %d", len(obs.Events))
+	}
+
+	byKey := map[string]model.UsageEvent{}
+	for _, ev := range obs.Events {
+		byKey[ev.DedupKey] = ev
+	}
+
+	cases := []struct {
+		key                                     string
+		input, output, reasoning, total, cacheR int64
+		cacheC                                  int64
+	}{
+		{"opencode|r_gap", 1000, 0, 400, 1700, 200, 100},
+		{"opencode|r_big", 50, 10, 900, 960, 0, 0},
+		{"opencode|r_fill", 100, 60, 40, 200, 0, 0},
+	}
+	for _, c := range cases {
+		ev, ok := byKey[c.key]
+		if !ok {
+			t.Fatalf("missing event %s", c.key)
+		}
+		if ev.InputTokens != c.input || ev.OutputTokens != c.output ||
+			ev.ReasoningTokens != c.reasoning || ev.TotalTokens != c.total ||
+			ev.CacheReadTokens != c.cacheR || ev.CacheCreationTokens != c.cacheC {
+			t.Errorf("%s: in=%d out=%d reason=%d cacheR=%d cacheC=%d total=%d; want %d/%d/%d/%d/%d/%d",
+				c.key, ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens,
+				ev.CacheReadTokens, ev.CacheCreationTokens, ev.TotalTokens,
+				c.input, c.output, c.reasoning, c.cacheR, c.cacheC, c.total)
+		}
+		// Additive identity: reasoning is part of the authoritative total.
+		sum := ev.InputTokens + ev.OutputTokens + ev.ReasoningTokens +
+			ev.CacheReadTokens + ev.CacheCreationTokens
+		if sum != ev.TotalTokens {
+			t.Errorf("%s: additive component sum = %d, want %d", c.key, sum, ev.TotalTokens)
+		}
+	}
+}
+
+// TestReasoningModeIsAdditive keeps the adapter's accounting and the mode the
+// pricing engine reads from drifting apart.
+func TestReasoningModeIsAdditive(t *testing.T) {
+	if got := model.ReasoningModeFor(model.ToolOpenCode); got != model.ReasoningAdditive {
+		t.Errorf("ReasoningModeFor(opencode) = %q, want %q", got, model.ReasoningAdditive)
 	}
 }
 

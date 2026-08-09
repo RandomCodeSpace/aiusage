@@ -71,6 +71,9 @@ func TestLastTokenUsageMapping(t *testing.T) {
 	if e.Model != "gpt-5-codex" {
 		t.Errorf("model carry-forward failed: %q", e.Model)
 	}
+	if e.Provider != model.ProviderOpenAI {
+		t.Errorf("provider = %q, want %q", e.Provider, model.ProviderOpenAI)
+	}
 	// Input = input - cached = 1000 - 400 = 600
 	if e.InputTokens != 600 {
 		t.Errorf("input = %d, want 600", e.InputTokens)

@@ -35,6 +35,16 @@ var csvHeader = []string{
 	"message_id",
 	"source_path",
 	"kind",
+	// v3 columns, appended so existing consumers keep their positions.
+	// cost_micro_usd is the exact stored integer (millionths of USD) and
+	// cost_usd the same value as a decimal string; BOTH are empty for an
+	// unpriced event, never "0" — export mirrors the ledger, so it does not
+	// substitute a display-time price.
+	"provider",
+	"service_tier",
+	"cost_micro_usd",
+	"cost_usd",
+	"price_source",
 }
 
 // WriteSummaryJSON writes a summary as indented JSON.
@@ -125,6 +135,11 @@ func writeEventsCSV(w io.Writer, evs []model.UsageEvent, includeRaw bool) error 
 
 // eventRecord serialises one event into CSV fields matching csvHeader order.
 func eventRecord(e model.UsageEvent) []string {
+	costMicro, costUSD := "", ""
+	if micro, ok := e.Cost(); ok {
+		costMicro = itoa(micro)
+		costUSD = strconv.FormatFloat(float64(micro)/1e6, 'f', 6, 64)
+	}
 	return []string{
 		e.Tool,
 		e.Model,
@@ -142,6 +157,11 @@ func eventRecord(e model.UsageEvent) []string {
 		e.MessageID,
 		e.SourcePath,
 		string(e.Kind),
+		e.Provider,
+		e.ServiceTier,
+		costMicro,
+		costUSD,
+		e.PriceSource,
 	}
 }
 

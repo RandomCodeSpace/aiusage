@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,78 @@ func TestCollectParsesMapsAndDedupes(t *testing.T) {
 	}
 	if _, bad := m["msg-3"]; bad {
 		t.Error("null-guarded-key event should have been dropped")
+	}
+}
+
+// TestEnrichmentFields covers the pricing inputs added alongside the stored
+// accounting: the static provider, the reported service tier, and the
+// cache-write TTL split that is read transiently and never persisted.
+func TestEnrichmentFields(t *testing.T) {
+	root := t.TempDir()
+	lines := []string{
+		// Full enrichment: tier plus a 5m/1h cache-creation split.
+		`{"type":"assistant","timestamp":"2026-05-10T13:14:19Z","cwd":"/p","sessionId":"s","requestId":"r1","message":{"id":"m-full","model":"claude-opus-4-7","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":300,"cache_read_input_tokens":7,"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":100}}}}`,
+		// No tier and no split: both stay empty/zero, the line is still kept.
+		`{"type":"assistant","timestamp":"2026-05-10T13:14:20Z","cwd":"/p","sessionId":"s","requestId":"r2","message":{"id":"m-bare","model":"claude-opus-4-7","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":9}}}`,
+		// Unexpected shapes in the enrichment keys must not drop the line: they
+		// are not guarded keys and carry no stored accounting.
+		`{"type":"assistant","timestamp":"2026-05-10T13:14:21Z","cwd":"/p","sessionId":"s","requestId":"r3","message":{"id":"m-odd","model":"claude-opus-4-7","usage":{"input_tokens":3,"output_tokens":4,"service_tier":null,"cache_creation":42}}}`,
+	}
+	writeFixture(t, root, "p", "s", lines)
+
+	evs := collect(t, root)
+	if len(evs) != 3 {
+		t.Fatalf("want 3 events, got %d: %+v", len(evs), evs)
+	}
+	m := byMessageID(evs)
+
+	full, ok := m["m-full"]
+	if !ok {
+		t.Fatal("m-full missing")
+	}
+	if full.Provider != model.ProviderAnthropic {
+		t.Errorf("Provider = %q, want %q", full.Provider, model.ProviderAnthropic)
+	}
+	if full.ServiceTier != "standard" {
+		t.Errorf("ServiceTier = %q, want standard", full.ServiceTier)
+	}
+	if full.CacheTTL.Ephemeral5m != 200 || full.CacheTTL.Ephemeral1h != 100 {
+		t.Errorf("CacheTTL = %+v, want {5m:200 1h:100}", full.CacheTTL)
+	}
+	// The split is pricing-only: the stored cache-creation count is unchanged.
+	if full.CacheCreationTokens != 300 {
+		t.Errorf("CacheCreationTokens = %d, want 300", full.CacheCreationTokens)
+	}
+
+	bare, ok := m["m-bare"]
+	if !ok {
+		t.Fatal("m-bare missing")
+	}
+	if bare.ServiceTier != "" {
+		t.Errorf("ServiceTier = %q, want empty", bare.ServiceTier)
+	}
+	if bare.CacheTTL != (model.CacheWriteTTL{}) {
+		t.Errorf("CacheTTL = %+v, want zero split", bare.CacheTTL)
+	}
+
+	odd, ok := m["m-odd"]
+	if !ok {
+		t.Fatal("m-odd dropped; enrichment keys must never fail a line")
+	}
+	if odd.ServiceTier != "" || odd.CacheTTL != (model.CacheWriteTTL{}) {
+		t.Errorf("odd shapes leaked: tier %q, ttl %+v", odd.ServiceTier, odd.CacheTTL)
+	}
+}
+
+// TestCacheTTLNotExported keeps the transient split out of the JSON exports;
+// the ledger has no column for it.
+func TestCacheTTLNotExported(t *testing.T) {
+	b, err := json.Marshal(model.UsageEvent{CacheTTL: model.CacheWriteTTL{Ephemeral5m: 5, Ephemeral1h: 1}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "Ephemeral") || strings.Contains(string(b), "CacheTTL") {
+		t.Errorf("CacheTTL leaked into JSON: %s", b)
 	}
 }
 

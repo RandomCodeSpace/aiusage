@@ -46,7 +46,8 @@ func newOnceCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			stats, err := collect.RunCycle(cmdContext(c), onceRegistry(), st, discoverConfig(cfg))
+			stats, err := collect.RunCycle(cmdContext(c), onceRegistry(), st, discoverConfig(cfg),
+				collect.WithPricer(newPricer(cfg)))
 			if err != nil {
 				return fmt.Errorf("collection cycle: %w", err)
 			}

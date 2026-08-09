@@ -24,6 +24,9 @@ type Opt struct {
 	Color bool
 	// Width is an optional target terminal width. Zero means unconstrained.
 	Width int
+	// Costs adds a trailing Cost column, aligned by index with Summary.Buckets
+	// (see ResolveCosts). Nil renders the table exactly as before.
+	Costs *Costs
 }
 
 // Fixed metric column headers appended after the grouping-key columns.
@@ -33,7 +36,12 @@ const (
 	colOutput = "Output"
 	colCache  = "Cache"
 	colTotal  = "Total"
+	colCost   = "Cost"
 )
+
+// metricCols is the number of trailing right-aligned columns without a cost
+// column; with one it is metricCols+1.
+const metricCols = 5
 
 const totalsLabel = "TOTAL"
 
@@ -49,13 +57,25 @@ func RenderTable(sum *store.Summary, opt Opt) string {
 
 	keyCols := keyColumns(sum)
 	headers := append(append([]string{}, keyCols...), colEvents, colInput, colOutput, colCache, colTotal)
+	numeric := metricCols
+	if opt.Costs != nil {
+		headers = append(headers, colCost)
+		numeric++
+	}
 
 	// Build the data rows as raw strings (already humanised for metrics).
 	rows := make([][]string, 0, len(sum.Buckets)+1)
-	for _, b := range sum.Buckets {
-		rows = append(rows, bucketRow(b, keyCols))
+	for i, b := range sum.Buckets {
+		row := bucketRow(b, keyCols)
+		if opt.Costs != nil {
+			row = append(row, costCell(opt.Costs.Buckets, i))
+		}
+		rows = append(rows, row)
 	}
 	totalsRow := bucketRow(sum.Totals, keyCols)
+	if opt.Costs != nil {
+		totalsRow = append(totalsRow, opt.Costs.Totals.String())
+	}
 	// The totals row has no key values; label its first cell.
 	if len(keyCols) > 0 {
 		totalsRow[0] = totalsLabel
@@ -70,9 +90,10 @@ func RenderTable(sum *store.Summary, opt Opt) string {
 	}
 
 	// Determine the index after which columns are numeric (right-aligned).
-	// Numeric columns are always the final 5 (Events, Input, Output, Cache,
-	// Total). Everything before them is a label column (left-aligned).
-	numericFrom := len(headers) - 5
+	// Numeric columns are always the trailing metric ones (Events, Input,
+	// Output, Cache, Total, plus Cost when present). Everything before them is
+	// a label column (left-aligned).
+	numericFrom := len(headers) - numeric
 
 	widths := columnWidths(headers, rows, totalsRow)
 
@@ -120,6 +141,16 @@ func bucketRow(b store.Bucket, keyCols []string) []string {
 		humanize(b.Total),
 	)
 	return row
+}
+
+// costCell renders the cost for bucket i, or the unpriced marker when the
+// resolved slice is shorter than the bucket list (a caller mismatch must not
+// panic mid-render).
+func costCell(costs []Cost, i int) string {
+	if i < 0 || i >= len(costs) {
+		return unpricedMark
+	}
+	return costs[i].String()
 }
 
 // columnWidths computes the max display width per column across header and all

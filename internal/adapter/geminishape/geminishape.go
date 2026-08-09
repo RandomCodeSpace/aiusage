@@ -42,8 +42,9 @@ const maxLineBytes = 8 << 20 // 8 MiB
 
 // Shape parameterises the shared parser for one adapter.
 type Shape struct {
-	Tool    string // tool id stamped on every snapshot (model.ToolGemini, ...)
-	Project string // project label (the telemetry records no cwd)
+	Tool     string // tool id stamped on every snapshot (model.ToolGemini, ...)
+	Provider string // billing identity stamped on every snapshot (model.ProviderGoogle)
+	Project  string // project label (the telemetry records no cwd)
 }
 
 // FileResult is the outcome of parsing one telemetry file.
@@ -316,6 +317,7 @@ func (s Shape) toSnapshot(r rawRecord, sourcePath string, now time.Time) (model.
 		Tool:                s.Tool,
 		Key:                 sourcePath + "|" + id,
 		Model:               strings.TrimSpace(r.Model),
+		Provider:            s.Provider,
 		SessionID:           session,
 		Project:             s.Project,
 		ObservedTime:        obs,

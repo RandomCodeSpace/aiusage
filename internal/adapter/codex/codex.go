@@ -412,6 +412,7 @@ func buildEvent(t rawTokens, mdl, session, path string, when time.Time) (model.U
 	ev := model.UsageEvent{
 		Tool:                model.ToolCodex,
 		Model:               mdl,
+		Provider:            model.ProviderOpenAI,
 		SessionID:           session,
 		Project:             "",
 		EventTime:           when,

@@ -369,8 +369,20 @@ func toCandidate(rec *otelRecord, index int, fallbackTS time.Time, traceModels, 
 	// fallback may fill output or grow reasoning, never shrink known parts.
 	output, reasoning = tokenutil.ApplyTotalFallback(input, output, cacheCreation, cacheRead, reasoning, totalAttr)
 
-	// Provider-authoritative total (matches ccusage: components + reasoning).
-	total := input + output + cacheCreation + cacheRead + reasoning
+	// Authoritative total: gen_ai.usage.total_tokens when the exporter reported
+	// one. Copilot proxies several vendors and for Anthropic-backed models the
+	// reasoning attribute is already inside output_tokens, so recomputing the
+	// sum would inflate the exporter's own total and bill those tokens twice.
+	// The component sum is used only when no total was reported — the same rule
+	// codex and gemini already follow.
+	//
+	// UNVERIFIED: no local Copilot OTEL data exists to check the reasoning rule
+	// per backing provider (issue #28). model.ReasoningModeFor treats Copilot
+	// reasoning as additive on best evidence; revisit both together.
+	total := totalAttr
+	if total <= 0 {
+		total = input + output + cacheCreation + cacheRead + reasoning
+	}
 	if total == 0 {
 		return nil
 	}
@@ -504,6 +516,7 @@ func candidatesToEvents(cands []*candidate, path string) []model.UsageEvent {
 		evs = append(evs, model.UsageEvent{
 			Tool:                model.ToolCopilot,
 			Model:               c.model,
+			Provider:            model.ProviderGitHub,
 			SessionID:           c.sessionID,
 			Project:             "",
 			EventTime:           c.eventTime,

@@ -22,6 +22,7 @@ type DaemonOptions struct {
 	PIDPath  string        // path to write the pidfile; lock is PIDPath+".lock"
 	Version  string        // build identity recorded for CLI/daemon version sync
 	Logger   *log.Logger   // optional; defaults to log.Default()
+	Pricer   Pricer        // optional; stamps cost on every new event
 }
 
 // minInterval guards against a pathological tight loop if a caller passes a
@@ -67,7 +68,7 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc ad
 	runOne := func() {
 		// Cancellation is observed inside RunCycle; an aborted cycle returns the
 		// ctx error which we log without treating it as a fatal collection fault.
-		stats, err := RunCycle(ctx, reg, st, dc)
+		stats, err := RunCycle(ctx, reg, st, dc, WithPricer(opt.Pricer))
 		if err != nil && ctx.Err() == nil {
 			logger.Printf("cycle error: %v", err)
 		}

@@ -41,6 +41,7 @@ func daemonOptions(cfg config.Config) collect.DaemonOptions {
 		Interval: time.Duration(cfg.IntervalSeconds) * time.Second,
 		PIDPath:  cfg.PIDPath,
 		Version:  buildinfo.Identity(),
+		Pricer:   newPricer(cfg),
 	}
 }
 

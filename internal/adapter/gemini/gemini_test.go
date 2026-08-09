@@ -69,6 +69,9 @@ func TestCumulativePerID(t *testing.T) {
 	if s.Project != metaProject {
 		t.Errorf("Project = %q, want %q", s.Project, metaProject)
 	}
+	if s.Provider != model.ProviderGoogle {
+		t.Errorf("Provider = %q, want %q", s.Provider, model.ProviderGoogle)
+	}
 	// Max snapshot: input=300, output=80, thoughts=15.
 	if s.InputTokens != 300 {
 		t.Errorf("InputTokens = %d, want 300", s.InputTokens)

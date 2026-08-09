@@ -23,6 +23,35 @@ import (
 // minutes apart). Always returns UTC.
 var nowFn = func() time.Time { return time.Now().UTC() }
 
+// Pricer stamps a cost on a usage event just before it is appended. It returns
+// the cost in micro-USD and the price_source that produced it. ok=false leaves
+// the event unpriced (a NULL cost column) — the honest state, since a stored 0
+// would claim the request was free. Reporting prices NULL rows from the current
+// table at display time instead.
+type Pricer interface {
+	PriceEvent(e model.UsageEvent) (microUSD int64, source string, ok bool)
+}
+
+// Refresher is the optional half of Pricer: a price ladder that can update
+// itself from upstream. RunCycle offers it one chance per cycle; the
+// implementation is expected to throttle itself and to fail silently.
+type Refresher interface {
+	Refresh(ctx context.Context) error
+}
+
+// Option configures a collection cycle.
+type Option func(*cycleOptions)
+
+type cycleOptions struct {
+	pricer Pricer
+}
+
+// WithPricer stamps a cost on every new event from the price table in effect at
+// ingest. Without it (the default) events are stored unpriced.
+func WithPricer(p Pricer) Option {
+	return func(o *cycleOptions) { o.pricer = p }
+}
+
 // CycleStats reports the outcome of a single RunCycle.
 type CycleStats struct {
 	Adapters       int      // adapters iterated
@@ -46,9 +75,21 @@ func (s CycleStats) AllFailed() bool {
 // continues. RunCycle only returns a non-nil error for failures that prevent
 // the cycle from making any meaningful progress (none currently — the loop is
 // fully resilient), so callers may safely run it on a ticker.
-func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc adapter.DiscoverConfig) (CycleStats, error) {
+func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc adapter.DiscoverConfig, opts ...Option) (CycleStats, error) {
+	var o cycleOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+
 	var stats CycleStats
 	observedAt := nowFn()
+
+	// One refresh attempt per cycle, before anything is stamped, so a stamped
+	// cost uses the newest table this machine can reach. The ladder throttles
+	// and swallows its own failures; a stale table is never a cycle error.
+	if r, ok := o.pricer.(Refresher); ok {
+		_ = r.Refresh(ctx)
+	}
 
 	for _, ad := range reg.All() {
 		if err := ctx.Err(); err != nil {
@@ -87,7 +128,7 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 
 			// ApplyEvents commits per-row: a non-nil error may accompany a
 			// partial insert (skipped poison rows), so n counts regardless.
-			n, sErr := storeEvents(ctx, st, obs.Events, observedAt, evCp)
+			n, sErr := storeEvents(ctx, st, obs.Events, observedAt, evCp, o.pricer)
 			stats.EventsSeen += len(obs.Events)
 			stats.EventsInserted += n
 			if sErr != nil {
@@ -108,7 +149,7 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				if clean && i == len(obs.Snapshots)-1 {
 					cp = obs.Checkpoint
 				}
-				n, advanced, sErr := storeSnapshot(ctx, st, s, observedAt, cp)
+				n, advanced, sErr := storeSnapshot(ctx, st, s, observedAt, cp, o.pricer)
 				if sErr != nil {
 					stats.Errors = append(stats.Errors, fmt.Sprintf("snapshot %s %s: %v", s.Tool, s.Key, sErr))
 					clean = false
@@ -146,10 +187,10 @@ func collectSource(ctx context.Context, ad adapter.Adapter, st store.Store, src 
 	return inc.CollectIncremental(ctx, src, cp)
 }
 
-// storeEvents stamps ObservedTime on event-level records that lack one, then
-// appends them idempotently together with the source checkpoint (one
+// storeEvents stamps ObservedTime and cost on event-level records that lack
+// one, then appends them idempotently together with the source checkpoint (one
 // transaction). Returns the number of new dedup keys inserted.
-func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent, observedAt time.Time, cp *model.SourceCheckpoint) (int, error) {
+func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (int, error) {
 	if len(events) == 0 && cp == nil {
 		return 0, nil
 	}
@@ -158,9 +199,23 @@ func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent,
 		if e.ObservedTime.IsZero() {
 			e.ObservedTime = observedAt
 		}
+		stampCost(p, &e)
 		stamped[i] = e
 	}
 	return st.ApplyEvents(ctx, stamped, cp)
+}
+
+// stampCost prices an event at the table in effect right now. A model no rung
+// of the ladder knows is left unpriced: CostMicroUSD stays nil, which stores as
+// SQL NULL. Stamping 0 instead would assert the request was free, and the
+// ledger is append-only — that lie could never be corrected in place.
+func stampCost(p Pricer, e *model.UsageEvent) {
+	if p == nil {
+		return
+	}
+	if micro, source, ok := p.PriceEvent(*e); ok {
+		e.SetCost(micro, source)
+	}
 }
 
 // storeSnapshot materialises the positive monotonic-with-reset delta for one
@@ -172,7 +227,7 @@ func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent,
 // Returns the number of new dedup keys inserted (0 or 1) and whether the
 // state actually advanced (false on a collision — the caller must then hold
 // the source checkpoint back so the delta stays re-derivable).
-func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapshot, observedAt time.Time, cp *model.SourceCheckpoint) (int, bool, error) {
+func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapshot, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (int, bool, error) {
 	last, err := st.LastState(ctx, s.Tool, s.Key)
 	if err != nil {
 		return 0, false, fmt.Errorf("last state: %w", err)
@@ -194,7 +249,9 @@ func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapsho
 
 	var events []model.UsageEvent
 	if d.hasPositive() {
-		events = []model.UsageEvent{syntheticEvent(s, d, observedAt)}
+		ev := syntheticEvent(s, d, observedAt)
+		stampCost(p, &ev)
+		events = []model.UsageEvent{ev}
 	}
 
 	// State advances even without a positive delta, so subsequent polls diff
@@ -211,7 +268,11 @@ func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapsho
 // snapshotUnchanged reports whether cur carries exactly the counters and
 // attributes already stored for the cell. ObservedTime is deliberately
 // excluded: nothing diffs against it, so its advance alone does not warrant a
-// row rewrite every cycle.
+// row rewrite every cycle. Provider is excluded for a harder reason: it has no
+// aggregate_state column, so the stored side is always empty and comparing it
+// would report "changed" on every poll of every provider-bearing source,
+// defeating the fast path entirely. It is carried onto the delta event from
+// the fresh snapshot, never from the baseline, so nothing is lost.
 func snapshotUnchanged(last, cur model.AggregateSnapshot) bool {
 	return last.InputTokens == cur.InputTokens &&
 		last.OutputTokens == cur.OutputTokens &&
@@ -298,6 +359,7 @@ func syntheticEvent(s model.AggregateSnapshot, d delta, observedAt time.Time) mo
 	return model.UsageEvent{
 		Tool:                s.Tool,
 		Model:               s.Model,
+		Provider:            s.Provider,
 		SessionID:           s.SessionID,
 		Project:             s.Project,
 		EventTime:           eventTime,

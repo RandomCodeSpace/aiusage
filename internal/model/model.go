@@ -29,6 +29,83 @@ const (
 	ToolAgy        = "agy"
 )
 
+// Billing provider identities — the "provider" dimension of a priced event
+// (whose price list applies to the request). Adapters whose source data names
+// the provider pass it through verbatim (opencode's providerID, hermes'
+// billing_provider); the rest stamp the constant for the vendor they always
+// talk to. An empty provider means unknown and is rendered as such.
+const (
+	ProviderAnthropic = "anthropic"
+	ProviderOpenAI    = "openai"
+	ProviderGoogle    = "google"
+	ProviderGitHub    = "github"
+)
+
+// ReasoningMode describes how a tool's reported reasoning tokens relate to its
+// output tokens. The pricing engine reads it to decide whether reasoning is
+// already paid for by the output count or must be billed on top of it.
+type ReasoningMode string
+
+const (
+	// ReasoningSubset: reasoning tokens are already contained in the reported
+	// output tokens. Price output only; billing reasoning again double-charges.
+	ReasoningSubset ReasoningMode = "subset"
+	// ReasoningAdditive: reasoning tokens are reported alongside output and are
+	// NOT part of it. Price output and reasoning, both at the output rate.
+	ReasoningAdditive ReasoningMode = "additive"
+)
+
+// reasoningModes maps a tool id to its reasoning billing mode.
+//
+// Verified against real local data:
+//   - claude-code: transcripts report no reasoning field at all; thinking
+//     tokens are already inside output_tokens.
+//   - codex: reasoning_output_tokens is an OpenAI subset of output_tokens.
+//   - opencode: every local message row satisfies
+//     total = input + output + reasoning + cache.read + cache.write, and rows
+//     with reasoning > output exist, so reasoning cannot be a subset.
+//   - gemini / agy: tokens.thoughts is reported next to tokens.output and the
+//     provider total is input + output + thoughts.
+//
+// UNVERIFIED — no local data for either tool (issue #28). These encode the
+// best available evidence and must be re-checked once data exists:
+//   - hermes: sessions carry reasoning_tokens in their own column and the
+//     adapter keeps it out of the authoritative total, which only holds if the
+//     count is already inside output_tokens.
+//   - copilot: the OTEL export reports gen_ai.usage.reasoning.output_tokens as
+//     a distinct attribute. Note that Copilot proxies several vendors and for
+//     Anthropic-backed models reasoning is inside output, so this default
+//     over-bills those models until the rule is verified per provider.
+var reasoningModes = map[string]ReasoningMode{
+	ToolClaudeCode: ReasoningSubset,
+	ToolCodex:      ReasoningSubset,
+	ToolOpenCode:   ReasoningAdditive,
+	ToolGemini:     ReasoningAdditive,
+	ToolAgy:        ReasoningAdditive,
+	ToolHermes:     ReasoningSubset,   // unverified
+	ToolCopilot:    ReasoningAdditive, // unverified
+}
+
+// ReasoningModeFor returns the reasoning billing mode for a tool id. An unknown
+// tool falls back to ReasoningSubset — the conservative direction, which can
+// under-bill but never charges the same token twice.
+func ReasoningModeFor(tool string) ReasoningMode {
+	if m, ok := reasoningModes[tool]; ok {
+		return m
+	}
+	return ReasoningSubset
+}
+
+// CacheWriteTTL splits a cache-creation write by the lifetime requested for the
+// entry. Anthropic prices a 1h cache write above the 5m write, so the pricing
+// stamp needs the split even though the ledger stores only the combined
+// CacheCreationTokens count. A zero split means the source reported none: the
+// whole cache write is priced at the 5m rate.
+type CacheWriteTTL struct {
+	Ephemeral5m int64
+	Ephemeral1h int64
+}
+
 // EventKind marks a normal usage record vs an appended correction. History is
 // never rewritten; corrections are appended as KindAdjustment rows.
 type EventKind string
@@ -41,11 +118,17 @@ const (
 // UsageEvent is one immutable observed usage record. Stored append-only and
 // deduplicated on DedupKey. All token counts are non-negative.
 type UsageEvent struct {
-	Tool      string    // agent CLI id (ToolClaudeCode, ...) — categorisation dim
-	Model     string    // model id — categorisation dim
-	SessionID string    // provider session id
-	Project   string    // workspace / cwd path
-	EventTime time.Time // when the usage actually occurred (from the source)
+	Tool  string // agent CLI id (ToolClaudeCode, ...) — categorisation dim
+	Model string // model id — categorisation dim
+	// Provider is the billing identity behind the request (ProviderAnthropic,
+	// ...), taken from the source data when it names one. Empty means unknown.
+	Provider string
+	// ServiceTier is the provider's service tier for the request ("standard",
+	// "batch", "priority", ...). Empty when the source reports none.
+	ServiceTier string
+	SessionID   string    // provider session id
+	Project     string    // workspace / cwd path
+	EventTime   time.Time // when the usage actually occurred (from the source)
 	// ObservedTime is when the daemon read/stored the record. For aggregate
 	// deltas (no real event time) EventTime is set equal to ObservedTime.
 	ObservedTime time.Time
@@ -59,6 +142,20 @@ type UsageEvent struct {
 	// its provider's accounting (cache tokens are separate for Anthropic but a
 	// subset of input for OpenAI/codex — adapters must not double count).
 	TotalTokens int64
+	// CacheTTL splits CacheCreationTokens by requested cache lifetime. It is
+	// TRANSIENT adapter enrichment consumed by the pricing stamp and is never
+	// persisted: the ledger has no column for it and the insert statements list
+	// their columns explicitly. json:"-" keeps it out of exports too.
+	CacheTTL CacheWriteTTL `json:"-"`
+
+	// CostMicroUSD is the cost stamped at collect time, in millionths of USD,
+	// or nil when the event could not be priced. nil is the ONLY "unknown":
+	// a stamped 0 would claim the request was free.
+	CostMicroUSD *int64
+	// PriceSource names the table that produced CostMicroUSD ("override",
+	// "litellm-<fetch date>", "embedded-<snapshot date>"). Empty when unpriced,
+	// so a later correction knows which table it corrects.
+	PriceSource string
 
 	RequestID  string // provider request id (if any)
 	MessageID  string // provider message id (if any)
@@ -77,6 +174,23 @@ func (e UsageEvent) ComputedTotal() int64 {
 	return e.InputTokens + e.OutputTokens + e.CacheCreationTokens + e.CacheReadTokens
 }
 
+// Cost returns the stamped cost in micro-USD and whether the event carries one.
+// A false second result means unpriced — not free.
+func (e UsageEvent) Cost() (int64, bool) {
+	if e.CostMicroUSD == nil {
+		return 0, false
+	}
+	return *e.CostMicroUSD, true
+}
+
+// SetCost stamps a priced cost and the price table that produced it. Callers
+// that cannot price an event must leave both fields alone rather than stamp 0.
+func (e *UsageEvent) SetCost(microUSD int64, source string) {
+	c := microUSD
+	e.CostMicroUSD = &c
+	e.PriceSource = source
+}
+
 // AggregateSnapshot is one observation of a source's cumulative/growing
 // counters for a single accumulator cell. The collector compares the new
 // snapshot against the last stored state for the same (Tool, Key) to derive a
@@ -90,9 +204,12 @@ func (e UsageEvent) ComputedTotal() int64 {
 // growing cell). SessionID/Model/Project are the reportable attributes carried
 // onto the synthetic event.
 type AggregateSnapshot struct {
-	Tool         string
-	Key          string
-	Model        string
+	Tool  string
+	Key   string
+	Model string
+	// Provider is the billing identity behind the session (ProviderAnthropic,
+	// ...), carried onto the synthetic event like the other attributes.
+	Provider     string
 	SessionID    string
 	Project      string
 	ObservedTime time.Time

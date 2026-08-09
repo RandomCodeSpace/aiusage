@@ -19,6 +19,11 @@
 // Reasoning=tokens.reasoning, and Total is reconciled against tokens.total via
 // tokenutil.ApplyTotalFallback.
 //
+// Reasoning is ADDITIVE here, not a subset of output: every local message row
+// satisfies total = input + output + reasoning + cache.read + cache.write, and
+// rows with reasoning > output exist. It therefore participates in the known
+// sum handed to the fallback (see buildEvent).
+//
 // The persisted dedup key is "opencode|<message id>", so the SQLite row and the
 // JSON file for the same message collapse to one stored event (DB is discovered
 // first, so it wins on INSERT OR IGNORE).
@@ -355,16 +360,19 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 	total := adapter.NonNeg(m.Tokens.Total)
 
 	// Reconcile against the provider total. opencode cache buckets are additive
-	// (Anthropic-style), so they participate in the known sum; reasoning is a
-	// subset of output and is NOT double-counted here. Any unexplained remainder
-	// lands in output (when empty) or the extra bucket.
-	output, extra := tokenutil.ApplyTotalFallback(input, output, cacheCreation, cacheRead, 0, total)
+	// (Anthropic-style) and so is reasoning, so all of them participate in the
+	// known sum and only a genuinely unexplained remainder is redistributed.
+	// Passing reasoning as the extra bucket is also what stops the gap-fill
+	// branch from billing it twice: were reasoning left out of the known sum,
+	// a row with output == 0 and reasoning > 0 would have the fallback copy the
+	// reasoning count into OutputTokens while ReasoningTokens kept it as well.
+	output, extra := tokenutil.ApplyTotalFallback(input, output, cacheCreation, cacheRead, reasoning, total)
 
 	// Authoritative stored total: prefer the provider total, else the sum of the
-	// additive components (plus any overflow attributed to extra).
+	// additive components (extra already carries reasoning plus any overflow).
 	storedTotal := total
-	if storedTotal < input+output+cacheCreation+cacheRead+extra {
-		storedTotal = input + output + cacheCreation + cacheRead + extra
+	if sum := input + output + cacheCreation + cacheRead + extra; storedTotal < sum {
+		storedTotal = sum
 	}
 
 	if input == 0 && output == 0 && cacheCreation == 0 && cacheRead == 0 &&
@@ -385,6 +393,7 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 	ev := model.UsageEvent{
 		Tool:                model.ToolOpenCode,
 		Model:               mdl,
+		Provider:            strings.TrimSpace(m.ProviderID),
 		SessionID:           session,
 		Project:             project,
 		EventTime:           when,

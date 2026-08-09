@@ -203,8 +203,15 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		cCreate := adapter.NonNeg(cacheWrite.Int64) // cache_write_tokens -> CacheCreation
 		cRead := adapter.NonNeg(cacheRead.Int64)
 		reasoning := adapter.NonNeg(reason.Int64)
-		// Anthropic-style additive accounting; reasoning is informational and
-		// (per the spec) not added into the authoritative total.
+		// Anthropic-style additive accounting for the cache buckets. Reasoning
+		// is deliberately kept OUT of the authoritative total, which is only
+		// correct if the count is already inside output_tokens.
+		//
+		// UNVERIFIED: no local Hermes data exists to confirm that (issue #28).
+		// The behaviour is preserved as-is because changing it would restate
+		// every stored total; model.ReasoningModeFor(ToolHermes) carries the
+		// matching subset assumption for pricing, and the two must move
+		// together when the rule is finally checked.
 		total := in + out + cCreate + cRead
 
 		// Prefer the row's real timestamps so a delta accrued while the daemon
@@ -221,6 +228,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			Tool:                model.ToolHermes,
 			Key:                 id,
 			Model:               mdl,
+			Provider:            strings.TrimSpace(provider.String),
 			SessionID:           id,
 			Project:             metaProject,
 			ObservedTime:        obs,

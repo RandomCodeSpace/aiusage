@@ -211,6 +211,7 @@ func TestWriteEventsCSVHeaderStable(t *testing.T) {
 		"tool", "model", "session", "project", "event_time", "observed_time",
 		"input", "output", "cache_creation", "cache_read", "reasoning", "total",
 		"request_id", "message_id", "source_path", "kind",
+		"provider", "service_tier", "cost_micro_usd", "cost_usd", "price_source",
 	}
 
 	var buf bytes.Buffer

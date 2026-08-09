@@ -46,6 +46,35 @@ type Bucket struct {
 	CacheRead     int64
 	Reasoning     int64
 	Total         int64
+	// CostMicroUSD sums the costs stamped at collect time (millionths of USD).
+	// Rows with no stamped cost contribute nothing to it — they are counted in
+	// UnpricedEvents instead and must be display-priced separately, so a bucket
+	// with UnpricedEvents > 0 is an UNDERSTATEMENT until that is folded in.
+	CostMicroUSD int64
+	// UnpricedEvents counts rows in the bucket whose cost_micro_usd is NULL
+	// (collected before v3, or a model the pricing ladder could not price).
+	UnpricedEvents int64
+}
+
+// UnpricedGroup aggregates the rows of one bucket that carry NO stamped cost,
+// split by the attributes a price lookup needs (tool for the reasoning-billing
+// rule, model/provider for the rate, service tier for the tier rate). Keys
+// repeats the Filter.GroupBy dimension values so a caller can fold the
+// display-priced result back into the matching Summarize bucket.
+type UnpricedGroup struct {
+	Keys        map[string]string
+	OrderedKeys []string
+	Tool        string
+	Model       string
+	Provider    string
+	ServiceTier string
+
+	Events        int64
+	Input         int64
+	Output        int64
+	CacheCreation int64
+	CacheRead     int64
+	Reasoning     int64
 }
 
 // Summary is the result of Summarize: grouped buckets plus a grand total.
@@ -127,6 +156,13 @@ type Store interface {
 
 	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
 	Summarize(ctx context.Context, f Filter) (*Summary, error)
+
+	// UnpricedGroups returns the token totals of the matching rows that have
+	// NO stamped cost, grouped by Filter.GroupBy plus (tool, model, provider,
+	// service_tier). It exists so cost surfaces can value historical and
+	// unpriceable rows from the CURRENT price table without materialising one
+	// bucket per event. An empty result means every matching row is stamped.
+	UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error)
 
 	// ListEvents returns raw events matching Filter (ordered by event_time).
 	// Used by export.

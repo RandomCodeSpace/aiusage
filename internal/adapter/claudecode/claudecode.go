@@ -339,6 +339,42 @@ type usage struct {
 	CacheCreationTokens nullable[int64]  `json:"cache_creation_input_tokens"`
 	CacheReadTokens     nullable[int64]  `json:"cache_read_input_tokens"`
 	Speed               nullable[string] `json:"speed"`
+	// Enrichment-only fields. They are NOT guarded keys: an absent, null or
+	// unexpected value must leave the line's stored accounting untouched, so
+	// both decode leniently rather than failing the enclosing Unmarshal.
+	ServiceTier   lenientString  `json:"service_tier"`
+	CacheCreation *cacheCreation `json:"cache_creation"`
+}
+
+// lenientString decodes a JSON string and treats every other shape (null,
+// number, object) as the empty string. Enrichment must never drop a line that
+// parsed before it existed.
+type lenientString string
+
+func (s *lenientString) UnmarshalJSON(b []byte) error {
+	var v string
+	if err := json.Unmarshal(b, &v); err == nil {
+		*s = lenientString(v)
+	}
+	return nil
+}
+
+// cacheCreation is Anthropic's per-TTL split of cache_creation_input_tokens.
+// The two lifetimes are priced differently, so the pricing stamp reads the
+// split transiently; the ledger keeps only the combined count.
+type cacheCreation struct {
+	Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+}
+
+// UnmarshalJSON tolerates any shape for the same reason as lenientString.
+func (c *cacheCreation) UnmarshalJSON(b []byte) error {
+	type plain cacheCreation
+	var v plain
+	if err := json.Unmarshal(b, &v); err == nil {
+		*c = cacheCreation(v)
+	}
+	return nil
 }
 
 // candidate is a parsed usage record awaiting dedup.
@@ -415,9 +451,20 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 
 	dedupKey := persistedKey(messageID, path, line)
 
+	// Cache-write TTL split: transient pricing input, never stored. When the
+	// usage block omits cache_creation the split stays zero and the pricing
+	// engine falls back to the 5m rate for the whole cache write.
+	var ttl model.CacheWriteTTL
+	if u.CacheCreation != nil {
+		ttl.Ephemeral5m = adapter.NonNeg(u.CacheCreation.Ephemeral5m)
+		ttl.Ephemeral1h = adapter.NonNeg(u.CacheCreation.Ephemeral1h)
+	}
+
 	ev := model.UsageEvent{
 		Tool:                model.ToolClaudeCode,
 		Model:               modelID,
+		Provider:            model.ProviderAnthropic,
+		ServiceTier:         strings.TrimSpace(string(u.ServiceTier)),
 		SessionID:           session,
 		Project:             project,
 		EventTime:           eventTime,
@@ -427,6 +474,7 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		CacheReadTokens:     cacheR,
 		ReasoningTokens:     0,
 		TotalTokens:         total,
+		CacheTTL:            ttl,
 		RequestID:           requestID,
 		MessageID:           messageID,
 		SourcePath:          path,

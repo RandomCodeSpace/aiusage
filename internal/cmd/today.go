@@ -43,7 +43,8 @@ func renderSummary(c *cobra.Command, filter store.Filter, asJSON bool) error {
 	}
 	defer st.Close()
 
-	sum, err := st.Summarize(cmdContext(c), filter)
+	ctx := cmdContext(c)
+	sum, err := st.Summarize(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("summarize: %w", err)
 	}
@@ -51,6 +52,10 @@ func renderSummary(c *cobra.Command, filter store.Filter, asJSON bool) error {
 	if asJSON {
 		return report.WriteSummaryJSON(c.OutOrStdout(), sum)
 	}
-	fmt.Fprintln(c.OutOrStdout(), report.RenderTable(sum, report.Opt{Color: false}))
+	costs := resolveCosts(ctx, st, cfg, sum, filter)
+	fmt.Fprintln(c.OutOrStdout(), report.RenderTable(sum, report.Opt{Color: false, Costs: costs}))
+	if note := costNote(costs); note != "" {
+		fmt.Fprintln(c.OutOrStdout(), note)
+	}
 	return nil
 }

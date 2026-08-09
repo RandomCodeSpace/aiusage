@@ -38,7 +38,7 @@ const (
 )
 
 // shape is the shared Gemini-telemetry parser stamped for this adapter.
-var shape = geminishape.Shape{Tool: toolID, Project: metaProject}
+var shape = geminishape.Shape{Tool: toolID, Provider: model.ProviderGoogle, Project: metaProject}
 
 // Adapter reads Gemini CLI telemetry files. Read-only.
 type Adapter struct{}

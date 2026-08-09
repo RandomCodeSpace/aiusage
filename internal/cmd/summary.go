@@ -97,7 +97,11 @@ func runSummary(c *cobra.Command, o summaryOpts) error {
 		return report.WriteSummaryJSON(c.OutOrStdout(), sum)
 	}
 
-	out := report.RenderTable(sum, report.Opt{Breakdown: o.breakdown, Color: false})
+	costs := resolveCosts(ctx, st, cfg, sum, filter)
+	out := report.RenderTable(sum, report.Opt{Breakdown: o.breakdown, Color: false, Costs: costs})
 	fmt.Fprintln(c.OutOrStdout(), out)
+	if note := costNote(costs); note != "" {
+		fmt.Fprintln(c.OutOrStdout(), note)
+	}
 	return nil
 }

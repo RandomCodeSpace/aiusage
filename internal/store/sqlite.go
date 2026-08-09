@@ -25,7 +25,7 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // SQLite is the concrete append-only store backed by modernc.org/sqlite.
 type SQLite struct {
@@ -149,8 +149,9 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 			event_time_unix, observed_time_unix,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			reasoning_tokens, total_tokens,
-			request_id, message_id, source_path, kind, raw
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			request_id, message_id, source_path, kind, raw,
+			provider, service_tier, cost_micro_usd, price_source
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(dedup_key) DO NOTHING`)
 	if err != nil {
 		return 0, nil, fmt.Errorf("store: prepare insert: %w", err)
@@ -185,6 +186,7 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 			e.InputTokens, e.OutputTokens, e.CacheCreationTokens, e.CacheReadTokens,
 			e.ReasoningTokens, e.TotalTokens,
 			e.RequestID, e.MessageID, e.SourcePath, string(kind), nullString(e.Raw),
+			e.Provider, e.ServiceTier, nullCost(e), e.PriceSource,
 		)
 		if execErr != nil {
 			skip(fmt.Errorf("store: insert event %s: %w", e.DedupKey, execErr))
@@ -331,6 +333,15 @@ func nullString(s string) any {
 	return s
 }
 
+// nullCost binds the stamped cost, or SQL NULL when the event is unpriced.
+// Binding 0 instead would assert the request was free.
+func nullCost(e model.UsageEvent) any {
+	if c, ok := e.Cost(); ok {
+		return c
+	}
+	return nil
+}
+
 // LastState returns the latest observed counters for the (tool, key) accumulator
 // cell, or nil if none has been recorded.
 func (s *SQLite) LastState(ctx context.Context, tool, key string) (*model.AggregateSnapshot, error) {
@@ -421,7 +432,9 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END),
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
-		COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0)
+		COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
+		COALESCE(SUM(cost_micro_usd),0),
+		COALESCE(SUM(CASE WHEN cost_micro_usd IS NULL THEN 1 ELSE 0 END),0)
 		FROM usage_events`)
 	sb.WriteString(where)
 	if len(groupExprs) > 0 {
@@ -440,12 +453,13 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 	sum := &Summary{GroupBy: append([]string{}, f.GroupBy...)}
 	for rows.Next() {
 		keyVals := make([]string, len(f.GroupBy))
-		dest := make([]any, 0, len(f.GroupBy)+8)
+		dest := make([]any, 0, len(f.GroupBy)+10)
 		for i := range keyVals {
 			dest = append(dest, &keyVals[i])
 		}
 		var b Bucket
-		dest = append(dest, &b.Events, &b.Sessions, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.Reasoning, &b.Total)
+		dest = append(dest, &b.Events, &b.Sessions, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.Reasoning, &b.Total,
+			&b.CostMicroUSD, &b.UnpricedEvents)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan summary row: %w", err)
 		}
@@ -480,6 +494,8 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		sum.Totals.CacheRead += b.CacheRead
 		sum.Totals.Reasoning += b.Reasoning
 		sum.Totals.Total += b.Total
+		sum.Totals.CostMicroUSD += b.CostMicroUSD
+		sum.Totals.UnpricedEvents += b.UnpricedEvents
 	}
 	if len(sum.Buckets) > 0 {
 		n, err := s.distinctSessions(ctx, where, args)
@@ -489,6 +505,71 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		sum.Totals.Sessions = n
 	}
 	return sum, nil
+}
+
+// UnpricedGroups aggregates the matching rows with a NULL cost, grouped by the
+// filter's dimensions plus the attributes a price lookup needs. See
+// Store.UnpricedGroups. The grouping columns are appended AFTER the caller's
+// dimensions so the returned Keys align one-to-one with Summarize's buckets.
+func (s *SQLite) UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error) {
+	where, args := buildWhere(f)
+	if where == "" {
+		where = " WHERE cost_micro_usd IS NULL"
+	} else {
+		where += " AND cost_micro_usd IS NULL"
+	}
+
+	groupExprs := make([]string, 0, len(f.GroupBy)+4)
+	for _, dim := range f.GroupBy {
+		expr, err := groupExpr(dim)
+		if err != nil {
+			return nil, err
+		}
+		groupExprs = append(groupExprs, expr)
+	}
+	cols := append(append([]string{}, groupExprs...), "tool", "model", "provider", "service_tier")
+
+	q := "SELECT " + strings.Join(cols, ", ") + `,
+		COUNT(*),
+		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+		COALESCE(SUM(reasoning_tokens),0)
+		FROM usage_events` + where +
+		" GROUP BY " + strings.Join(cols, ", ") +
+		" ORDER BY " + strings.Join(cols, ", ")
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: unpriced groups: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UnpricedGroup
+	for rows.Next() {
+		keyVals := make([]string, len(f.GroupBy))
+		dest := make([]any, 0, len(f.GroupBy)+10)
+		for i := range keyVals {
+			dest = append(dest, &keyVals[i])
+		}
+		var g UnpricedGroup
+		dest = append(dest, &g.Tool, &g.Model, &g.Provider, &g.ServiceTier,
+			&g.Events, &g.Input, &g.Output, &g.CacheCreation, &g.CacheRead, &g.Reasoning)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, fmt.Errorf("store: scan unpriced group: %w", err)
+		}
+		if len(f.GroupBy) > 0 {
+			g.Keys = make(map[string]string, len(f.GroupBy))
+			g.OrderedKeys = append([]string{}, f.GroupBy...)
+			for i, dim := range f.GroupBy {
+				g.Keys[dim] = keyVals[i]
+			}
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: unpriced group rows: %w", err)
+	}
+	return out, nil
 }
 
 // distinctSessions counts distinct non-empty session ids over the filtered set.
@@ -509,7 +590,8 @@ func (s *SQLite) ListEvents(ctx context.Context, f Filter) ([]model.UsageEvent, 
 	q := `SELECT tool, model, session_id, project, event_time_unix, observed_time_unix,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		reasoning_tokens, total_tokens, request_id, message_id, source_path, kind,
-		dedup_key, COALESCE(raw,'')
+		dedup_key, COALESCE(raw,''),
+		provider, service_tier, cost_micro_usd, price_source
 		FROM usage_events` + where + ` ORDER BY event_time_unix, id`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -525,18 +607,24 @@ func (s *SQLite) ListEvents(ctx context.Context, f Filter) ([]model.UsageEvent, 
 			eventUnix    int64
 			observedUnix int64
 			kind         string
+			cost         sql.NullInt64
 		)
 		if err := rows.Scan(
 			&e.Tool, &e.Model, &e.SessionID, &e.Project, &eventUnix, &observedUnix,
 			&e.InputTokens, &e.OutputTokens, &e.CacheCreationTokens, &e.CacheReadTokens,
 			&e.ReasoningTokens, &e.TotalTokens, &e.RequestID, &e.MessageID, &e.SourcePath, &kind,
 			&e.DedupKey, &e.Raw,
+			&e.Provider, &e.ServiceTier, &cost, &e.PriceSource,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
 		}
 		e.EventTime = time.Unix(eventUnix, 0).UTC()
 		e.ObservedTime = time.Unix(observedUnix, 0).UTC()
 		e.Kind = model.EventKind(kind)
+		// A NULL cost stays nil: unpriced, not free.
+		if cost.Valid {
+			e.SetCost(cost.Int64, e.PriceSource)
+		}
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {

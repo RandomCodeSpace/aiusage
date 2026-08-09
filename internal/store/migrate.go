@@ -28,7 +28,7 @@ type migration struct {
 // Version ledger:
 //
 //	v2 — source_checkpoints table (incremental collection, issue #5)
-//	v3 — reserved: cost/provider columns on usage_events (issue #9)
+//	v3 — cost/provider/tier columns on usage_events (issues #9, #16)
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -41,6 +41,16 @@ var migrations = []migration{
 		  state       TEXT,
 		  PRIMARY KEY (tool, source_path)
 		)`,
+	}},
+	// v3 only appends columns. Existing rows keep the SQL defaults ('' for the
+	// text columns) and a NULL cost, which is exactly the "unpriced, price it
+	// at display time" state — no backfill is attempted or possible, since the
+	// no-UPDATE trigger forbids rewriting history.
+	{version: 3, statements: []string{
+		`ALTER TABLE usage_events ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE usage_events ADD COLUMN service_tier TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE usage_events ADD COLUMN cost_micro_usd INTEGER`,
+		`ALTER TABLE usage_events ADD COLUMN price_source TEXT NOT NULL DEFAULT ''`,
 	}},
 }
 

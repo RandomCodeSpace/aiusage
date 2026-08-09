@@ -124,6 +124,37 @@ func TestChatSpanAndDuplicateInferenceSuppression(t *testing.T) {
 	}
 }
 
+// TestProviderTotalWins pins the exporter's own gen_ai.usage.total_tokens as
+// authoritative. Copilot proxies several vendors and for Anthropic-backed
+// models the reasoning attribute is already inside output_tokens, so a
+// recomputed component sum overstates the call and would double-bill it.
+func TestProviderTotalWins(t *testing.T) {
+	span := `{"type":"span","traceId":"t","spanId":"s","name":"chat claude-sonnet-4",` +
+		`"endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat",` +
+		`"gen_ai.response.model":"claude-sonnet-4","gen_ai.conversation.id":"c",` +
+		`"gen_ai.usage.input_tokens":1000,` +
+		`"gen_ai.usage.output_tokens":500,` +
+		`"gen_ai.usage.reasoning.output_tokens":200,` +
+		`"gen_ai.usage.total_tokens":1500}}`
+	home := writeOTEL(t, span)
+	evs := collectAll(t, home)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event, got %d", len(evs))
+	}
+	e := evs[0]
+	// Components are untouched; only the total defers to the exporter.
+	if e.InputTokens != 1000 || e.OutputTokens != 500 || e.ReasoningTokens != 200 {
+		t.Errorf("components = in %d / out %d / reasoning %d; want 1000/500/200",
+			e.InputTokens, e.OutputTokens, e.ReasoningTokens)
+	}
+	if e.TotalTokens != 1500 {
+		t.Errorf("TotalTokens = %d, want 1500 (exporter total, not the 1700 sum)", e.TotalTokens)
+	}
+	if e.Provider != model.ProviderGitHub {
+		t.Errorf("Provider = %q, want %q", e.Provider, model.ProviderGitHub)
+	}
+}
+
 // TestTotalTokenFallbackFillsOutput verifies that when only a grand total is
 // present, the missing remainder fills the empty output gap.
 func TestTotalTokenFallbackFillsOutput(t *testing.T) {

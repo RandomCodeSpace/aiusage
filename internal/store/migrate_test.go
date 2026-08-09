@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
@@ -150,44 +151,207 @@ func TestMigrationGapDetected(t *testing.T) {
 	}
 }
 
-// TestMigrateV1ToV2CreatesCheckpoints simulates opening a v1 database with
-// this (v2) binary: the migration must create source_checkpoints and stamp v2.
-// The v1 state is produced by removing the v2 table from a fresh database and
-// rewinding the stamp — bytewise equivalent to what a v1 binary left behind.
-func TestMigrateV1ToV2CreatesCheckpoints(t *testing.T) {
+// TestMigrateFullChainFromV1 drives the whole ladder: a database written by the
+// v1 binary must reach SchemaVersion through every intermediate step, gaining
+// the v2 checkpoint table and the v3 cost columns, without disturbing the row
+// it already held. The v1 database is built from a literal legacy DDL rather
+// than by mutating a fresh one — a fresh database now carries columns v1 never
+// had, so "drop the new table and rewind the stamp" no longer reproduces it.
+func TestMigrateFullChainFromV1(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "usage.db")
-	st, err := Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if _, err := st.db.Exec(`DROP TABLE source_checkpoints`); err != nil {
-		t.Fatalf("drop v2 table: %v", err)
-	}
-	if _, err := st.db.Exec(`UPDATE schema_meta SET value='1' WHERE key='schema_version'`); err != nil {
-		t.Fatalf("rewind stamp: %v", err)
-	}
-	st.Close()
+	path := legacyDB(t, 1)
 
-	st2, err := Open(path)
+	st, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen v1 db: %v", err)
 	}
-	defer st2.Close()
+	defer st.Close()
 
-	v, err := readSchemaVersion(ctx, st2.db)
-	if err != nil || v != 2 {
-		t.Fatalf("post-migration version=%d err=%v want 2,nil", v, err)
+	v, err := readSchemaVersion(ctx, st.db)
+	if err != nil || v != SchemaVersion {
+		t.Fatalf("post-migration version=%d err=%v want %d,nil", v, err, SchemaVersion)
 	}
-	ok, err := tableExists(ctx, st2.db, "source_checkpoints")
+	ok, err := tableExists(ctx, st.db, "source_checkpoints")
 	if err != nil || !ok {
 		t.Fatalf("source_checkpoints exists=%v err=%v want true,nil", ok, err)
 	}
 	// The migrated table must be usable, not just present.
 	cp := model.SourceCheckpoint{Tool: model.ToolCodex, SourcePath: "/p", Size: 1}
-	if _, err := st2.ApplyEvents(ctx, nil, &cp); err != nil {
+	if _, err := st.ApplyEvents(ctx, nil, &cp); err != nil {
 		t.Fatalf("checkpoint write on migrated db: %v", err)
 	}
+	assertV3Columns(t, st)
+}
+
+// TestMigrateV2ToV3AddsCostColumns covers the single step most users will run:
+// a v2 database (the shipped checkpoints release) gains the four v3 columns,
+// its existing rows read back unpriced rather than free, and new rows can be
+// stored with a cost.
+func TestMigrateV2ToV3AddsCostColumns(t *testing.T) {
+	ctx := context.Background()
+	path := legacyDB(t, 2)
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen v2 db: %v", err)
+	}
+	defer st.Close()
+
+	v, err := readSchemaVersion(ctx, st.db)
+	if err != nil || v != 3 {
+		t.Fatalf("post-migration version=%d err=%v want 3,nil", v, err)
+	}
+	assertV3Columns(t, st)
+}
+
+// assertV3Columns checks the post-migration behaviour of the cost columns: the
+// pre-existing legacy row is unpriced (NULL, not zero) with empty provider and
+// tier, and a freshly stamped event round-trips its cost.
+func assertV3Columns(t *testing.T, st *SQLite) {
+	t.Helper()
+	ctx := context.Background()
+
+	evs, err := st.ListEvents(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("legacy rows = %d, want 1", len(evs))
+	}
+	if _, priced := evs[0].Cost(); priced {
+		t.Errorf("legacy row is priced; migrated rows must read back unpriced")
+	}
+	if evs[0].Provider != "" || evs[0].ServiceTier != "" || evs[0].PriceSource != "" {
+		t.Errorf("legacy row = %+v, want empty provider/tier/price_source", evs[0])
+	}
+
+	fresh := model.UsageEvent{
+		Tool:      model.ToolClaudeCode,
+		Model:     "claude-sonnet-4-6",
+		Provider:  model.ProviderAnthropic,
+		DedupKey:  "post-migration-1",
+		EventTime: time.Unix(1_760_000_000, 0).UTC(),
+	}
+	fresh.SetCost(1234, "embedded-2026-08-09")
+	if _, err := st.InsertEvents(ctx, []model.UsageEvent{fresh}); err != nil {
+		t.Fatalf("insert on migrated db: %v", err)
+	}
+	evs, err = st.ListEvents(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("list events after insert: %v", err)
+	}
+	var got *model.UsageEvent
+	for i := range evs {
+		if evs[i].DedupKey == "post-migration-1" {
+			got = &evs[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("stamped event missing after insert")
+	}
+	if c, ok := got.Cost(); !ok || c != 1234 {
+		t.Errorf("stamped cost = %d,%v want 1234,true", c, ok)
+	}
+	if got.PriceSource != "embedded-2026-08-09" || got.Provider != model.ProviderAnthropic {
+		t.Errorf("stamped row = %+v, want anthropic/embedded-2026-08-09", *got)
+	}
+}
+
+// legacyDBSchema is the usage_events/aggregate_state DDL exactly as the v1
+// binary wrote it: no source_checkpoints (v2) and none of the cost/provider
+// columns (v3). Migration tests build from this rather than from schema.sql,
+// which always describes the LATEST schema.
+const legacyDBSchema = `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE usage_events (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key             TEXT    NOT NULL UNIQUE,
+  tool                  TEXT    NOT NULL,
+  model                 TEXT    NOT NULL DEFAULT '',
+  session_id            TEXT    NOT NULL DEFAULT '',
+  project               TEXT    NOT NULL DEFAULT '',
+  event_time_unix       INTEGER NOT NULL,
+  observed_time_unix    INTEGER NOT NULL,
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens      INTEGER NOT NULL DEFAULT 0,
+  total_tokens          INTEGER NOT NULL DEFAULT 0,
+  request_id            TEXT    NOT NULL DEFAULT '',
+  message_id            TEXT    NOT NULL DEFAULT '',
+  source_path           TEXT    NOT NULL DEFAULT '',
+  kind                  TEXT    NOT NULL DEFAULT 'usage',
+  raw                   TEXT
+);
+CREATE TRIGGER trg_events_no_update
+BEFORE UPDATE ON usage_events
+BEGIN SELECT RAISE(ABORT, 'usage_events is append-only: UPDATE forbidden'); END;
+CREATE TRIGGER trg_events_no_delete
+BEFORE DELETE ON usage_events
+BEGIN SELECT RAISE(ABORT, 'usage_events is append-only: DELETE forbidden'); END;
+CREATE TABLE aggregate_state (
+  tool                  TEXT    NOT NULL,
+  acc_key               TEXT    NOT NULL,
+  model                 TEXT    NOT NULL DEFAULT '',
+  session_id            TEXT    NOT NULL DEFAULT '',
+  project               TEXT    NOT NULL DEFAULT '',
+  observed_time_unix    INTEGER NOT NULL,
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens      INTEGER NOT NULL DEFAULT 0,
+  total_tokens          INTEGER NOT NULL DEFAULT 0,
+  source_path           TEXT    NOT NULL DEFAULT '',
+  raw                   TEXT,
+  PRIMARY KEY (tool, acc_key)
+);`
+
+// legacyCheckpointsDDL is the source_checkpoints table as the v2 binary created
+// it, added on top of legacyDBSchema to build a v2 database.
+const legacyCheckpointsDDL = `
+CREATE TABLE source_checkpoints (
+  tool        TEXT    NOT NULL,
+  source_path TEXT    NOT NULL,
+  size_bytes  INTEGER NOT NULL DEFAULT 0,
+  mtime_ns    INTEGER NOT NULL DEFAULT 0,
+  read_offset INTEGER NOT NULL DEFAULT 0,
+  watermark   INTEGER NOT NULL DEFAULT 0,
+  state       TEXT,
+  PRIMARY KEY (tool, source_path)
+);`
+
+// legacyDB writes a database at the given historical schema version, holding
+// one usage row, and returns its path. It never goes through Open, so the file
+// is exactly what the older binary would have left behind.
+func legacyDB(t *testing.T, version int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "usage.db")
+	db := rawDB(t, path)
+
+	ddl := legacyDBSchema
+	if version >= 2 {
+		ddl += legacyCheckpointsDDL
+	}
+	if _, err := db.Exec(ddl); err != nil {
+		t.Fatalf("create v%d schema: %v", version, err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO usage_events (dedup_key, tool, model, event_time_unix, observed_time_unix,
+			input_tokens, output_tokens, total_tokens)
+		VALUES ('legacy-1', ?, 'claude-sonnet-4-6', 1750000000, 1750000000, 10, 20, 30)`,
+		model.ToolClaudeCode); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta(key,value) VALUES('schema_version',?)`,
+		strconv.Itoa(version)); err != nil {
+		t.Fatalf("stamp v%d: %v", version, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+	return path
 }
 
 // TestMigrationSkipsWhenAlreadyApplied covers the concurrent-upgrader race:

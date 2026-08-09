@@ -38,7 +38,7 @@ import (
 const metaProject = "agy"
 
 // shape is the shared Gemini-telemetry parser stamped for this adapter.
-var shape = geminishape.Shape{Tool: model.ToolAgy, Project: metaProject}
+var shape = geminishape.Shape{Tool: model.ToolAgy, Provider: model.ProviderGoogle, Project: metaProject}
 
 // candidateDirs are the Antigravity data roots, relative to the user's home,
 // probed for usage-bearing files.

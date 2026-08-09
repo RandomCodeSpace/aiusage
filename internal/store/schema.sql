@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS usage_events (
   source_path           TEXT    NOT NULL DEFAULT '',
   kind                  TEXT    NOT NULL DEFAULT 'usage', -- 'usage' | 'adjustment'
   raw                   TEXT,                             -- optional raw provider JSON (audit)
+  -- v3 columns, appended in migration order so a migrated database and a fresh
+  -- one carry the same column layout.
+  provider              TEXT    NOT NULL DEFAULT '',      -- billing identity ('' = unknown)
+  service_tier          TEXT    NOT NULL DEFAULT '',      -- provider service tier (batch/priority change the bill)
+  cost_micro_usd        INTEGER,                          -- millionths of USD; NULL = unpriced, NEVER 0
+  price_source          TEXT    NOT NULL DEFAULT '',      -- which price table stamped the cost
   CHECK (input_tokens >= 0 AND output_tokens >= 0 AND cache_creation_tokens >= 0
          AND cache_read_tokens >= 0 AND reasoning_tokens >= 0 AND total_tokens >= 0)
 );

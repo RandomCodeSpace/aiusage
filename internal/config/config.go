@@ -36,6 +36,32 @@ const (
 	cfgFile = "config.json"
 )
 
+// ModelRates overrides the published per-token rates for one model, in USD per
+// single token (LiteLLM's unit, e.g. 3e-06 for $3 per million input tokens). An
+// override beats every price table, so only the fields the user sets are used:
+// a zero field falls back the same way a table entry's missing field does.
+type ModelRates struct {
+	Input        float64 `json:"input"`
+	Output       float64 `json:"output"`
+	CacheRead    float64 `json:"cache_read,omitempty"`
+	CacheWrite   float64 `json:"cache_write,omitempty"`
+	CacheWrite1h float64 `json:"cache_write_1h,omitempty"`
+	InputBatch   float64 `json:"input_batch,omitempty"`
+	OutputBatch  float64 `json:"output_batch,omitempty"`
+}
+
+// Pricing configures how usage is valued. The refresh URL and interval are
+// hardcoded on purpose (see pricing.RefreshURL): the off switch plus overrides
+// already cover the air-gapped and the disagrees-with-the-table cases.
+type Pricing struct {
+	// Refresh enables the daily runtime refresh of the LiteLLM price table.
+	// Default true; set false for a strict air gap, which pins pricing to the
+	// embedded snapshot plus any overrides.
+	Refresh bool `json:"refresh"`
+	// Overrides maps a model id to the rates that must be used for it.
+	Overrides map[string]ModelRates `json:"overrides,omitempty"`
+}
+
 // Config holds resolved runtime settings.
 type Config struct {
 	DBPath          string            `json:"db_path,omitempty"`
@@ -44,6 +70,7 @@ type Config struct {
 	Home            string            `json:"home,omitempty"`
 	IntervalSeconds int               `json:"interval_seconds,omitempty"`
 	SourceRoots     map[string]string `json:"source_roots,omitempty"`
+	Pricing         Pricing           `json:"pricing,omitzero"`
 
 	// derived* track which path fields still hold values derived from Home
 	// rather than explicit overrides (config file, env, or flag). Only derived
@@ -64,9 +91,13 @@ func Default() Config {
 		Home:            home,
 		IntervalSeconds: defaultInterval,
 		SourceRoots:     map[string]string{},
-		derivedDB:       true,
-		derivedPID:      true,
-		derivedLog:      true,
+		// Pricing refresh is on by default: an install that can reach the
+		// network should price with current rates, and every failure of the
+		// refresh degrades silently to the embedded snapshot.
+		Pricing:    Pricing{Refresh: true},
+		derivedDB:  true,
+		derivedPID: true,
+		derivedLog: true,
 	}
 }
 
@@ -126,6 +157,9 @@ func Load(path string) (Config, error) {
 	cfg.IntervalSeconds = clampInterval(cfg.IntervalSeconds)
 	if cfg.SourceRoots == nil {
 		cfg.SourceRoots = map[string]string{}
+	}
+	if cfg.Pricing.Overrides == nil {
+		cfg.Pricing.Overrides = map[string]ModelRates{}
 	}
 	return cfg, nil
 }

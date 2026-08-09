@@ -36,6 +36,21 @@ func writeClaudeFixture(t *testing.T) string {
 	return home
 }
 
+// offlineConfig writes a config that disables the pricing refresh and returns
+// its path. Collection commands ask the pricing ladder to refresh itself once
+// per cycle; without this the whole CLI suite would reach out to the network,
+// which makes tests slow, flaky and dependent on someone else's uptime. Every
+// other setting stays at its default, so callers get the same behaviour the
+// previous "absent config file" path gave them.
+func offlineConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"pricing":{"refresh":false}}`), 0o600); err != nil {
+		t.Fatalf("write offline config: %v", err)
+	}
+	return path
+}
+
 // isolateState points XDG_STATE_HOME at a temp dir so `once` takes its
 // collection lock (and pid/log paths) in the test sandbox, not the user's real
 // state dir — a daemon on the host must never make these tests contend.
@@ -73,7 +88,7 @@ func TestOnceInsertsClaudeEvent(t *testing.T) {
 	t.Setenv("AIUSAGE_INTERVAL", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
-	out, err := runCmd(t, "--db", db, "--home", home, "--config", filepath.Join(t.TempDir(), "absent.json"), "once")
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t), "once")
 	if err != nil {
 		t.Fatalf("once failed: %v\noutput:\n%s", err, out)
 	}
@@ -102,7 +117,7 @@ func TestOnceInsertsClaudeEvent(t *testing.T) {
 func TestSummaryJSONParses(t *testing.T) {
 	home := writeClaudeFixture(t)
 	db := filepath.Join(t.TempDir(), "usage.db")
-	cfg := filepath.Join(t.TempDir(), "absent.json")
+	cfg := offlineConfig(t)
 	isolateState(t)
 
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -183,7 +198,7 @@ func TestLoadConfigHomeFlagMovesDerivedPaths(t *testing.T) {
 	prev := flags
 	t.Cleanup(func() { flags = prev })
 
-	flags = globalFlags{home: home, config: filepath.Join(t.TempDir(), "absent.json")}
+	flags = globalFlags{home: home, config: offlineConfig(t)}
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
@@ -217,7 +232,7 @@ func TestLoadConfigHomeFlagMovesDerivedPaths(t *testing.T) {
 func TestExportIncludeRaw(t *testing.T) {
 	home := writeClaudeFixture(t)
 	db := filepath.Join(t.TempDir(), "usage.db")
-	cfg := filepath.Join(t.TempDir(), "absent.json")
+	cfg := offlineConfig(t)
 	isolateState(t)
 
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -271,7 +286,7 @@ func TestOnceFailsFastWhenDaemonHoldsLock(t *testing.T) {
 	}
 	defer release()
 
-	out, err := runCmd(t, "--db", db, "--home", home, "--config", filepath.Join(t.TempDir(), "absent.json"), "once")
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t), "once")
 	if err == nil {
 		t.Fatalf("once should fail while the daemon holds the lock; output:\n%s", out)
 	}
@@ -291,7 +306,7 @@ func TestOnceExitsNonzeroWhenAllSourcesFail(t *testing.T) {
 	onceRegistry = func() *adapter.Registry { return adapter.NewRegistry(failingAdapter{}) }
 	defer func() { onceRegistry = prev }()
 
-	out, err := runCmd(t, "--db", db, "--home", t.TempDir(), "--config", filepath.Join(t.TempDir(), "absent.json"), "once")
+	out, err := runCmd(t, "--db", db, "--home", t.TempDir(), "--config", offlineConfig(t), "once")
 	if err == nil {
 		t.Fatalf("once should exit nonzero when every source fails; output:\n%s", out)
 	}
@@ -315,7 +330,7 @@ func TestOncePartialFailureExitsZero(t *testing.T) {
 	onceRegistry = func() *adapter.Registry { return adapter.NewRegistry(failingAdapter{}, claudecode.New()) }
 	defer func() { onceRegistry = prev }()
 
-	out, err := runCmd(t, "--db", db, "--home", home, "--config", filepath.Join(t.TempDir(), "absent.json"), "once")
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t), "once")
 	if err != nil {
 		t.Fatalf("partial failure must keep exit 0, got: %v\noutput:\n%s", err, out)
 	}
@@ -345,7 +360,7 @@ func TestDoctorWarnsOnLoosePerms(t *testing.T) {
 
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
-	out, err := runCmd(t, "--db", db, "--home", home, "--config", filepath.Join(t.TempDir(), "absent.json"),
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t),
 		"--no-daemon", "doctor")
 	if err != nil {
 		t.Fatalf("doctor failed: %v\noutput:\n%s", err, out)

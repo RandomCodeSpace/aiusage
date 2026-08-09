@@ -117,6 +117,10 @@ func TestCollectSingleSession(t *testing.T) {
 	if s.Project != metaProject {
 		t.Errorf("Project = %q, want %q", s.Project, metaProject)
 	}
+	// Provider comes from the row's billing_provider, not a static constant.
+	if s.Provider != "anthropic" {
+		t.Errorf("Provider = %q, want anthropic (billing_provider)", s.Provider)
+	}
 	if s.SourcePath != dbPath {
 		t.Errorf("SourcePath = %q, want %q", s.SourcePath, dbPath)
 	}
