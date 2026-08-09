@@ -5,6 +5,8 @@
 //  1. Default() — XDG-derived paths, IntervalSeconds=300.
 //  2. JSON file at path merged over the defaults (a missing file is not an
 //     error; it simply leaves the defaults in place). Unknown keys are rejected.
+//     A relative path written in the file is resolved against the directory
+//     holding that file, never the process working directory.
 //  3. Environment overrides (AIUSAGE_DB, AIUSAGE_INTERVAL, AIUSAGE_HOME).
 //  4. An overridden Home re-derives DBPath/PIDPath/LogPath (see SetHome);
 //     paths explicitly set by file or env stay put.
@@ -74,15 +76,27 @@ type Privacy struct {
 }
 
 // Config holds resolved runtime settings.
+//
+// Path rule: db_path, pid_path, log_path, home and every source_roots value may
+// be written relative in a config file, and a relative value is resolved
+// against the directory holding that config file — never the process working
+// directory, which differs between the CLI (wherever the user stands) and the
+// daemon it spawns (the CWD of the shell that started it). Every field below is
+// absolute once Load returns.
 type Config struct {
-	DBPath          string            `json:"db_path,omitempty"`
-	PIDPath         string            `json:"pid_path,omitempty"`
-	LogPath         string            `json:"log_path,omitempty"`
-	Home            string            `json:"home,omitempty"`
-	IntervalSeconds int               `json:"interval_seconds,omitempty"`
-	SourceRoots     map[string]string `json:"source_roots,omitempty"`
-	Pricing         Pricing           `json:"pricing,omitzero"`
-	Privacy         Privacy           `json:"privacy,omitzero"`
+	// DBPath, PIDPath and LogPath are absolute; a relative value in a config
+	// file is anchored at that file's directory (see the path rule above).
+	DBPath  string `json:"db_path,omitempty"`
+	PIDPath string `json:"pid_path,omitempty"`
+	LogPath string `json:"log_path,omitempty"`
+	// Home is the discovery root, absolute under the same path rule.
+	Home            string `json:"home,omitempty"`
+	IntervalSeconds int    `json:"interval_seconds,omitempty"`
+	// SourceRoots overrides an adapter's discovery root; values follow the
+	// same path rule.
+	SourceRoots map[string]string `json:"source_roots,omitempty"`
+	Pricing     Pricing           `json:"pricing,omitzero"`
+	Privacy     Privacy           `json:"privacy,omitzero"`
 
 	// derived* track which path fields still hold values derived from Home
 	// rather than explicit overrides (config file, env, or flag). Only derived
@@ -153,6 +167,7 @@ func Load(path string) (Config, error) {
 		if err := mergeFile(&cfg, path); err != nil {
 			return Config{}, err
 		}
+		resolveFilePaths(&cfg, before, path)
 		markExplicit(&cfg, before)
 	}
 
@@ -174,6 +189,50 @@ func Load(path string) (Config, error) {
 		cfg.Pricing.Overrides = map[string]ModelRates{}
 	}
 	return cfg, nil
+}
+
+// resolveFilePaths anchors every relative path the config file set to the
+// directory holding that file, so the value means the same thing to every
+// process that reads it. Used verbatim, a relative path would resolve against
+// the process working directory: the CLI would read one database and the
+// daemon it spawns (which keeps the CWD of the shell that started it) would
+// write another, with no error either way.
+//
+// Only fields the file actually changed are anchored — the defaults are
+// absolute whenever the user's home directory is known, and rebasing the
+// unknown-home fallback onto the config directory would move an install nobody
+// asked to move. SourceRoots needs no such check: Default() leaves the map
+// empty and JSON decoding merges into it, so every entry present came from the
+// file.
+func resolveFilePaths(cfg *Config, prev Config, path string) {
+	dir := filepath.Dir(path)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if cfg.Home != prev.Home {
+		cfg.Home = anchor(dir, cfg.Home)
+	}
+	if cfg.DBPath != prev.DBPath {
+		cfg.DBPath = anchor(dir, cfg.DBPath)
+	}
+	if cfg.PIDPath != prev.PIDPath {
+		cfg.PIDPath = anchor(dir, cfg.PIDPath)
+	}
+	if cfg.LogPath != prev.LogPath {
+		cfg.LogPath = anchor(dir, cfg.LogPath)
+	}
+	for tool, root := range cfg.SourceRoots {
+		cfg.SourceRoots[tool] = anchor(dir, root)
+	}
+}
+
+// anchor resolves p against dir. An empty or already-absolute p is returned
+// unchanged.
+func anchor(dir, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(dir, p)
 }
 
 // markExplicit pins every path field whose value changed between prev and cfg:

@@ -78,8 +78,14 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc ad
 		if err != nil && ctx.Err() == nil {
 			logger.Printf("cycle error: %v", err)
 		}
-		logger.Printf("cycle: adapters=%d sources=%d seen=%d inserted=%d snapshots=%d errors=%d",
-			stats.Adapters, stats.Sources, stats.EventsSeen, stats.EventsInserted, stats.Snapshots, len(stats.Errors))
+		// A truncated cycle's counts are partial; say so rather than print
+		// them in the shape of a completed cycle.
+		label := "cycle"
+		if stats.Canceled {
+			label = "cycle canceled (partial counts)"
+		}
+		logger.Printf("%s: adapters=%d sources=%d seen=%d inserted=%d snapshots=%d errors=%d",
+			label, stats.Adapters, stats.Sources, stats.EventsSeen, stats.EventsInserted, stats.Snapshots, len(stats.Errors))
 		for _, e := range stats.Errors {
 			logger.Printf("  - %s", e)
 		}

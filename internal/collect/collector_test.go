@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -724,6 +725,96 @@ func TestRunCycleNoErrorsNotAllFailed(t *testing.T) {
 	var stats CycleStats
 	if stats.AllFailed() {
 		t.Fatalf("empty cycle (no sources, no errors) must not report all-failed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (g) truncation: a cancelled cycle must not read as a completed one.
+// ---------------------------------------------------------------------------
+
+// TestRunCycleCanceledMarksStatsTruncated: cancellation lands while the first
+// adapter is being read, so the second adapter never runs. The returned counts
+// cover one adapter out of two and must be flagged partial — without the flag
+// a caller logs "adapters=1 sources=1" in the exact shape of a finished cycle.
+func TestRunCycleCanceledMarksStatsTruncated(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	first := &fakeAdapter{
+		id: model.ToolCodex, class: model.EventLevel,
+		emit: func(int) adapter.Observation {
+			cancel() // the daemon's stop signal arrives mid-cycle
+			return adapter.Observation{}
+		},
+	}
+	second := &fakeAdapter{
+		id: model.ToolClaudeCode, class: model.EventLevel,
+		emit: func(int) adapter.Observation { return adapter.Observation{} },
+	}
+
+	stats, err := RunCycle(ctx, adapter.NewRegistry(first, second), newFakeStore(), adapter.DiscoverConfig{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cycle error = %v, want context.Canceled", err)
+	}
+	if !stats.Canceled {
+		t.Fatalf("cycle truncated after %d/2 adapters but stats.Canceled=false: %+v", stats.Adapters, stats)
+	}
+	if stats.Adapters != 1 {
+		t.Fatalf("Adapters=%d, want 1 (the second adapter must not have run)", stats.Adapters)
+	}
+}
+
+// TestRunCycleCompleteNotCanceled pins the other half: a cycle that ran to the
+// end reports Canceled=false, so the flag distinguishes the two.
+func TestRunCycleCompleteNotCanceled(t *testing.T) {
+	ad := &fakeAdapter{
+		id: model.ToolCodex, class: model.EventLevel,
+		emit: func(int) adapter.Observation { return adapter.Observation{} },
+	}
+	stats, err := RunCycle(context.Background(), adapter.NewRegistry(ad), newFakeStore(), adapter.DiscoverConfig{})
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if stats.Canceled {
+		t.Fatalf("completed cycle reported as canceled: %+v", stats)
+	}
+}
+
+// TestRunDaemonLogsCanceledCycle: the daemon's cycle line must say the counts
+// are partial when the cycle was cut short. The context is already cancelled,
+// so the immediate first cycle truncates at the first adapter and RunDaemon
+// returns without waiting on the ticker.
+func TestRunDaemonLogsCanceledCycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ad := &fakeAdapter{
+		id: model.ToolCodex, class: model.EventLevel,
+		emit: func(int) adapter.Observation { return adapter.Observation{} },
+	}
+
+	var buf bytes.Buffer
+	opt := DaemonOptions{
+		Interval: time.Hour,
+		PIDPath:  filepath.Join(t.TempDir(), "aiusage.pid"),
+		Logger:   log.New(&buf, "", 0),
+	}
+	if err := RunDaemon(ctx, adapter.NewRegistry(ad), newFakeStore(), adapter.DiscoverConfig{}, opt); err != nil {
+		t.Fatalf("RunDaemon: %v", err)
+	}
+
+	var cycleLine string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "adapters=") {
+			cycleLine = line
+			break
+		}
+	}
+	if cycleLine == "" {
+		t.Fatalf("daemon logged no cycle line:\n%s", buf.String())
+	}
+	if !strings.Contains(cycleLine, "canceled") {
+		t.Fatalf("truncated cycle logged as a normal one: %q", cycleLine)
 	}
 }
 

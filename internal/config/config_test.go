@@ -437,6 +437,99 @@ func TestLoadResolvesRelativeEnvDB(t *testing.T) {
 	})
 }
 
+// TestLoadResolvesRelativeFilePaths: a hand-written config that uses relative
+// paths must resolve them against the config file's own directory. Used
+// verbatim they would resolve against the process working directory, which
+// differs between the CLI (wherever the user stands) and the daemon it spawns
+// (the CWD of the shell that started it) — two ledgers, no error. The test
+// loads from an unrelated working directory to prove the result does not
+// depend on it.
+func TestLoadResolvesRelativeFilePaths(t *testing.T) {
+	clearXDG(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "config.json")
+	writeJSON(t, path, map[string]any{
+		"db_path":      "data/usage.db",
+		"pid_path":     "run/aiusage.pid",
+		"log_path":     "run/aiusage.log",
+		"source_roots": map[string]string{"claude-code": "roots/claude"},
+	})
+
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error = %v", err)
+	}
+
+	checks := []struct {
+		field, got, want string
+	}{
+		{"DBPath", cfg.DBPath, filepath.Join(cfgDir, "data", "usage.db")},
+		{"PIDPath", cfg.PIDPath, filepath.Join(cfgDir, "run", "aiusage.pid")},
+		{"LogPath", cfg.LogPath, filepath.Join(cfgDir, "run", "aiusage.log")},
+		{"SourceRoots[claude-code]", cfg.SourceRoots["claude-code"], filepath.Join(cfgDir, "roots", "claude")},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q (anchored at the config file's directory)", c.field, c.got, c.want)
+		}
+	}
+}
+
+// TestLoadResolvesRelativeHomeFromConfigDir: a relative home is anchored the
+// same way, and the paths derived from it inherit the anchoring instead of
+// silently trailing the process working directory.
+func TestLoadResolvesRelativeHomeFromConfigDir(t *testing.T) {
+	clearXDG(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "config.json")
+	writeJSON(t, path, map[string]any{"home": "sandbox"})
+
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error = %v", err)
+	}
+
+	wantHome := filepath.Join(cfgDir, "sandbox")
+	if cfg.Home != wantHome {
+		t.Errorf("Home = %q, want %q", cfg.Home, wantHome)
+	}
+	if want := filepath.Join(wantHome, ".local", "share", "aiusage", "usage.db"); cfg.DBPath != want {
+		t.Errorf("DBPath = %q, want %q", cfg.DBPath, want)
+	}
+}
+
+// TestLoadLeavesAbsoluteFilePathsVerbatim: anchoring must not touch a path the
+// config file already gave in absolute form.
+func TestLoadLeavesAbsoluteFilePathsVerbatim(t *testing.T) {
+	clearXDG(t)
+	t.Setenv("HOME", t.TempDir())
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeJSON(t, path, map[string]any{
+		"db_path":      "/abs/usage.db",
+		"source_roots": map[string]string{"codex": "/abs/codex"},
+	})
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error = %v", err)
+	}
+	if cfg.DBPath != "/abs/usage.db" {
+		t.Errorf("DBPath = %q, want /abs/usage.db", cfg.DBPath)
+	}
+	if got := cfg.SourceRoots["codex"]; got != "/abs/codex" {
+		t.Errorf("SourceRoots[codex] = %q, want /abs/codex", got)
+	}
+}
+
 func TestLoadMalformedFileErrors(t *testing.T) {
 	clearXDG(t)
 	t.Setenv("HOME", t.TempDir())

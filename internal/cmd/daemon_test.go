@@ -304,9 +304,14 @@ func TestDaemonArgsForwardsFlags(t *testing.T) {
 		{name: "no flags", f: globalFlags{}, want: []string{"run"}},
 		{name: "db only", f: globalFlags{db: "/tmp/x.db"}, want: []string{"run", "--db", "/tmp/x.db"}},
 		{
+			name: "interval only",
+			f:    globalFlags{interval: 900},
+			want: []string{"run", "--interval", "900"},
+		},
+		{
 			name: "all forwarded",
-			f:    globalFlags{db: "/tmp/x.db", config: "/tmp/c.json", home: "/tmp/h"},
-			want: []string{"run", "--db", "/tmp/x.db", "--config", "/tmp/c.json", "--home", "/tmp/h"},
+			f:    globalFlags{db: "/tmp/x.db", config: "/tmp/c.json", home: "/tmp/h", interval: 900},
+			want: []string{"run", "--db", "/tmp/x.db", "--config", "/tmp/c.json", "--home", "/tmp/h", "--interval", "900"},
 		},
 	}
 	for _, tc := range tests {
@@ -316,6 +321,101 @@ func TestDaemonArgsForwardsFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+// flagRole classifies one globalFlags field for the spawned-daemon argv.
+type flagRole struct {
+	flag      string // persistent flag bound to the field
+	sample    string // value to parse; "" means a boolean flag, passed bare
+	forwarded bool   // must appear in the spawned daemon's argv
+	why       string // why it is NOT forwarded (required when forwarded is false)
+}
+
+// daemonFlagRoles is the classification of every globalFlags field. It is
+// keyed by struct field name so TestDaemonArgsCoversEveryPersistentFlag can
+// enumerate the struct and fail on anything unclassified: the bug this guards
+// (#30) is a new global flag landing while daemonArgs is never updated, and a
+// hardcoded list of flag names would go stale in exactly the same way.
+var daemonFlagRoles = map[string]flagRole{
+	"db":       {flag: "db", sample: "/tmp/spawn.db", forwarded: true},
+	"config":   {flag: "config", sample: "/tmp/spawn.json", forwarded: true},
+	"home":     {flag: "home", sample: "/tmp/spawn-home", forwarded: true},
+	"interval": {flag: "interval", sample: "900", forwarded: true},
+	"noDaemon": {flag: "no-daemon", why: "the spawned process is the daemon; forwarding the opt-out would contradict it"},
+}
+
+// TestDaemonArgsCoversEveryPersistentFlag walks globalFlags field by field and
+// asserts each one is classified, is really bound to a root persistent flag,
+// and — when it changes daemon behaviour — reaches the spawned daemon's argv
+// with its value. Flags are set by parsing a real command line, so the test
+// exercises the same path a user's invocation takes.
+func TestDaemonArgsCoversEveryPersistentFlag(t *testing.T) {
+	// daemonArgs reads the package-level flags var; restore it for later tests.
+	prev := flags
+	t.Cleanup(func() { flags = prev })
+
+	root := newRootCmd()
+
+	var argv []string
+	for field, role := range daemonFlagRoles {
+		if role.flag == "" {
+			t.Fatalf("globalFlags.%s is classified with no flag name", field)
+		}
+		if root.PersistentFlags().Lookup(role.flag) == nil {
+			t.Fatalf("globalFlags.%s claims flag --%s, which the root command does not define", field, role.flag)
+		}
+		if !role.forwarded && role.why == "" {
+			t.Fatalf("globalFlags.%s is not forwarded but carries no reason", field)
+		}
+		if role.sample == "" {
+			argv = append(argv, "--"+role.flag)
+			continue
+		}
+		argv = append(argv, "--"+role.flag, role.sample)
+	}
+
+	typ := reflect.TypeOf(globalFlags{})
+	for i := range typ.NumField() {
+		name := typ.Field(i).Name
+		if _, ok := daemonFlagRoles[name]; !ok {
+			t.Errorf("globalFlags.%s is unclassified: decide whether the spawned daemon needs it, "+
+				"then update daemonArgs and daemonFlagRoles", name)
+		}
+	}
+
+	if err := root.PersistentFlags().Parse(argv); err != nil {
+		t.Fatalf("parse %v: %v", argv, err)
+	}
+
+	got := daemonArgs(flags)
+	if len(got) == 0 || got[0] != "run" {
+		t.Fatalf("daemonArgs argv = %v, want it to start with \"run\"", got)
+	}
+	for field, role := range daemonFlagRoles {
+		if !role.forwarded {
+			if idx := indexOf(got, "--"+role.flag); idx >= 0 {
+				t.Errorf("--%s was forwarded to the daemon but must not be (%s): %v", role.flag, role.why, got)
+			}
+			continue
+		}
+		idx := indexOf(got, "--"+role.flag)
+		if idx < 0 {
+			t.Errorf("globalFlags.%s (--%s) never reaches the spawned daemon: %v", field, role.flag, got)
+			continue
+		}
+		if idx+1 >= len(got) || got[idx+1] != role.sample {
+			t.Errorf("--%s forwarded without its value %q: %v", role.flag, role.sample, got)
+		}
+	}
+}
+
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
 }
 
 // TestPersistentPreRunSkipsDaemon verifies the root's PersistentPreRunE makes

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -27,10 +28,18 @@ import (
 // blocks on the kernel lock, which a flock-based fake holds for the whole test).
 var stopDaemon = collect.StopDaemon
 
-// daemonArgs builds the argv for the spawned `self run`. The parent's
-// --db/--config/--home must be forwarded: dropped, the daemon resolves the
-// default config and collects into the default DB while the CLI reads the
-// flagged one.
+// daemonArgs builds the argv for the spawned `self run`.
+//
+// Every persistent flag that changes what the daemon does must be forwarded:
+// dropped, the child resolves the default config, collects into the default DB
+// or polls at the default cadence while the CLI reports on the flagged one.
+// --no-daemon is the sole deliberate exception — the spawned process *is* the
+// daemon, so forwarding the opt-out would contradict it. --interval is passed
+// through unclamped; the child re-clamps it in loadConfig exactly as the parent
+// did, so both ends land on the same value.
+//
+// TestDaemonArgsCoversEveryPersistentFlag enumerates globalFlags and fails on
+// any field this function has not been taught about.
 func daemonArgs(f globalFlags) []string {
 	args := []string{"run"}
 	if f.db != "" {
@@ -41,6 +50,9 @@ func daemonArgs(f globalFlags) []string {
 	}
 	if f.home != "" {
 		args = append(args, "--home", f.home)
+	}
+	if f.interval > 0 {
+		args = append(args, "--interval", strconv.Itoa(f.interval))
 	}
 	return args
 }

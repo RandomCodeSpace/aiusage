@@ -72,6 +72,12 @@ type CycleStats struct {
 	EventsSeen     int      // observed event-level records (pre-dedup)
 	Snapshots      int      // aggregate snapshots observed
 	Errors         []string // non-fatal per-adapter / per-source errors
+
+	// Canceled reports that the context was cancelled mid-pass and the cycle
+	// stopped early. Every count above is then partial — in particular the
+	// adapter and source being processed are already counted — so a truncated
+	// cycle must never be read (or logged) as a completed one.
+	Canceled bool
 }
 
 // AllFailed reports whether the cycle produced only errors: every discovered
@@ -86,6 +92,11 @@ func (s CycleStats) AllFailed() bool {
 // continues. RunCycle only returns a non-nil error for failures that prevent
 // the cycle from making any meaningful progress (none currently — the loop is
 // fully resilient), so callers may safely run it on a ticker.
+//
+// A cancelled context truncates the pass: RunCycle returns ctx.Err() together
+// with CycleStats.Canceled set, and the counts in those stats cover only the
+// work done so far. Nothing is lost by the truncation — checkpoints ride the
+// event transactions — but the stats must be reported as partial.
 func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc adapter.DiscoverConfig, opts ...Option) (CycleStats, error) {
 	var o cycleOptions
 	for _, fn := range opts {
@@ -104,6 +115,7 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 
 	for _, ad := range reg.All() {
 		if err := ctx.Err(); err != nil {
+			stats.Canceled = true
 			return stats, err
 		}
 		stats.Adapters++
@@ -116,6 +128,7 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 
 		for _, src := range sources {
 			if err := ctx.Err(); err != nil {
+				stats.Canceled = true
 				return stats, err
 			}
 			stats.Sources++
