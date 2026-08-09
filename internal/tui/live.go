@@ -15,10 +15,14 @@ import (
 //
 //	Init → tea.Batch(spinner.Tick, loadCmd, refreshTickCmd)
 //	  loadCmd      (goroutine) warms the shared query cache → dataLoadedMsg
-//	  dataLoadedMsg                → reload() from warm cache, mark loaded, stop spinner
+//	  dataLoadedMsg                → applyReload() from warm cache; FreshLive on
+//	                                 success, FreshStale (picture held) on error
 //	  refreshTickMsg (every 10s)   → os.Stat(db); reload only if mtime changed; re-arm tick
-//	  spinner.TickMsg              → advance frame only while still loading
-//	  manual `r`                   → force reload (Invalidate + startLoad)
+//	  spinner.TickMsg              → advance frame only during the genuine cold start
+//	  manual `r` / chip click      → force reload (Invalidate + startLoad)
+//
+// Loading/staleness state is the Freshness enum (freshness.go): startLoad cuts
+// the chip to FreshCutIn synchronously, the apply lands in one frame.
 //
 // Every dispatch is stamped with a monotonic load generation (Model.loadGen)
 // and the clock resolved for that generation (Model.loadNow). handleDataLoaded
@@ -49,6 +53,10 @@ type dataLoadedMsg struct {
 	// queried, used to gate future refresh ticks. Zero when the file could not
 	// be stat'd.
 	mtime time.Time
+	// err is the flight's query failure, if any. The apply holds the last good
+	// picture and routes it to the freshness chip (FreshStale); the full-body
+	// error panel exists only for a cold failure.
+	err error
 }
 
 // refreshTickMsg fires every refreshInterval to drive the live mtime poll.
@@ -82,7 +90,7 @@ func (m Model) loadCmd() tea.Cmd {
 			mc.loadNow = mc.data.now()
 		}
 		mc.reload()
-		return dataLoadedMsg{gen: gen, now: mc.loadNow, mtime: mt}
+		return dataLoadedMsg{gen: gen, now: mc.loadNow, mtime: mt, err: mc.err}
 	}
 }
 
@@ -102,13 +110,17 @@ func fileMTime(path string) time.Time {
 
 // startLoad opens a new load generation and returns its load cmd: it bumps the
 // generation (superseding any in-flight load, whose apply will now be dropped),
-// resolves the generation clock, marks a load in flight and dispatches. Kept as
-// the single dispatch path so generation, clock and in-flight flag never drift
-// apart.
+// resolves the generation clock, cuts the freshness chip and dispatches. The
+// chip cut is synchronous — the very next frame carries "◐ sync" with the old
+// picture still behind it (the J-cut). Cold stays cold: with no picture to
+// hold, the branded loading screen owns the frame instead. Kept as the single
+// dispatch path so generation, clock and freshness never drift apart.
 func (m *Model) startLoad() tea.Cmd {
 	m.loadGen++
 	m.loadNow = m.data.now()
-	m.loading = true
+	if m.fresh != FreshCold {
+		m.fresh = FreshCutIn
+	}
 	return m.loadCmd()
 }
 
@@ -131,6 +143,7 @@ func (m *Model) qnow() time.Time {
 // is dropped, so fresh data can never lose to an older snapshot.
 func (m Model) handleRefreshTick() (Model, tea.Cmd) {
 	mt := fileMTime(m.dbPath)
+	m.observeIngest(mt) // heartbeat: every stat feeds the ingest pulse
 	if mt.After(m.lastMTime) {
 		m.data.Invalidate()
 		cmd := m.startLoad()
@@ -139,19 +152,27 @@ func (m Model) handleRefreshTick() (Model, tea.Cmd) {
 	return m, refreshTickCmd()
 }
 
-// handleDataLoaded applies a finished background load: it reloads the active
-// view from the now-warm cache (cheap, no I/O), flips out of the loading state
-// and records the observed mtime so the next tick can gate on it. A flight
-// whose generation is no longer current is dropped whole — it must not touch
-// loading/loaded, lastMTime or the view data; the superseding dispatch owns
-// them now.
+// handleDataLoaded applies a finished background load. Success reloads the
+// active view from the now-warm cache (cheap, no I/O), flips to FreshLive and
+// records the observed mtime so the next tick can gate on it. Failure is the
+// L-cut hold: the last good picture stays on screen, the error routes to the
+// freshness chip (FreshStale), and lastMTime is deliberately NOT advanced so
+// the next mtime poll retries. A flight whose generation is no longer current
+// is dropped whole — it must not touch freshness, lastMTime or the view data;
+// the superseding dispatch owns them now.
 func (m Model) handleDataLoaded(msg dataLoadedMsg) (Model, tea.Cmd) {
 	if msg.gen != m.loadGen {
 		return m, nil
 	}
-	m.loading = false
-	m.loaded = true
 	m.loadNow = msg.now
+	m.observeIngest(msg.mtime) // the flight's stat feeds the heartbeat either way
+	if msg.err != nil {
+		m.err = msg.err
+		if m.fresh != FreshCold {
+			m.fresh = FreshStale // hold the picture; the chip carries the failure
+		}
+		return m, nil
+	}
 	// The applied generation is the identity of the on-screen dataset: render
 	// memoization keys on it (a dispatch alone must not re-key — the stale frame
 	// keeps rendering the old data until its flight lands).
@@ -159,15 +180,28 @@ func (m Model) handleDataLoaded(msg dataLoadedMsg) (Model, tea.Cmd) {
 	if !msg.mtime.IsZero() {
 		m.lastMTime = msg.mtime
 	}
-	m.reload()
+	prior := m.fresh
+	m.applyReload()
+	if m.err != nil {
+		// The warm apply itself failed (cache evicted + source down). Same
+		// contract as a failed flight: hold the picture unless there is none.
+		if prior != FreshCold {
+			m.fresh = FreshStale
+		}
+		return m, nil
+	}
+	m.fresh = FreshLive
+	m.lastLoadAt = msg.now
 	return m, nil
 }
 
-// handleSpinnerTick advances the spinner ONLY while still loading the first
-// frame. Once loaded, the tick is swallowed (returns no follow-up cmd) so the
-// spinner stops animating and idle cost drops to the 10s stat alone.
+// handleSpinnerTick advances the spinner ONLY during the genuine cold start
+// (the branded loading screen is the sole spinner surface — every refresh path
+// signals through the freshness chip instead). Once out of cold, or once a
+// cold failure replaced the loading screen with the error panel, the tick is
+// swallowed so idle cost drops to the 10s stat alone.
 func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
-	if m.loaded && !m.loading {
+	if m.fresh != FreshCold || m.err != nil {
 		return m, nil
 	}
 	var cmd tea.Cmd

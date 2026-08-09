@@ -642,8 +642,8 @@ func TestHelpAndRefreshNoPanic(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("refresh produced no command")
 		}
-		if !m.loading {
-			t.Fatal("refresh did not enter the loading state")
+		if m.fresh != FreshCutIn {
+			t.Fatalf("refresh freshness = %v, want cutIn", m.fresh)
 		}
 		runPending(t, m, cmd) // drives the load goroutine + spinner tick to completion
 	})

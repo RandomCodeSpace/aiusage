@@ -43,8 +43,8 @@ func TestLoadingStateBeforeFirstData(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = tm.(Model)
 
-	if m.loaded {
-		t.Fatal("model marked loaded before any dataLoadedMsg")
+	if m.fresh != FreshCold {
+		t.Fatalf("freshness = %v before any dataLoadedMsg, want cold", m.fresh)
 	}
 	out := m.View().Content
 	if !strings.Contains(out, "loading usage…") {
@@ -63,8 +63,8 @@ func TestLoadingStateBeforeFirstData(t *testing.T) {
 
 	// After the load lands, the dashboard renders instead.
 	m = loadOnce(m)
-	if !m.loaded {
-		t.Fatal("model not loaded after dataLoadedMsg")
+	if m.fresh != FreshLive {
+		t.Fatalf("freshness = %v after dataLoadedMsg, want live", m.fresh)
 	}
 	if strings.Contains(m.View().Content, "loading usage…") {
 		t.Fatal("still showing loading state after first data load")
@@ -91,8 +91,8 @@ func TestRefreshTickUnchangedMtimeNoQuery(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("refresh tick did not re-arm the tick")
 		}
-		if m.loading {
-			t.Fatal("refresh tick entered loading on unchanged mtime")
+		if m.fresh == FreshCutIn {
+			t.Fatal("refresh tick entered the sync state on unchanged mtime")
 		}
 	})
 	if n != 0 {
@@ -117,8 +117,8 @@ func TestRefreshTickChangedMtimeReloads(t *testing.T) {
 	n := queriesDuring(f, func() {
 		tm, cmd := m.Update(refreshTickMsg{})
 		m = tm.(Model)
-		if !m.loading {
-			t.Fatal("changed mtime did not enter the loading state")
+		if m.fresh != FreshCutIn {
+			t.Fatalf("changed mtime freshness = %v, want cutIn", m.fresh)
 		}
 		if cmd == nil {
 			t.Fatal("changed mtime produced no command")
@@ -128,8 +128,8 @@ func TestRefreshTickChangedMtimeReloads(t *testing.T) {
 	if n == 0 {
 		t.Fatal("changed mtime did not re-query the data source")
 	}
-	if m.loading {
-		t.Fatal("still loading after the reload landed")
+	if m.fresh != FreshLive {
+		t.Fatalf("freshness after reload landed = %v, want live", m.fresh)
 	}
 }
 
@@ -201,8 +201,8 @@ func TestManualRefreshForcesReload(t *testing.T) {
 	n := queriesDuring(f, func() {
 		tm, cmd := m.Update(keyMsg("r"))
 		m = tm.(Model)
-		if !m.loading {
-			t.Fatal("manual refresh did not enter the loading state")
+		if m.fresh != FreshCutIn {
+			t.Fatalf("manual refresh freshness = %v, want cutIn", m.fresh)
 		}
 		if cmd == nil {
 			t.Fatal("manual refresh produced no command")

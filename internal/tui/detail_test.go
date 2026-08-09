@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,15 +267,15 @@ func TestStaleDetailFlightDropped(t *testing.T) {
 
 	tm2, _ := m.Update(keyMsg("3")) // navigation supersedes the generation
 	m = tm2.(Model)
-	if !m.loading {
-		t.Fatal("navigation did not enter the loading state")
+	if m.fresh != FreshCutIn {
+		t.Fatalf("navigation freshness = %v, want cutIn", m.fresh)
 	}
 	m = send(m, msg) // stale-generation detail flight: dropped whole
 	if m.view != ViewByModel {
 		t.Fatalf("view = %v, want By-Model", m.view)
 	}
-	if !m.loading {
-		t.Fatal("stale detail flight cleared the loading state")
+	if m.fresh != FreshCutIn {
+		t.Fatalf("stale detail flight changed freshness to %v, want cutIn", m.fresh)
 	}
 	if m.byTool.Selected != 1 {
 		t.Fatalf("stale flight mutated selection: %d", m.byTool.Selected)
@@ -311,6 +312,93 @@ func TestBrowsePreviewCursorMovesStayLocal(t *testing.T) {
 	}
 	if q := queriesDuring(f, func() { m = send(m, msg) }); q != 0 {
 		t.Fatalf("preview apply ran %d UI-thread queries, want 0", q)
+	}
+}
+
+// TestDetailFlightFailureRendersQueryFailed drives a failing detail flight
+// through the LIVE message flow (sync miss → debounce → flight → apply): the
+// querying loader only flags the flight's discarded copy, so the apply must
+// carry the failure onto the real model — rendering the per-pane query-failed
+// treatment — and must NOT re-arm the debounce (a failing store would
+// otherwise redispatch every ~75ms forever).
+func TestDetailFlightFailureRendersQueryFailed(t *testing.T) {
+	src := &flakySource{}
+	fixed := time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local)
+	m := newPinnedModel(t, src, fixed)
+	m = step(t, m, keyMsg("2")) // By-Tool; row 0's trend warm from the load
+
+	src.fail.Store(true)
+	m = send(m, keyMsg("down")) // row 1 cold: debounce armed
+	tm, c := m.Update(detailDebounceMsg{seq: m.detailSeq})
+	m = tm.(Model)
+	if c == nil {
+		t.Fatal("debounce did not dispatch the flight")
+	}
+	msg := c() // flight fails against the store
+
+	tm, c = m.Update(msg)
+	m = tm.(Model)
+	if c != nil {
+		t.Fatal("failed detail flight re-armed the dispatch loop")
+	}
+	if !m.byTool.SelTrendErr {
+		t.Fatal("failed flight did not land SelTrendErr on the live model")
+	}
+	if m.byTool.SelTrend != nil {
+		t.Fatal("failed flight held a stale trend behind the error flag")
+	}
+	if out := m.View().Content; !strings.Contains(out, "✕ query failed") {
+		t.Fatalf("detail card missing the query-failed treatment:\n%s", out)
+	}
+
+	// A warm sync hit clears the flag: row 0's trend is still cached.
+	m = send(m, keyMsg("up"))
+	if m.byTool.SelTrendErr || len(m.byTool.SelTrend) == 0 {
+		t.Fatal("warm sync hit did not clear the query-failed flag")
+	}
+
+	// Recovery: the store heals, the retry flight lands the trend.
+	src.fail.Store(false)
+	m = send(m, keyMsg("down")) // row 1 still cold: debounce re-armed
+	tm, c = m.Update(detailDebounceMsg{seq: m.detailSeq})
+	m = tm.(Model)
+	if c == nil {
+		t.Fatal("recovery debounce did not dispatch")
+	}
+	m = send(m, c())
+	if m.byTool.SelTrendErr || len(m.byTool.SelTrend) == 0 {
+		t.Fatal("recovered flight did not clear the failure and land the trend")
+	}
+}
+
+// TestBrowsePreviewFailureRendersQueryFailed is the Browse leg of the same
+// contract: a failed preview flight lands PreviewErr through the live flow and
+// stops the redispatch loop.
+func TestBrowsePreviewFailureRendersQueryFailed(t *testing.T) {
+	src := &flakySource{}
+	fixed := time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local)
+	m := newPinnedModel(t, src, fixed)
+	m = step(t, m, keyMsg("4")) // Browse; row 0's preview warm from the load
+
+	src.fail.Store(true)
+	m = send(m, keyMsg("down")) // row 1 cold preview: debounce armed
+	tm, c := m.Update(detailDebounceMsg{seq: m.detailSeq})
+	m = tm.(Model)
+	if c == nil {
+		t.Fatal("debounce did not dispatch the flight")
+	}
+	msg := c()
+
+	tm, c = m.Update(msg)
+	m = tm.(Model)
+	if c != nil {
+		t.Fatal("failed preview flight re-armed the dispatch loop")
+	}
+	if !m.browse.PreviewErr() {
+		t.Fatal("failed flight did not land PreviewErr on the live model")
+	}
+	if out := m.View().Content; !strings.Contains(out, "✕ query failed") {
+		t.Fatalf("preview pane missing the query-failed treatment:\n%s", out)
 	}
 }
 

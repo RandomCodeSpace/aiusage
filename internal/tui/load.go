@@ -10,19 +10,54 @@ import (
 )
 
 // reload re-queries the store for whatever the active view needs and rebuilds
-// that view's data struct. After loading, pane focus is re-applied so the ring
-// lands.
+// that view's data struct, including the QUERYING detail leg for the current
+// selection. Background flights (loadCmd) and direct test calls use it. After
+// loading, pane focus is re-applied so the ring lands.
 func (m *Model) reload() {
+	m.reloadWith(false)
+}
+
+// applyReload is the UI-thread twin used by handleDataLoaded: the base queries
+// replay the flight's keys against the warm cache, but the detail leg runs the
+// cache-only sync twins — a selection moved mid-flight must arm detailWanted
+// (converted to a debounced background load by scheduleDetail), never run a
+// synchronous store query at apply time (issue #4 residual).
+func (m *Model) applyReload() {
+	m.reloadWith(true)
+}
+
+func (m *Model) reloadWith(cacheOnlyDetail bool) {
 	m.err = nil
 	switch m.view {
 	case ViewOverview:
-		m.loadOverview()
+		m.loadOverview() // its scrub reprice (syncScrub) is cache-only already
 	case ViewByTool:
-		m.loadByTool()
+		m.loadByToolBase()
+		if m.err == nil {
+			if cacheOnlyDetail {
+				m.syncByToolDetail()
+			} else {
+				m.loadByToolDetail()
+			}
+		}
 	case ViewByModel:
-		m.loadByModel()
+		m.loadByModelBase()
+		if m.err == nil {
+			if cacheOnlyDetail {
+				m.syncByModelDetail()
+			} else {
+				m.loadByModelDetail()
+			}
+		}
 	case ViewBrowse:
-		m.loadBrowse()
+		m.loadBrowseBase()
+		if m.err == nil {
+			if cacheOnlyDetail {
+				m.syncBrowsePreview()
+			} else {
+				m.loadBrowsePreview()
+			}
+		}
 	}
 	m.applyPaneFocus()
 }
@@ -77,8 +112,9 @@ func (m *Model) loadOverview() {
 	}
 }
 
-// loadByTool builds the by-tool bars + selected-tool detail.
-func (m *Model) loadByTool() {
+// loadByToolBase builds the by-tool bars (no detail leg — reloadWith picks the
+// querying or cache-only detail twin).
+func (m *Model) loadByToolBase() {
 	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, "tool", m.sort)
 	if err != nil {
 		m.err = err
@@ -93,7 +129,6 @@ func (m *Model) loadByTool() {
 	if m.byTool.Selected >= len(rows) {
 		m.byTool.Selected = 0
 	}
-	m.loadByToolDetail()
 }
 
 // loadByToolDetail loads the selected tool's daily trend, querying the store —
@@ -104,15 +139,22 @@ func (m *Model) loadByToolDetail() {
 	b, ok := m.selectedByToolBucket()
 	if !ok {
 		m.byTool.SelTrend = nil
+		m.byTool.SelTrendErr = false
 		m.byTool.SelSessions = 0
 		return
 	}
 	m.byTool.SelSessions = b.Sessions
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: b.Keys["tool"]})
 	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
-	if err == nil {
-		m.byTool.SelTrend = trend.Buckets
+	if err != nil {
+		// Honest per-pane failure: the detail renders "query failed", never an
+		// ambiguous blank (or a silently held stale trend).
+		m.byTool.SelTrend = nil
+		m.byTool.SelTrendErr = true
+		return
 	}
+	m.byTool.SelTrend = trend.Buckets
+	m.byTool.SelTrendErr = false
 }
 
 // syncByToolDetail is the cache-only twin of loadByToolDetail for the UI
@@ -122,6 +164,7 @@ func (m *Model) syncByToolDetail() {
 	b, ok := m.selectedByToolBucket()
 	if !ok {
 		m.byTool.SelTrend = nil
+		m.byTool.SelTrendErr = false
 		m.byTool.SelSessions = 0
 		return
 	}
@@ -129,13 +172,15 @@ func (m *Model) syncByToolDetail() {
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: b.Keys["tool"]})
 	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
 		m.byTool.SelTrend = trend.Buckets
+		m.byTool.SelTrendErr = false
 	} else {
 		m.detailWanted = true
 	}
 }
 
-// loadByModel builds the by-model bars (colored by owning tool) + detail.
-func (m *Model) loadByModel() {
+// loadByModelBase builds the by-model bars colored by owning tool (no detail
+// leg — reloadWith picks the querying or cache-only detail twin).
+func (m *Model) loadByModelBase() {
 	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, "model", m.sort)
 	if err != nil {
 		m.err = err
@@ -150,7 +195,6 @@ func (m *Model) loadByModel() {
 	if m.byModel.Selected >= len(rows) {
 		m.byModel.Selected = 0
 	}
-	m.loadByModelDetail()
 }
 
 // loadByModelDetail loads the selected model's daily trend (querying;
@@ -159,14 +203,19 @@ func (m *Model) loadByModelDetail() {
 	b, ok := m.selectedByModelBucket()
 	if !ok {
 		m.byModel.SelTrend = nil
+		m.byModel.SelTrendErr = false
 		return
 	}
 	mdl := b.Keys["model"]
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: mdl})
 	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
-	if err == nil {
-		m.byModel.SelTrend = trend.Buckets
+	if err != nil {
+		m.byModel.SelTrend = nil
+		m.byModel.SelTrendErr = true
+		return
 	}
+	m.byModel.SelTrend = trend.Buckets
+	m.byModel.SelTrendErr = false
 }
 
 // syncByModelDetail is the cache-only twin of loadByModelDetail (see
@@ -175,18 +224,21 @@ func (m *Model) syncByModelDetail() {
 	b, ok := m.selectedByModelBucket()
 	if !ok {
 		m.byModel.SelTrend = nil
+		m.byModel.SelTrendErr = false
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: b.Keys["model"]})
 	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
 		m.byModel.SelTrend = trend.Buckets
+		m.byModel.SelTrendErr = false
 	} else {
 		m.detailWanted = true
 	}
 }
 
-// loadBrowse builds the drill list at the current depth + preview trend.
-func (m *Model) loadBrowse() {
+// loadBrowseBase builds the drill list at the current depth (no preview leg —
+// reloadWith picks the querying or cache-only preview twin).
+func (m *Model) loadBrowseBase() {
 	dim, ok := DrillDim(len(m.crumbs))
 	if !ok {
 		dim = drillDims[len(drillDims)-1]
@@ -199,7 +251,6 @@ func (m *Model) loadBrowse() {
 	rows := filterBuckets(s.Buckets, dim, m.filter)
 	m.browse.SetData(m.vctx, dim, rows, grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows))
 	m.layout()
-	m.loadBrowsePreview()
 }
 
 // loadBrowsePreview loads the selected Browse row's daily trend into the
@@ -213,13 +264,18 @@ func (m *Model) loadBrowsePreview() {
 	val, ok := m.browse.SelectedValue()
 	if !ok {
 		m.browse.SetPreview(nil)
+		m.browse.SetPreviewErr(false)
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: dim, Value: val})
 	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
-	if err == nil {
-		m.browse.SetPreview(trend.Buckets)
+	if err != nil {
+		m.browse.SetPreview(nil)
+		m.browse.SetPreviewErr(true)
+		return
 	}
+	m.browse.SetPreview(trend.Buckets)
+	m.browse.SetPreviewErr(false)
 }
 
 // syncBrowsePreview is the cache-only twin of loadBrowsePreview for UI-thread
@@ -233,11 +289,13 @@ func (m *Model) syncBrowsePreview() {
 	val, ok := m.browse.SelectedValue()
 	if !ok {
 		m.browse.SetPreview(nil)
+		m.browse.SetPreviewErr(false)
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: dim, Value: val})
 	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
 		m.browse.SetPreview(trend.Buckets)
+		m.browse.SetPreviewErr(false)
 	} else {
 		m.detailWanted = true
 	}

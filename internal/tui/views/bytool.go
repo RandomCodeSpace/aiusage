@@ -16,6 +16,7 @@ type ByToolData struct {
 	Grand         int64          // grand total for share %
 	Selected      int            // index of the selected/focused bar
 	SelTrend      []store.Bucket // selected tool's daily trend (ascending)
+	SelTrendErr   bool           // the trend query failed (distinct from "no rows")
 	SelSessions   int64          // distinct sessions for the selected tool
 	RangeLbl      string
 	ActivePane    int  // PaneByX* — which pane wears the ring
@@ -37,6 +38,7 @@ func ByTool(c Ctx, d ByToolData, lay Layout) string {
 		grand:      d.Grand,
 		selected:   d.Selected,
 		selTrend:   d.SelTrend,
+		selErr:     d.SelTrendErr,
 		selSess:    d.SelSessions,
 		activePane: d.ActivePane,
 		footnote:   copilotFootnote(c, d.CopilotAbsent),
@@ -51,6 +53,7 @@ type byEntityData struct {
 	grand      int64
 	selected   int
 	selTrend   []store.Bucket
+	selErr     bool // the selected entity's trend query failed
 	selSess    int64
 	activePane int
 	ownerTool  func(store.Bucket) string // for by-model: dominant owning tool
@@ -148,7 +151,9 @@ func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
 
 		var bar string
 		if b.Total == 0 {
-			bar = c.Faint.Render(c.PadRight("no data", barW))
+			// Zero-token row: the ∅ treatment, not a generic "no data" (which
+			// would be indistinguishable from a failed or missing query).
+			bar = c.Faint.Render(c.PadRight("∅ zero tokens", barW))
 		} else {
 			bar = c.CompBar(Split(b), max, barW)
 		}
@@ -191,6 +196,9 @@ func detailCard(c Ctx, d byEntityData, w, h int, focus bool) string {
 	header := glyph + " " + c.tool(ownTool).Render(displayName(c, name, inner-3))
 
 	spark := trendStrip(c, d.selTrend, inner, 4)
+	if d.selErr {
+		spark = EmptyState(c, EmptyQueryFailed, inner)
+	}
 
 	stat := func(label, value string) string {
 		return c.StatLabel.Render(c.PadRight(label, 9)) + c.Number.Render(value)

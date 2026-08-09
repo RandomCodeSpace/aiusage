@@ -36,8 +36,14 @@ const detailDebounce = 75 * time.Millisecond
 // this timer.
 type detailDebounceMsg struct{ seq uint64 }
 
-// detailLoadedMsg signals a finished detail flight for (gen, seq).
-type detailLoadedMsg struct{ gen, seq uint64 }
+// detailLoadedMsg signals a finished detail flight for (gen, seq). failed
+// carries the flight's query failure back to the UI thread: the querying
+// loaders record it only on the flight's discarded model copy, so without this
+// bit the live model could never render the per-pane query-failed treatment.
+type detailLoadedMsg struct {
+	gen, seq uint64
+	failed   bool
+}
 
 // detailDebounceCmd arms the debounce timer for seq.
 func detailDebounceCmd(seq uint64) tea.Cmd {
@@ -79,8 +85,25 @@ func (m Model) detailLoadCmd() tea.Cmd {
 	gen, seq := m.loadGen, m.detailSeq
 	return func() tea.Msg {
 		mc.loadDetail()
-		return detailLoadedMsg{gen: gen, seq: seq}
+		return detailLoadedMsg{gen: gen, seq: seq, failed: mc.detailFailed()}
 	}
+}
+
+// detailFailed reports whether the active view's detail loader recorded a
+// query failure — read off the flight's model copy, whose flags are otherwise
+// discarded with the copy.
+func (m *Model) detailFailed() bool {
+	switch m.view {
+	case ViewOverview:
+		return m.err != nil
+	case ViewByTool:
+		return m.byTool.SelTrendErr
+	case ViewByModel:
+		return m.byModel.SelTrendErr
+	case ViewBrowse:
+		return m.browse.PreviewErr()
+	}
+	return false
 }
 
 // loadDetail runs the active view's querying loader (background flights only).
@@ -119,5 +142,30 @@ func (m Model) handleDetailLoaded(msg detailLoadedMsg) (Model, tea.Cmd) {
 	case ViewBrowse:
 		m.syncBrowsePreview()
 	}
+	// A failed flight left the cache cold, so the sync twin above just missed
+	// and re-armed detailWanted — scheduling again would redispatch the failing
+	// query every debounce interval. Render the honest per-pane failure instead;
+	// any later successful sync or load clears it. Overview is excluded: it has
+	// no per-pane flag and its failure surfaces through m.err.
+	if msg.failed && m.detailWanted && m.view != ViewOverview {
+		m.detailWanted = false
+		m.failDetailPane()
+	}
 	return m, nil
+}
+
+// failDetailPane sets the active view's per-pane query-failed treatment,
+// dropping any held stale trend so the failure never renders as good data.
+func (m *Model) failDetailPane() {
+	switch m.view {
+	case ViewByTool:
+		m.byTool.SelTrend = nil
+		m.byTool.SelTrendErr = true
+	case ViewByModel:
+		m.byModel.SelTrend = nil
+		m.byModel.SelTrendErr = true
+	case ViewBrowse:
+		m.browse.SetPreview(nil)
+		m.browse.SetPreviewErr(true)
+	}
 }

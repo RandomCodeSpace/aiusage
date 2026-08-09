@@ -13,6 +13,7 @@ const (
 	zonePreview   = "preview"   // browse preview pane
 	zoneRangePill = "rangepill" // header range pill
 	zoneHelp      = "help"      // header help toggle
+	zoneFreshness = "freshness" // header freshness chip (click = force refresh)
 )
 
 // Exported zone-ID builders/constants so package tui can resolve clicks without
@@ -33,6 +34,10 @@ const ZoneRangePill = zoneRangePill
 // ZoneHelp is the header help toggle.
 const ZoneHelp = zoneHelp
 
+// ZoneFreshness is the header freshness chip. The indicator is where you act:
+// a left-press on it forces a refresh.
+const ZoneFreshness = zoneFreshness
+
 // RailZone returns the click-zone id for a nav-rail entry (a view index).
 func RailZone(viewIdx int) string { return "rail:" + strconv.Itoa(viewIdx) }
 
@@ -44,10 +49,3 @@ func RowZone(idx int) string { return "row:" + strconv.Itoa(idx) }
 
 // CrumbZone returns the click-zone id for a breadcrumb at a drill depth.
 func CrumbZone(depth int) string { return "crumb:" + strconv.Itoa(depth) }
-
-// KPI metric ids (also the hero pivot metrics).
-const (
-	KPITotal  = "total"
-	KPICache  = "cache"
-	KPIEvents = "events"
-)

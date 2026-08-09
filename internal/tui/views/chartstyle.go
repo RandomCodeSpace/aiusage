@@ -334,15 +334,18 @@ func xLabelFormatter(dim string) linechart.LabelFormatter {
 	}
 }
 
-// emptyChartFrame renders a faint ghosted axis frame with a centered hint for
-// the empty state, sized to w×h.
+// emptyChartFrame renders the centered no-rows treatment for an empty chart
+// pane, sized to w×h, with a range-change hint underneath.
 func emptyChartFrame(c Ctx, w, h int) string {
-	hint := "No usage in range — press [ ] to widen or t to change range"
-	if c.Truncate != nil {
-		hint = c.Truncate(hint, w-2)
+	block := EmptyState(c, EmptyNoRows, w-2)
+	if h >= 2 {
+		sub := "press t to change range"
+		if c.Truncate != nil {
+			sub = c.Truncate(sub, w-2)
+		}
+		block = lipgloss.JoinVertical(lipgloss.Center, block, c.Faint.Render(sub))
 	}
 	box := lipgloss.NewStyle().Width(w).Height(h).
-		Align(lipgloss.Center, lipgloss.Center).
-		Foreground(c.FaintColor)
-	return box.Render(hint)
+		Align(lipgloss.Center, lipgloss.Center)
+	return box.Render(block)
 }

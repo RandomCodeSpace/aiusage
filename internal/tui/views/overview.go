@@ -205,10 +205,7 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 	if c.Delta != nil {
 		deltaTxt, dir = c.Delta(s.value, s.prev)
 	}
-	deltaStyle := c.Subtle
-	if dir > 0 {
-		deltaStyle = c.now() // up = warm (more spend)
-	}
+	deltaStyle := deltaChipStyle(c, dir)
 
 	// Number left, delta right, filling exactly cw so the row never wraps.
 	gap := cw - lipgloss.Width(num) - lipgloss.Width(deltaTxt)
@@ -235,6 +232,20 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 	body += "\n" + footRow
 
 	return c.Panel.Width(w).Render(c.PanelTitle.Render(s.label) + "\n" + body)
+}
+
+// deltaChipStyle maps a delta direction to its chip style per the Delta
+// contract (format.go): rose = warm (more spend), fell = GoodColor (falling
+// spend is good), flat/no-prior = subtle.
+func deltaChipStyle(c Ctx, dir int) lipgloss.Style {
+	switch {
+	case dir > 0:
+		return c.now()
+	case dir < 0:
+		return c.good()
+	default:
+		return c.Subtle
+	}
 }
 
 // heroPanel renders the hero time-series chart panel, degrading to a sparkline +
@@ -297,7 +308,10 @@ func sidePanel(c Ctx, d OverviewData, w, h int, focus bool) string {
 // composition bar + humanized total.
 func toolRows(c Ctx, buckets []store.Bucket, inner int) string {
 	if len(buckets) == 0 {
-		return c.Faint.Render("no usage in range")
+		return EmptyState(c, EmptyNoRows, inner)
+	}
+	if zeroTotals(buckets) {
+		return EmptyState(c, EmptyZeroTokens, inner)
 	}
 	var max int64
 	for _, b := range buckets {
@@ -345,7 +359,10 @@ func splitGauge(c Ctx, t store.Bucket, inner int) string {
 // narrow widths (the side panel is dropped below the hero).
 func compactToolStrip(c Ctx, d OverviewData, width int) string {
 	if len(d.ByTool) == 0 {
-		return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + c.Faint.Render("no usage in range"))
+		return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + EmptyState(c, EmptyNoRows, width-4))
+	}
+	if zeroTotals(d.ByTool) {
+		return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + EmptyState(c, EmptyZeroTokens, width-4))
 	}
 	var parts []string
 	limit := len(d.ByTool)

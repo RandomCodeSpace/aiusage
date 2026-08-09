@@ -61,6 +61,13 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		m.toggleHelp()
 		return m, nil
 
+	case zid == views.ZoneFreshness:
+		// The freshness chip is where you act on staleness: force refresh, same
+		// contract as the `r` key.
+		m.data.Invalidate()
+		cmd := m.startLoad()
+		return m, cmd
+
 	case strings.HasPrefix(zid, "crumb:"):
 		if depth, err := strconv.Atoi(strings.TrimPrefix(zid, "crumb:")); err == nil {
 			cmd := m.popCrumbsTo(depth)
@@ -124,7 +131,7 @@ func (m Model) zoneAt(msg tea.MouseMsg) string {
 		candidates = append(candidates, views.RailZone(i))
 	}
 	candidates = append(candidates, m.itemZoneCandidates()...)
-	candidates = append(candidates, views.ZoneRangePill, views.ZoneHelp)
+	candidates = append(candidates, views.ZoneRangePill, views.ZoneHelp, views.ZoneFreshness)
 	for _, id := range candidates {
 		if z := m.zoneMgr.Get(id); !z.IsZero() && z.InBounds(msg) {
 			return id

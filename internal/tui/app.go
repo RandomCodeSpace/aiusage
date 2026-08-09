@@ -26,12 +26,19 @@ import (
 // both set, seed a custom starting range (otherwise the default range applies).
 // StatePath points at the small ui-state.json that persists the last range + tab
 // across launches (empty disables persistence — e.g. in tests).
+// CollectInterval is the daemon's collection cadence, used to scale the
+// dead-collector escalation threshold (0 falls back to the config default).
 type Options struct {
-	DBPath    string
-	StatePath string
-	Since     time.Time
-	Until     time.Time
+	DBPath          string
+	StatePath       string
+	Since           time.Time
+	Until           time.Time
+	CollectInterval time.Duration
 }
+
+// defaultCollectInterval mirrors the config layer's 300s default for when the
+// caller does not pass one (tests, direct embedding).
+const defaultCollectInterval = 5 * time.Minute
 
 // Run launches the TUI over the given store. It blocks until the user quits.
 // Alt-screen and cell-motion mouse mode (nav rail, tabs, rows, bars and KPI
@@ -87,13 +94,18 @@ type Model struct {
 	showHelp bool
 
 	// Async loading + live refresh state.
-	spin      spinner.Model
-	loaded    bool      // first dataLoadedMsg has arrived (dashboard is live)
-	loading   bool      // a load cmd is in flight (drives the refreshing hint)
-	lastMTime time.Time // db file mtime at the last successful load (live poll)
-	loadGen   uint64    // monotonic load generation: stamped on dispatch, checked on apply
-	loadNow   time.Time // clock of the current generation; all its queries key off this
-	dataGen   uint64    // generation whose data is APPLIED to the views (render-memo key)
+	spin       spinner.Model
+	fresh      Freshness // single authority for loading/staleness (see freshness.go)
+	lastLoadAt time.Time // generation clock of the last successfully applied dataset
+	lastMTime  time.Time // db file mtime at the last successful load (live poll)
+	loadGen    uint64    // monotonic load generation: stamped on dispatch, checked on apply
+	loadNow    time.Time // clock of the current generation; all its queries key off this
+	dataGen    uint64    // generation whose data is APPLIED to the views (render-memo key)
+
+	// Ingest liveness (heartbeat cell + dead-collector banner, freshness.go).
+	ingestMTime  time.Time     // latest observed daemon write (db mtime)
+	beat         uint64        // heartbeat frame counter; advances per observed write
+	collectEvery time.Duration // daemon collection cadence (escalation threshold base)
 
 	// Container resource gauges (CPU/mem/disk for the current pod, not the node).
 	// mon samples on its own tick; sys holds the latest reading for the Overview
@@ -170,6 +182,11 @@ func NewModel(src DataSource, opt Options) Model {
 	// container's cgroup. Getwd failing just disables the disk gauge.
 	wd, _ := os.Getwd()
 
+	collectEvery := opt.CollectInterval
+	if collectEvery <= 0 {
+		collectEvery = defaultCollectInterval
+	}
+
 	return Model{
 		data:          NewData(src),
 		keys:          DefaultKeyMap(),
@@ -186,6 +203,7 @@ func NewModel(src DataSource, opt Options) Model {
 		browse:        b,
 		help:          h,
 		spin:          sp,
+		collectEvery:  collectEvery,
 		mon:           sysmon.New(wd),
 		heroMemo:      views.NewHeroMemo(),
 	}
@@ -259,7 +277,7 @@ func (m *Model) toggleHelp() {
 }
 
 // setView switches the active tab, persists it, and dispatches an async load.
-// The previous frame stays on screen (with the refreshing hint) until the warm
+// The previous frame stays on screen (behind the "◐ sync" chip) until the warm
 // load applies — no store queries run on the UI thread here.
 func (m *Model) setView(v View) tea.Cmd {
 	m.view = v
@@ -391,9 +409,9 @@ func (m Model) helpRows() int {
 }
 
 // bodyHeight is the vertical space available to the active view body after
-// reserving rows for the help overlay.
+// reserving rows for the help overlay and the dead-collector banner.
 func (m Model) bodyHeight() int {
-	h := m.lay.BodyH - m.helpRows()
+	h := m.lay.BodyH - m.helpRows() - m.bannerRows()
 	if h < 1 {
 		h = 1
 	}

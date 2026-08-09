@@ -15,18 +15,19 @@ import (
 // selected entity. The root model feeds it buckets via SetData on every
 // range/sort/drill change and forwards navigation keys via Update.
 type Browse struct {
-	table   table.Model
-	ctx     Ctx
-	dim     string
-	rows    []store.Bucket
-	grand   int64
-	preview []store.Bucket // selected row's daily trend
-	cols    []table.Column // current columns (for per-cell right-alignment)
-	lay     Layout         // central responsive layout (drives widths + preview)
-	width   int
-	height  int
-	compact bool
-	focused int // PaneBrowse* — which pane wears the ring
+	table      table.Model
+	ctx        Ctx
+	dim        string
+	rows       []store.Bucket
+	grand      int64
+	preview    []store.Bucket // selected row's daily trend
+	previewErr bool           // the preview trend query failed (distinct from "no rows")
+	cols       []table.Column // current columns (for per-cell right-alignment)
+	lay        Layout         // central responsive layout (drives widths + preview)
+	width      int
+	height     int
+	compact    bool
+	focused    int // PaneBrowse* — which pane wears the ring
 }
 
 // Browse view panes (pane 0 = rail).
@@ -96,6 +97,15 @@ func (b *Browse) SetFocusedPane(p int) { b.focused = p }
 
 // SetPreview sets the selected entity's trend buckets for the preview pane.
 func (b *Browse) SetPreview(trend []store.Bucket) { b.preview = trend }
+
+// SetPreviewErr marks whether the preview trend query failed, so the pane can
+// render the query-failed treatment instead of an ambiguous blank strip.
+func (b *Browse) SetPreviewErr(failed bool) { b.previewErr = failed }
+
+// PreviewErr reports whether the preview trend query failed. The detail-flight
+// dispatcher reads it off the flight's model copy to carry the failure back to
+// the UI thread.
+func (b Browse) PreviewErr() bool { return b.previewErr }
 
 // SetLayout updates the render area + columns from the central responsive
 // layout. The preview pane shows only when the layout grants a side panel; the
@@ -238,10 +248,14 @@ func (b Browse) previewPanel() string {
 	name := sb.Keys[b.dim]
 	comp := Split(sb)
 	sum := comp.Sum()
+	trend := trendStrip(c, b.preview, inner, len(c.Comp))
+	if b.previewErr {
+		trend = EmptyState(c, EmptyQueryFailed, inner)
+	}
 	lines := []string{
 		c.Stat.Render(displayName(c, name, inner)),
 		c.Faint.Render(strings.Repeat("─", inner)),
-		trendStrip(c, b.preview, inner, len(c.Comp)),
+		trend,
 		c.Faint.Render(strings.Repeat("─", inner)),
 	}
 	for _, s := range c.Comp {
@@ -327,7 +341,7 @@ func (b *Browse) applyRows() {
 		}
 		if full {
 			comp := Split(r)
-			row := table.Row{glyphName(c, b.dim, r, name), rnum(r.Events, colW(1))}
+			row := table.Row{glyphName(c, b.dim, name), rnum(r.Events, colW(1))}
 			for i, s := range c.Comp {
 				row = append(row, rnum(s.Pick(comp), colW(2+i)))
 			}
@@ -335,7 +349,7 @@ func (b *Browse) applyRows() {
 			out = append(out, row)
 		} else {
 			out = append(out, table.Row{
-				glyphName(c, b.dim, r, name),
+				glyphName(c, b.dim, name),
 				rnum(r.Events, colW(1)),
 				rnum(r.Total, colW(2)),
 			})
@@ -347,7 +361,7 @@ func (b *Browse) applyRows() {
 // glyphName prefixes a tool-dim row with its tool glyph (other dims pass the
 // name through). Keeps color out (the table cell style governs that) but the
 // glyph survives monochrome.
-func glyphName(c Ctx, dim string, r store.Bucket, name string) string {
+func glyphName(c Ctx, dim, name string) string {
 	if dim == "tool" && c.ToolGlyph != nil {
 		return c.ToolGlyph(name) + " " + name
 	}

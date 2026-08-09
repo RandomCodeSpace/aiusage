@@ -65,6 +65,9 @@ type Ctx struct {
 // now returns the warm amber readout style.
 func (c Ctx) now() lipgloss.Style { return lipgloss.NewStyle().Foreground(c.NowColor) }
 
+// good returns the falling-spend / healthy style.
+func (c Ctx) good() lipgloss.Style { return lipgloss.NewStyle().Foreground(c.GoodColor) }
+
 // tool returns a bold per-tool accent style.
 func (c Ctx) tool(name string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(c.ToolAccent(name)).Bold(true)

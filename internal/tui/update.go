@@ -129,10 +129,11 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Refresh):
 		// Force a reload: drop the cache and re-warm off the UI thread. The last
-		// frame stays on screen (with a refreshing hint) until the load lands.
+		// frame stays on screen behind the "◐ sync" chip until the load lands —
+		// the chip is the refresh signal, so no spinner tick is re-armed here.
 		m.data.Invalidate()
 		cmd := m.startLoad()
-		return m, tea.Batch(cmd, m.spin.Tick)
+		return m, cmd
 
 	case key.Matches(msg, m.keys.Enter):
 		return m.drill()

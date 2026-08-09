@@ -49,8 +49,8 @@ func TestNavigationRunsZeroQueriesOnUIThread(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("navigation did not dispatch a load cmd")
 	}
-	if !m.loading {
-		t.Fatal("navigation did not enter the loading state")
+	if m.fresh != FreshCutIn {
+		t.Fatalf("navigation freshness = %v, want cutIn", m.fresh)
 	}
 
 	msg := cmd() // the background flight: queries happen here, off the UI thread
@@ -64,8 +64,8 @@ func TestNavigationRunsZeroQueriesOnUIThread(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("apply-side reload ran %d queries on the UI thread, want 0", n)
 	}
-	if m.loading {
-		t.Fatal("still loading after the flight applied")
+	if m.fresh != FreshLive {
+		t.Fatalf("freshness after apply = %v, want live", m.fresh)
 	}
 	if len(m.byTool.Rows) == 0 {
 		t.Fatal("by-tool rows empty after the load applied")
@@ -115,8 +115,8 @@ func TestStaleFlightDropped(t *testing.T) {
 	msgA, msgB := cmdA(), cmdB()
 
 	m = send(m, msgA) // stale flight lands first: dropped
-	if !m.loading {
-		t.Fatal("stale flight cleared the loading state")
+	if m.fresh != FreshCutIn {
+		t.Fatalf("stale flight changed freshness to %v, want cutIn", m.fresh)
 	}
 
 	// A synthetic stale message must not advance lastMTime either.
@@ -127,8 +127,8 @@ func TestStaleFlightDropped(t *testing.T) {
 	}
 
 	m = send(m, msgB) // current generation applies
-	if m.loading {
-		t.Fatal("current-generation flight did not clear the loading state")
+	if m.fresh != FreshLive {
+		t.Fatalf("current-generation apply freshness = %v, want live", m.fresh)
 	}
 	if m.view != ViewByModel || len(m.byModel.Rows) == 0 {
 		t.Fatalf("current-generation apply missing: view=%v rows=%d", m.view, len(m.byModel.Rows))
@@ -149,8 +149,8 @@ func TestRefreshTickWhileLoadingStillDispatches(t *testing.T) {
 
 	tm, _ := m.Update(keyMsg("r")) // a load is now in flight
 	m = tm.(Model)
-	if !m.loading {
-		t.Fatal("manual refresh did not enter the loading state")
+	if m.fresh != FreshCutIn {
+		t.Fatalf("manual refresh freshness = %v, want cutIn", m.fresh)
 	}
 
 	// Unchanged mtime: no new dispatch even while loading.
@@ -161,7 +161,7 @@ func TestRefreshTickWhileLoadingStillDispatches(t *testing.T) {
 		t.Fatal("unchanged mtime dispatched a load")
 	}
 
-	// Advanced mtime: dispatches a superseding generation despite m.loading.
+	// Advanced mtime: dispatches a superseding generation despite the flight.
 	touchDB(t, db, time.Now().Add(time.Hour))
 	tm, cmd := m.Update(refreshTickMsg{})
 	m = tm.(Model)
@@ -253,7 +253,7 @@ func TestLoadCmdStatsBeforeQuerying(t *testing.T) {
 		t.Fatalf("lastMTime = %v, want the pre-write %v (mid-flight write was credited)", m.lastMTime, t0)
 	}
 	tm, _ = m.Update(refreshTickMsg{})
-	if !tm.(Model).loading {
+	if tm.(Model).fresh != FreshCutIn {
 		t.Fatal("next tick did not re-detect the mid-flight write")
 	}
 }

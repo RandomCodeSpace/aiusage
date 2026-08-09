@@ -28,15 +28,19 @@ func (m Model) View() tea.View {
 // rail/tabs, rows, bars, KPI tiles and breadcrumbs stay mouse-resolvable.
 func (m Model) render() string {
 	if m.width == 0 || m.height == 0 {
-		return "loading…"
+		// Pre-size frame: renderLoading is the ONE loading path and degrades to
+		// its own bare-text form at zero size — no second hand-rolled string.
+		return m.renderLoading()
 	}
 	// Below the absolute floor nothing fits — show a resize card and stop.
 	if m.lay.TooSmall {
 		return m.scan(m.renderTooSmall())
 	}
-	// Until the first background load lands, show the branded loading state. The
-	// program is already open and interactive; this never blocks on a query.
-	if !m.loaded {
+	// Until the first dataset applies, the branded loading state owns the frame
+	// (the program is already open and interactive; this never blocks on a
+	// query). A cold FAILURE falls through instead: the dashboard chrome renders
+	// with the full-body error panel — the only place that panel exists.
+	if m.fresh == FreshCold && m.err == nil {
 		return m.scan(m.clampFrame(m.renderLoading()))
 	}
 
@@ -58,6 +62,9 @@ func (m Model) render() string {
 	}
 	if m.lay.ShowBreadcrumb {
 		rows = append(rows, m.renderBreadcrumb())
+	}
+	if m.bannerRows() > 0 {
+		rows = append(rows, m.renderStallBanner())
 	}
 	rows = append(rows, body)
 
@@ -139,13 +146,11 @@ func (m Model) renderHeader() string {
 	help := m.zoneMark(views.ZoneHelp, m.th.Subtle.Render("? help"))
 
 	right := ""
-	// Subtle live/refreshing indicator: a spinner glyph while a background load
-	// is in flight, otherwise a steady "live" dot. Never blanks the frame.
-	if m.loading {
-		right += m.spin.View() + lipgloss.NewStyle().Foreground(m.th.Now).Render("refreshing") + "  "
-	} else {
-		right += lipgloss.NewStyle().Foreground(m.th.Positive).Render("● live") + "  "
-	}
+	// Ingest heartbeat (real collector pulse) + query-freshness chip. The chip
+	// is a click zone: the indicator is where you act (left-press = force
+	// refresh). Never blanks the frame.
+	right += m.heartbeatCell() + " "
+	right += m.zoneMark(views.ZoneFreshness, m.freshnessChip()) + "  "
 	right += rangePill
 	if m.reducedMotion {
 		// Surface the reduced-motion state; the dashboard renders all charts
@@ -194,15 +199,12 @@ func (m Model) renderBreadcrumb() string {
 }
 
 // renderBody renders the active view into the body region described by lay.
+// The full-body error panel exists ONLY while cold: with a prior good frame,
+// handleDataLoaded holds the picture and the failure lives in the freshness
+// chip — four healthy panels are never blanked for one failed load.
 func (m Model) renderBody(lay views.Layout) string {
-	if m.err != nil {
-		w := lay.BodyW
-		if w < 3 {
-			w = 3
-		}
-		return m.th.Errored().Width(w).Render(
-			lipgloss.NewStyle().Foreground(m.th.Warn).Render("error: " + m.err.Error()),
-		)
+	if m.err != nil && m.fresh == FreshCold {
+		return m.renderErrorPanel(lay)
 	}
 	switch m.view {
 	case ViewOverview:

@@ -116,7 +116,11 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			return tui.Run(st, tui.Options{DBPath: cfg.DBPath, StatePath: uiStatePath(cfg)})
+			return tui.Run(st, tui.Options{
+				DBPath:          cfg.DBPath,
+				StatePath:       uiStatePath(cfg),
+				CollectInterval: time.Duration(cfg.IntervalSeconds) * time.Second,
+			})
 		},
 	}
 
