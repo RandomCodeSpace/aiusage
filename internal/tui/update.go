@@ -18,9 +18,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
-		// Re-lay-out from the cache; the first real data arrives via the async
-		// load cmd kicked in Init, not here, so resize never blocks on I/O.
-		m.reload()
+		// Until the first dataLoadedMsg lands, resize is pure relayout: Init's
+		// async loadCmd delivers the data, and reloading here on a cold cache
+		// would run the same queries a second time, on the UI thread.
+		if m.loaded {
+			m.reload()
+		}
 		return m, nil
 
 	case dataLoadedMsg:

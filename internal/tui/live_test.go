@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // newLoadedModel builds a width-sized model over src pointing at dbPath and
@@ -126,6 +130,66 @@ func TestRefreshTickChangedMtimeReloads(t *testing.T) {
 	if m.loading {
 		t.Fatal("still loading after the reload landed")
 	}
+}
+
+// raceSource is a stateless DataSource that is safe for concurrent use (unlike
+// fakeData, whose call counters would themselves race). Its bucket set orders
+// differently under every sort mode, so each mode change re-permutes — writes
+// to — the slice being sorted.
+type raceSource struct{}
+
+func (raceSource) Summarize(_ context.Context, f store.Filter) (*store.Summary, error) {
+	if len(f.GroupBy) == 0 {
+		return &store.Summary{Totals: store.Bucket{Events: 10, Total: 100}}, nil
+	}
+	dim := f.GroupBy[0]
+	mk := func(val string, total, events int64) store.Bucket {
+		return store.Bucket{
+			Keys:        map[string]string{dim: val},
+			OrderedKeys: []string{dim},
+			Events:      events,
+			Total:       total,
+		}
+	}
+	return &store.Summary{
+		GroupBy: f.GroupBy,
+		Buckets: []store.Bucket{mk("a", 10, 4), mk("b", 40, 1), mk("c", 20, 3), mk("d", 30, 2)},
+	}, nil
+}
+
+func (raceSource) ListEvents(context.Context, store.Filter) ([]model.UsageEvent, error) {
+	return nil, nil
+}
+
+// TestUIReloadDuringBackgroundLoad overlaps the background load cmd (as Init and
+// startLoad dispatch it) with UI-thread reloads on colliding cache keys — the
+// startup shape, where Init's loadCmd races the first WindowSizeMsg reload. now
+// is pinned so every iteration resolves identical keys, and both sides cycle
+// the sort mode so every reload re-sorts the shared keys. Before summaries were
+// copied on access, both goroutines sorted the same cached backing array and
+// this failed under -race.
+func TestUIReloadDuringBackgroundLoad(t *testing.T) {
+	m := NewModel(raceSource{}, Options{})
+	fixed := time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local)
+	m.data.now = func() time.Time { return fixed }
+	m.view = ViewByTool
+
+	const iters = 400
+	bg := m
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iters; i++ {
+			bg.sort = bg.sort.Next()
+			bg.loadCmd()()
+		}
+	}()
+	ui := m
+	for i := 0; i < iters; i++ {
+		ui.sort = ui.sort.Next()
+		ui.reload()
+	}
+	<-done
 }
 
 // TestManualRefreshForcesReload verifies the `r` key forces a reload regardless

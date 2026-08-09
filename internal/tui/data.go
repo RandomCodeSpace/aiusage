@@ -142,6 +142,10 @@ var _ DataSource = (store.Store)(nil)
 // path is also serialised by an in-flight flag in the model, so at most one
 // goroutine writes at a time; mu makes that contract enforced rather than
 // assumed.
+//
+// Cached summaries are immutable once inserted: the UI thread and the load
+// goroutine can hold the same *store.Summary at the same time, so accessors
+// that sort do so on a per-call copy (copySummary), never on the cached slice.
 type Data struct {
 	src   DataSource
 	now   func() time.Time
@@ -246,6 +250,7 @@ func (d *Data) GroupBy(r Range, crumbs []Crumb, dim string, srt Sort) (*store.Su
 	if err != nil {
 		return nil, err
 	}
+	s = copySummary(s)
 	sortBuckets(s.Buckets, dim, srt)
 	return s, nil
 }
@@ -269,6 +274,7 @@ func (d *Data) Timeline(r Range, crumbs []Crumb) (*store.Summary, string, error)
 	if err != nil {
 		return nil, dim, err
 	}
+	s = copySummary(s)
 	sort.SliceStable(s.Buckets, func(i, j int) bool {
 		return s.Buckets[i].Keys[dim] < s.Buckets[j].Keys[dim]
 	})
@@ -287,6 +293,7 @@ func (d *Data) GroupByWindow(since, until time.Time, crumbs []Crumb, dim string,
 	if err != nil {
 		return nil, err
 	}
+	s = copySummary(s)
 	sortBuckets(s.Buckets, dim, srt)
 	return s, nil
 }
@@ -309,6 +316,19 @@ func (d *Data) Events(r Range, crumbs []Crumb) ([]model.UsageEvent, error) {
 	d.evCab[k] = e
 	d.mu.Unlock()
 	return e, nil
+}
+
+// copySummary returns a shallow copy of s with its own Buckets slice, so the
+// caller can sort (and hold) the result without mutating the cached summary.
+// Cache entries are shared between the UI thread and the background load
+// goroutine — sorting them in place raced — and per-caller copies also stop a
+// later re-sort of the same key under a different mode from silently reordering
+// rows an earlier caller still displays. Bucket contents (including the Keys
+// maps) stay shared; nothing writes to them after Summarize builds them.
+func copySummary(s *store.Summary) *store.Summary {
+	out := *s
+	out.Buckets = append([]store.Bucket(nil), s.Buckets...)
+	return &out
 }
 
 // sortBuckets orders buckets in place by the chosen sort mode. Default ordering
