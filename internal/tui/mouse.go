@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
@@ -17,15 +17,18 @@ const doubleClickWindow = 400 * time.Millisecond
 
 // updateMouse handles a tea.MouseMsg. All hit-testing goes through the shared
 // zone manager; keyboard and mouse mutate the SAME focus/cursor/scrub state so
-// they never diverge. Drag events are ignored.
+// they never diverge. Motion and release events are ignored.
 func (m Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		return m.wheel(-1), nil
-	case tea.MouseButtonWheelDown:
-		return m.wheel(+1), nil
-	case tea.MouseButtonLeft:
-		if msg.Action == tea.MouseActionPress {
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			return m.wheel(-1), nil
+		case tea.MouseWheelDown:
+			return m.wheel(+1), nil
+		}
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
 			return m.click(msg)
 		}
 	}
@@ -33,7 +36,7 @@ func (m Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // click resolves a left-press to a zone and acts on it.
-func (m Model) click(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	zid := m.zoneAt(msg)
 	if zid == "" {
 		return m, nil

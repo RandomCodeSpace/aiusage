@@ -1,9 +1,10 @@
 package views
 
 import (
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -41,14 +42,14 @@ func (c Components) Sum() int64 { return c.Input + c.Output + c.CacheRead + c.Ca
 
 // CompSpec describes one token series for uniform rendering across every view:
 // its key, display labels, accent color, monochrome-safe glyph, and a selector
-// that pulls its value out of a Components. Color is a TerminalColor so callers
+// that pulls its value out of a Components. Color is a color.Color so callers
 // can pass ANSI palette indices (which adapt to the user's terminal theme).
 type CompSpec struct {
 	Key   string
 	Label string // legend / KPI title, e.g. "cache"
 	Short string // narrow table header, e.g. "cache"
 	Glyph string
-	Color lipgloss.TerminalColor
+	Color color.Color
 	Pick  func(Components) int64
 }
 
@@ -60,7 +61,7 @@ func (s CompSpec) Style() lipgloss.Style { return lipgloss.NewStyle().Foreground
 // Claude and is kept in the DB purely so internal cost pricing can value them
 // differently later — the UI always shows a single combined cache series. Order
 // is load-bearing: charts, tiles and columns all render in this order.
-func CompSpecs(input, output, cache lipgloss.TerminalColor) []CompSpec {
+func CompSpecs(input, output, cache color.Color) []CompSpec {
 	return []CompSpec{
 		{"input", "input", "input", "▰", input, func(c Components) int64 { return c.Input }},
 		{"output", "output", "output", "▱", output, func(c Components) int64 { return c.Output }},

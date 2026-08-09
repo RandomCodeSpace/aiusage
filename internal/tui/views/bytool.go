@@ -3,7 +3,7 @@ package views
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -80,10 +80,10 @@ func byEntity(c Ctx, d byEntityData, lay Layout) string {
 // than ntcharts barchart, so each row carries glyph + colored name + number +
 // share and its own click zone — richer than the raw barchart labels).
 func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
-	// Height(h-2) fills the bordered box to the full body height (border = 2 rows)
-	// so the panel doesn't float as a short box above empty terminal on tall
-	// screens; lipgloss pads the interior with blank rows.
-	style := c.panelStyle(focus).Width(w - 2).Height(maxInt(h-2, 1))
+	// Height(h) fills the bordered box to the full body height so the panel
+	// doesn't float as a short box above empty terminal on tall screens;
+	// lipgloss pads the interior with blank rows.
+	style := c.panelStyle(focus).Width(w).Height(maxInt(h, 3))
 	inner := w - 4
 	title := c.titleChip(d.title, focus)
 
@@ -174,7 +174,7 @@ func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
 func detailCard(c Ctx, d byEntityData, w, h int, focus bool) string {
 	// Fill the box to the full body height so it lines up with the bars panel
 	// instead of floating short above empty terminal.
-	style := c.panelStyle(focus).Width(w - 2).Height(maxInt(h-2, 1))
+	style := c.panelStyle(focus).Width(w).Height(maxInt(h, 3))
 	inner := w - 4
 	if len(d.rows) == 0 || d.selected < 0 || d.selected >= len(d.rows) {
 		return style.Render(c.titleChip("DETAIL", focus) + "\n" + c.Faint.Render("no selection"))

@@ -9,12 +9,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	zone "github.com/lrstanley/bubblezone"
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
+	zone "github.com/lrstanley/bubblezone/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/sysmon"
@@ -33,11 +34,11 @@ type Options struct {
 }
 
 // Run launches the TUI over the given store. It blocks until the user quits.
-// Mouse support is enabled via tea.WithMouseCellMotion so the nav rail, tabs,
-// rows, bars and KPI tiles are all clickable and the wheel scrolls/scrubs.
+// Alt-screen and cell-motion mouse mode (nav rail, tabs, rows, bars and KPI
+// tiles clickable; wheel scrolls/scrubs) are declared on the tea.View in View().
 func Run(st store.Store, opt Options) error {
 	m := NewModel(st, opt)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err
 }
@@ -111,7 +112,11 @@ func NewModel(src DataSource, opt Options) Model {
 
 	zm := zone.New()
 
+	// help.New defaults to the dark styles in bubbles v2; pick light/dark from
+	// the same background probe the compat adaptive theme colors use, matching
+	// the v1 help bubble's AdaptiveColor behavior.
 	h := help.New()
+	h.Styles = help.DefaultStyles(compat.HasDarkBackground)
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -340,7 +345,7 @@ func (m *Model) layout() {
 	// Bound the help footer so its one-line short help ellipsis-truncates instead
 	// of overflowing the frame (FooterBar adds Padding(0,1) = 2 columns).
 	if m.width > 2 {
-		m.help.Width = m.width - 2
+		m.help.SetWidth(m.width - 2)
 	}
 }
 

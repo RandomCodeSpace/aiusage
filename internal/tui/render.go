@@ -4,18 +4,29 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
-// View renders the whole frame. The nav adapts to width (left rail → top tab
+// View wraps the rendered frame in a tea.View that declares the terminal modes
+// the dashboard needs: the alt screen and cell-motion mouse reporting (clicks +
+// wheel on the nav, tabs, rows, bars and KPI tiles).
+func (m Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// render renders the whole frame. The nav adapts to width (left rail → top tab
 // strip → phone-width icon row), chrome rows fold out when height is tight, the
 // body is sized by the central layout, and the whole frame is bounded to the
 // terminal so nothing ever overflows. Below the usable floor a resize card is
 // shown instead. The frame is run through the shared zone manager's Scan so the
 // rail/tabs, rows, bars, KPI tiles and breadcrumbs stay mouse-resolvable.
-func (m Model) View() string {
+func (m Model) render() string {
 	if m.width == 0 || m.height == 0 {
 		return "loading…"
 	}
@@ -185,9 +196,9 @@ func (m Model) renderBreadcrumb() string {
 // renderBody renders the active view into the body region described by lay.
 func (m Model) renderBody(lay views.Layout) string {
 	if m.err != nil {
-		w := lay.BodyW - 2
-		if w < 1 {
-			w = 1
+		w := lay.BodyW
+		if w < 3 {
+			w = 3
 		}
 		return m.th.Errored().Width(w).Render(
 			lipgloss.NewStyle().Foreground(m.th.Warn).Render("error: " + m.err.Error()),
@@ -226,9 +237,9 @@ func (m Model) renderFooter() string {
 func (m Model) renderHelpOverlay() string {
 	m.help.ShowAll = true
 	content := m.help.View(m.keys)
-	w := m.width - 4
-	if w < 1 {
-		w = 1
+	w := m.width - 2
+	if w < 3 {
+		w = 3
 	}
 	panel := m.th.Idle().Width(w).Render(content)
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(panel)

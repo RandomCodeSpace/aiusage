@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
 )
 
 var ansiSys = regexp.MustCompile("\x1b\\[[0-9;]*m")
@@ -15,9 +16,9 @@ func sysTestCtx() Ctx {
 		Faint:     lipgloss.NewStyle(),
 		StatLabel: lipgloss.NewStyle(),
 		Subtle:    lipgloss.NewStyle(),
-		GoodColor: lipgloss.AdaptiveColor{Light: "#1A7F37", Dark: "#56D364"},
-		NowColor:  lipgloss.AdaptiveColor{Light: "#B5780A", Dark: "#F2B441"},
-		WarnColor: lipgloss.AdaptiveColor{Light: "#C0362C", Dark: "#E5534B"},
+		GoodColor: compat.AdaptiveColor{Light: lipgloss.Color("#1A7F37"), Dark: lipgloss.Color("#56D364")},
+		NowColor:  compat.AdaptiveColor{Light: lipgloss.Color("#B5780A"), Dark: lipgloss.Color("#F2B441")},
+		WarnColor: compat.AdaptiveColor{Light: lipgloss.Color("#C0362C"), Dark: lipgloss.Color("#E5534B")},
 	}
 }
 

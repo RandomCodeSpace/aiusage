@@ -11,8 +11,9 @@
 package views
 
 import (
-	"github.com/charmbracelet/lipgloss"
-	zone "github.com/lrstanley/bubblezone"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
+	zone "github.com/lrstanley/bubblezone/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -34,12 +35,12 @@ type Ctx struct {
 	Faint      lipgloss.Style // gridlines / ghosted series / disabled
 
 	// Adaptive colors for chart adapters and segment coloring.
-	NowColor    lipgloss.AdaptiveColor
-	AccentColor lipgloss.AdaptiveColor
-	FaintColor  lipgloss.AdaptiveColor
-	BorderColor lipgloss.AdaptiveColor
-	GoodColor   lipgloss.AdaptiveColor // healthy/low utilisation (resource gauges)
-	WarnColor   lipgloss.AdaptiveColor // high/critical utilisation (resource gauges)
+	NowColor    compat.AdaptiveColor
+	AccentColor compat.AdaptiveColor
+	FaintColor  compat.AdaptiveColor
+	BorderColor compat.AdaptiveColor
+	GoodColor   compat.AdaptiveColor // healthy/low utilisation (resource gauges)
+	WarnColor   compat.AdaptiveColor // high/critical utilisation (resource gauges)
 
 	// Comp is the ordered (input, output, cache-read, cache-creation) descriptor
 	// every view iterates so KPI tiles, table columns, the trend chart and
@@ -53,7 +54,7 @@ type Ctx struct {
 	Truncate   func(string, int) string
 	Percent    func(value, total int64) string
 	Delta      func(cur, prev int64) (text string, dir int)
-	ToolAccent func(tool string) lipgloss.AdaptiveColor
+	ToolAccent func(tool string) compat.AdaptiveColor
 	ToolGlyph  func(tool string) string
 
 	// Shared bubblezone manager for mouse hit-testing. Views Mark zones; the

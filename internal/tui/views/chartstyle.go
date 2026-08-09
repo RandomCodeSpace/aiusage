@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NimbleMarkets/ntcharts/linechart"
-	"github.com/NimbleMarkets/ntcharts/linechart/timeserieslinechart"
-	"github.com/NimbleMarkets/ntcharts/sparkline"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
+	"github.com/NimbleMarkets/ntcharts/v2/linechart"
+	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
+	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )

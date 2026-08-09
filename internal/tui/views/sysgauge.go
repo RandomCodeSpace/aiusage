@@ -1,10 +1,11 @@
 package views
 
 import (
+	"image/color"
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // sysgauge.go renders the compact container-resource strip (CPU / memory / disk)
@@ -57,7 +58,7 @@ func SysStrip(c Ctx, gauges []SysGauge, width int) string {
 }
 
 // gaugeColor maps a utilisation fraction to the healthy/busy/critical color.
-func gaugeColor(c Ctx, frac float64) lipgloss.TerminalColor {
+func gaugeColor(c Ctx, frac float64) color.Color {
 	switch {
 	case frac >= gaugeWarnFrac:
 		return c.WarnColor

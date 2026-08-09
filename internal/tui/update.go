@@ -3,9 +3,9 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 )
 
 // update.go holds the MVU reducer and the keyboard-handling helpers. The root
@@ -41,7 +41,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.updateMouse(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.filtering {
 			return m.updateFiltering(msg)
 		}
@@ -51,7 +51,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // updateFiltering handles keys while the filter input is focused.
-func (m Model) updateFiltering(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateFiltering(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		// Quit must work while typing, so the chord is matched before the input
@@ -76,7 +76,7 @@ func (m Model) updateFiltering(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateKey handles global navigation keys.
-func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		// Clear the (alt) screen before quitting. On terminals that fully restore

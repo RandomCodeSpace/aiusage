@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 // KeyMap holds every binding the root model recognises. It implements the
 // bubbles/help.KeyMap interface so the help bar/overlay renders from one source

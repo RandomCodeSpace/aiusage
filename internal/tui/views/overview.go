@@ -3,7 +3,7 @@ package views
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -127,9 +127,9 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 	if per < 1 {
 		per = 1
 	}
-	tileW := (width-(per-1))/per - 2 // -2 for each tile's border
-	if tileW < 14 {
-		tileW = 14
+	tileW := (width - (per - 1)) / per // total tile width (lipgloss v2 sizes are border-inclusive)
+	if tileW < 16 {
+		tileW = 16
 	}
 
 	tiles := make([]string, len(specs))
@@ -160,10 +160,10 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 // right-aligned number + delta chip, an optional self-scaled sparkline, then a
 // share % or unit. KPI tiles are not interactive (the trend is the only
 // interactive surface on Overview).
-func kpiTile(c Ctx, s kpiSpec, innerW int, spark bool) string {
-	// The panel has Padding(0,1), so the usable content width is innerW-2. Build
-	// every row to exactly cw cells so nothing wraps inside the box.
-	cw := innerW - 2
+func kpiTile(c Ctx, s kpiSpec, w int, spark bool) string {
+	// The border (2) plus Padding(0,1) (2) leave w-4 usable content columns.
+	// Build every row to exactly cw cells so nothing wraps inside the box.
+	cw := w - 4
 	if cw < 6 {
 		cw = 6
 	}
@@ -202,13 +202,13 @@ func kpiTile(c Ctx, s kpiSpec, innerW int, spark bool) string {
 	}
 	body += "\n" + footRow
 
-	return c.Panel.Width(innerW).Render(c.PanelTitle.Render(s.label) + "\n" + body)
+	return c.Panel.Width(w).Render(c.PanelTitle.Render(s.label) + "\n" + body)
 }
 
 // heroPanel renders the hero time-series chart panel, degrading to a sparkline +
 // top-tool readout when there isn't room for a full axed chart.
 func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
-	style := c.panelStyle(focus).Width(w - 2)
+	style := c.panelStyle(focus).Width(w)
 	inner := w - 4
 	if inner < 4 {
 		inner = 4
@@ -232,9 +232,9 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 // sidePanel renders the read-only by-tool composition bars over a four-component
 // split gauge.
 func sidePanel(c Ctx, d OverviewData, w, h int, focus bool) string {
-	// Fill the box to the hero's height (border = 2 rows) so the right column
-	// matches the trend panel instead of floating short above empty terminal.
-	style := c.panelStyle(focus).Width(w - 2).Height(maxInt(h-2, 1))
+	// Fill the box to the hero's height so the right column matches the trend
+	// panel instead of floating short above empty terminal.
+	style := c.panelStyle(focus).Width(w).Height(maxInt(h, 3))
 	inner := w - 4
 	if inner < 4 {
 		inner = 4
@@ -298,7 +298,7 @@ func splitGauge(c Ctx, t store.Bucket, inner int) string {
 // narrow widths (the side panel is dropped below the hero).
 func compactToolStrip(c Ctx, d OverviewData, width int) string {
 	if len(d.ByTool) == 0 {
-		return c.Panel.Width(width - 2).Render(c.PanelTitle.Render("BY TOOL") + "\n" + c.Faint.Render("no usage in range"))
+		return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + c.Faint.Render("no usage in range"))
 	}
 	var parts []string
 	limit := len(d.ByTool)
@@ -310,5 +310,5 @@ func compactToolStrip(c Ctx, d OverviewData, width int) string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))+" "+
 			c.tool(tool).Render(tool)+" "+c.Number.Render(c.Humanize(b.Total)))
 	}
-	return c.Panel.Width(width - 2).Render(c.PanelTitle.Render("BY TOOL") + "\n" + c.Truncate(strings.Join(parts, "   "), width-4))
+	return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + c.Truncate(strings.Join(parts, "   "), width-4))
 }

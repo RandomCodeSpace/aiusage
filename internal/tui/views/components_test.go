@@ -4,7 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -30,7 +31,9 @@ func TestSplitComponents(t *testing.T) {
 
 // CompSpecs must keep a fixed order and each selector must pull the right field.
 func TestCompSpecsOrderAndPick(t *testing.T) {
-	ac := func(s string) lipgloss.AdaptiveColor { return lipgloss.AdaptiveColor{Dark: s, Light: s} }
+	ac := func(s string) compat.AdaptiveColor {
+		return compat.AdaptiveColor{Dark: lipgloss.Color(s), Light: lipgloss.Color(s)}
+	}
 	specs := CompSpecs(ac("#1"), ac("#2"), ac("#3"))
 	if len(specs) != 3 {
 		t.Fatalf("want 3 specs, got %d", len(specs))

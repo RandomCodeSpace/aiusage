@@ -4,13 +4,14 @@ import (
 	"context"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	zone "github.com/lrstanley/bubblezone"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	zone "github.com/lrstanley/bubblezone/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
@@ -19,14 +20,15 @@ import (
 
 // fakeData is a tiny in-test DataSource. It returns a fixed grouping for any
 // single-dimension Summarize and a couple of canned events, so model
-// transitions can be exercised without a real database.
+// transitions can be exercised without a real database. Call counters are
+// atomic so load cmds running off the test goroutine are counted safely.
 type fakeData struct {
-	summarizeCalls int
-	listCalls      int
+	summarizeCalls atomic.Int64
+	listCalls      atomic.Int64
 }
 
 func (f *fakeData) Summarize(_ context.Context, fl store.Filter) (*store.Summary, error) {
-	f.summarizeCalls++
+	f.summarizeCalls.Add(1)
 	if len(fl.GroupBy) == 0 {
 		return &store.Summary{
 			Totals: store.Bucket{Events: 12, Input: 1000, Output: 2000, CacheRead: 4000, Total: 7000},
@@ -67,7 +69,7 @@ func (f *fakeData) Summarize(_ context.Context, fl store.Filter) (*store.Summary
 }
 
 func (f *fakeData) ListEvents(_ context.Context, _ store.Filter) ([]model.UsageEvent, error) {
-	f.listCalls++
+	f.listCalls.Add(1)
 	return []model.UsageEvent{
 		{
 			Tool: model.ToolClaudeCode, Model: "claude-opus", SessionID: "sess-1",
@@ -77,6 +79,21 @@ func (f *fakeData) ListEvents(_ context.Context, _ store.Filter) ([]model.UsageE
 			Raw: `{"usage":{"input_tokens":100,"output_tokens":200}}`,
 		},
 	}, nil
+}
+
+// queries returns the total number of DataSource calls f has served
+// (Summarize + ListEvents).
+func (f *fakeData) queries() int64 {
+	return f.summarizeCalls.Load() + f.listCalls.Load()
+}
+
+// queriesDuring reports how many DataSource queries f served while fn ran, so
+// tests can assert "this interaction does N queries" — in particular N == 0
+// for paths that must stay off SQLite (cache-warm reloads, UI-thread work).
+func queriesDuring(f *fakeData, fn func()) int64 {
+	before := f.queries()
+	fn()
+	return f.queries() - before
 }
 
 // newTestModelW returns a Model sized to a usable terminal at the given width so
@@ -115,27 +132,28 @@ func newTestModel(t *testing.T, src DataSource) Model {
 	return newTestModelW(t, src, 120)
 }
 
-// keyMsg builds a key message for a single token.
-func keyMsg(s string) tea.KeyMsg {
+// keyMsg builds a key-press message for a single token.
+func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
 	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
+		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "shift+tab":
-		return tea.KeyMsg{Type: tea.KeyShiftTab}
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 	case "left":
-		return tea.KeyMsg{Type: tea.KeyLeft}
+		return tea.KeyPressMsg{Code: tea.KeyLeft}
 	case "right":
-		return tea.KeyMsg{Type: tea.KeyRight}
+		return tea.KeyPressMsg{Code: tea.KeyRight}
 	case "up":
-		return tea.KeyMsg{Type: tea.KeyUp}
+		return tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+		r := []rune(s)
+		return tea.KeyPressMsg{Code: r[0], Text: s}
 	}
 }
 
@@ -213,14 +231,14 @@ func click(t *testing.T, m Model, zoneID string) (Model, bool) {
 	}
 	x := (z.StartX + z.EndX) / 2
 	y := (z.StartY + z.EndY) / 2
-	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y}
+	msg := tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y}
 	return send(m, msg), true
 }
 
 // resolveZone renders the frame and waits (up to a bounded number of yields)
 // for the async zone worker to register the named zone's bounds.
 func resolveZone(m Model, zoneID string) *zone.ZoneInfo {
-	_ = m.View()
+	_ = m.View().Content
 	for i := 0; i < 2000; i++ {
 		if z := m.zoneMgr.Get(zoneID); z != nil && !z.IsZero() {
 			return z
@@ -256,7 +274,7 @@ func TestViewSwitching(t *testing.T) {
 	for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse} {
 		m.view = v
 		m.reload()
-		if got := m.View(); got == "" {
+		if got := m.View().Content; got == "" {
 			t.Fatalf("View() empty for view %v", v)
 		}
 	}
@@ -537,7 +555,7 @@ func TestMouseClickRowSelects(t *testing.T) {
 func TestMouseWheelScrubsOverview(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	m = send(m, keyMsg("1")) // Overview (owns the trend scrub)
-	wheelDown := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 5, Y: 5}
+	wheelDown := tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 5, Y: 5}
 	m = send(m, wheelDown)
 	if !m.scrubPinned {
 		t.Fatal("wheel down did not pin/scrub the overview trend")
@@ -545,7 +563,7 @@ func TestMouseWheelScrubsOverview(t *testing.T) {
 	if m.scrubIndex != 1 {
 		t.Fatalf("after wheel down scrub index = %d, want 1", m.scrubIndex)
 	}
-	wheelUp := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 5, Y: 5}
+	wheelUp := tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 5, Y: 5}
 	m = send(m, wheelUp)
 	if m.scrubIndex != 0 {
 		t.Fatalf("after wheel up scrub index = %d, want 0", m.scrubIndex)
@@ -555,12 +573,12 @@ func TestMouseWheelScrubsOverview(t *testing.T) {
 func TestMouseWheelScrollsBrowse(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	m = send(m, keyMsg("4")) // Browse (2 tool rows)
-	wheelDown := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 5, Y: 5}
+	wheelDown := tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 5, Y: 5}
 	m = send(m, wheelDown)
 	if m.browse.Cursor() != 1 {
 		t.Fatalf("after wheel down browse cursor = %d, want 1", m.browse.Cursor())
 	}
-	wheelUp := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 5, Y: 5}
+	wheelUp := tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 5, Y: 5}
 	m = send(m, wheelUp)
 	if m.browse.Cursor() != 0 {
 		t.Fatalf("after wheel up browse cursor = %d, want 0", m.browse.Cursor())
@@ -574,7 +592,7 @@ func TestHelpAndRefreshNoPanic(t *testing.T) {
 	if !m.showHelp {
 		t.Fatal("help not toggled on")
 	}
-	if !strings.Contains(m.View(), "quit") {
+	if !strings.Contains(m.View().Content, "quit") {
 		t.Fatal("help overlay missing expected hint text")
 	}
 	m = send(m, keyMsg("?"))
@@ -584,17 +602,18 @@ func TestHelpAndRefreshNoPanic(t *testing.T) {
 
 	// Manual `r` now forces an async reload: it invalidates the cache and returns
 	// a load cmd. Running that cmd re-queries the source off the UI thread.
-	before := f.summarizeCalls
-	tm, cmd := m.Update(keyMsg("r"))
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("refresh produced no command")
-	}
-	if !m.loading {
-		t.Fatal("refresh did not enter the loading state")
-	}
-	runPending(t, m, cmd) // drives the load goroutine + spinner tick to completion
-	if f.summarizeCalls <= before {
+	n := queriesDuring(f, func() {
+		tm, cmd := m.Update(keyMsg("r"))
+		m = tm.(Model)
+		if cmd == nil {
+			t.Fatal("refresh produced no command")
+		}
+		if !m.loading {
+			t.Fatal("refresh did not enter the loading state")
+		}
+		runPending(t, m, cmd) // drives the load goroutine + spinner tick to completion
+	})
+	if n == 0 {
 		t.Fatal("refresh did not re-query the data source")
 	}
 }
@@ -614,7 +633,7 @@ func TestQuitWhileFiltering(t *testing.T) {
 	if got := m.filterUI.Value(); got != "q" {
 		t.Fatalf("filter input = %q, want q", got)
 	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd == nil {
 		t.Fatal("ctrl+c while filtering produced no command")
 	}
@@ -658,7 +677,7 @@ func TestQuit(t *testing.T) {
 		t.Fatal("q command produced no message")
 	}
 	// ctrl+c quits the same way.
-	if _, c := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC}); c == nil {
+	if _, c := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); c == nil {
 		t.Fatal("ctrl+c produced no command")
 	}
 }
@@ -671,7 +690,7 @@ func TestResponsiveRender(t *testing.T) {
 		for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse} {
 			m.view = v
 			m.reload()
-			out := m.View()
+			out := m.View().Content
 			if out == "" {
 				t.Fatalf("empty render at %d cols for view %v", width, v)
 			}
@@ -688,7 +707,7 @@ func TestSmallWidthRender(t *testing.T) {
 	for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse} {
 		m.view = v
 		m.reload()
-		if m.View() == "" {
+		if m.View().Content == "" {
 			t.Fatalf("empty render at 70 cols for view %v", v)
 		}
 	}

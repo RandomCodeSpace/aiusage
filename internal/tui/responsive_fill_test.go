@@ -20,7 +20,7 @@ func TestPanelsFillBodyHeight(t *testing.T) {
 		} {
 			m := newTestModelWH(t, &fakeData{}, sz[0], sz[1])
 			m = send(m, keyMsg(tab.key))
-			clean := ansiFill.ReplaceAllString(m.View(), "")
+			clean := ansiFill.ReplaceAllString(m.View().Content, "")
 			lines := strings.Split(strings.TrimRight(clean, "\n"), "\n")
 
 			// Lowest line carrying a panel bottom-border glyph.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
@@ -47,7 +47,7 @@ func TestLoadingStateBeforeFirstData(t *testing.T) {
 	if m.loaded {
 		t.Fatal("model marked loaded before any dataLoadedMsg")
 	}
-	out := m.View()
+	out := m.View().Content
 	if !strings.Contains(out, "loading usage…") {
 		t.Fatalf("loading state missing 'loading usage…' text:\n%s", out)
 	}
@@ -67,7 +67,7 @@ func TestLoadingStateBeforeFirstData(t *testing.T) {
 	if !m.loaded {
 		t.Fatal("model not loaded after dataLoadedMsg")
 	}
-	if strings.Contains(m.View(), "loading usage…") {
+	if strings.Contains(m.View().Content, "loading usage…") {
 		t.Fatal("still showing loading state after first data load")
 	}
 }
@@ -83,20 +83,21 @@ func TestRefreshTickUnchangedMtimeNoQuery(t *testing.T) {
 	f := &fakeData{}
 	m := newLoadedModel(t, f, db)
 
-	before := f.summarizeCalls
-	tm, cmd := m.Update(refreshTickMsg{})
-	m = tm.(Model)
-	// Tick must re-arm (cmd != nil) but must NOT kick a load.
-	if cmd == nil {
-		t.Fatal("refresh tick did not re-arm the tick")
-	}
-	if m.loading {
-		t.Fatal("refresh tick entered loading on unchanged mtime")
-	}
-	// Draining whatever the tick returned must not re-query: the re-armed tick is
-	// a pure timer, no dataLoadedMsg, no Summarize.
-	if f.summarizeCalls != before {
-		t.Fatalf("unchanged mtime triggered %d new Summarize calls", f.summarizeCalls-before)
+	// The tick's whole interaction must run zero queries: the re-armed tick is a
+	// pure timer, no dataLoadedMsg, no Summarize — idle cost stays one os.Stat.
+	n := queriesDuring(f, func() {
+		tm, cmd := m.Update(refreshTickMsg{})
+		m = tm.(Model)
+		// Tick must re-arm (cmd != nil) but must NOT kick a load.
+		if cmd == nil {
+			t.Fatal("refresh tick did not re-arm the tick")
+		}
+		if m.loading {
+			t.Fatal("refresh tick entered loading on unchanged mtime")
+		}
+	})
+	if n != 0 {
+		t.Fatalf("unchanged mtime triggered %d queries, want 0", n)
 	}
 }
 
@@ -114,17 +115,18 @@ func TestRefreshTickChangedMtimeReloads(t *testing.T) {
 	// Daemon wrote new events: bump the db mtime forward.
 	touchDB(t, db, time.Now().Add(time.Hour))
 
-	before := f.summarizeCalls
-	tm, cmd := m.Update(refreshTickMsg{})
-	m = tm.(Model)
-	if !m.loading {
-		t.Fatal("changed mtime did not enter the loading state")
-	}
-	if cmd == nil {
-		t.Fatal("changed mtime produced no command")
-	}
-	m = runPending(t, m, cmd)
-	if f.summarizeCalls <= before {
+	n := queriesDuring(f, func() {
+		tm, cmd := m.Update(refreshTickMsg{})
+		m = tm.(Model)
+		if !m.loading {
+			t.Fatal("changed mtime did not enter the loading state")
+		}
+		if cmd == nil {
+			t.Fatal("changed mtime produced no command")
+		}
+		m = runPending(t, m, cmd)
+	})
+	if n == 0 {
 		t.Fatal("changed mtime did not re-query the data source")
 	}
 	if m.loading {
@@ -132,10 +134,9 @@ func TestRefreshTickChangedMtimeReloads(t *testing.T) {
 	}
 }
 
-// raceSource is a stateless DataSource that is safe for concurrent use (unlike
-// fakeData, whose call counters would themselves race). Its bucket set orders
-// differently under every sort mode, so each mode change re-permutes — writes
-// to — the slice being sorted.
+// raceSource is a stateless DataSource that is safe for concurrent use. Its
+// bucket set orders differently under every sort mode, so each mode change
+// re-permutes — writes to — the slice being sorted.
 type raceSource struct{}
 
 func (raceSource) Summarize(_ context.Context, f store.Filter) (*store.Summary, error) {
@@ -202,17 +203,18 @@ func TestManualRefreshForcesReload(t *testing.T) {
 	f := &fakeData{}
 	m := newLoadedModel(t, f, db)
 
-	before := f.summarizeCalls
-	tm, cmd := m.Update(keyMsg("r"))
-	m = tm.(Model)
-	if !m.loading {
-		t.Fatal("manual refresh did not enter the loading state")
-	}
-	if cmd == nil {
-		t.Fatal("manual refresh produced no command")
-	}
-	m = runPending(t, m, cmd)
-	if f.summarizeCalls <= before {
+	n := queriesDuring(f, func() {
+		tm, cmd := m.Update(keyMsg("r"))
+		m = tm.(Model)
+		if !m.loading {
+			t.Fatal("manual refresh did not enter the loading state")
+		}
+		if cmd == nil {
+			t.Fatal("manual refresh produced no command")
+		}
+		m = runPending(t, m, cmd)
+	})
+	if n == 0 {
 		t.Fatal("manual refresh did not re-query the data source")
 	}
 }

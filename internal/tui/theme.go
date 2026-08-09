@@ -1,7 +1,8 @@
 package tui
 
 import (
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
 
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
@@ -16,26 +17,26 @@ import (
 // ANSI palette in buildCtx and rendered in every chart, bar and split.
 type Theme struct {
 	// Core palette.
-	Bg          lipgloss.AdaptiveColor
-	Surface     lipgloss.AdaptiveColor
-	SurfaceHi   lipgloss.AdaptiveColor // focused pane / hovered tile floor (+1 elevation)
-	Border      lipgloss.AdaptiveColor
-	BorderFocus lipgloss.AdaptiveColor // cyan focus ring ("you are here")
-	Text        lipgloss.AdaptiveColor
-	Muted       lipgloss.AdaptiveColor
-	Faint       lipgloss.AdaptiveColor // gridlines, ghosted/dimmed series, disabled
+	Bg          compat.AdaptiveColor
+	Surface     compat.AdaptiveColor
+	SurfaceHi   compat.AdaptiveColor // focused pane / hovered tile floor (+1 elevation)
+	Border      compat.AdaptiveColor
+	BorderFocus compat.AdaptiveColor // cyan focus ring ("you are here")
+	Text        compat.AdaptiveColor
+	Muted       compat.AdaptiveColor
+	Faint       compat.AdaptiveColor // gridlines, ghosted/dimmed series, disabled
 
 	// Semantic palette.
-	Accent lipgloss.AdaptiveColor // the ONE interaction accent (cold cyan)
-	Now    lipgloss.AdaptiveColor // live/today/scrub readout (warm amber)
+	Accent compat.AdaptiveColor // the ONE interaction accent (cold cyan)
+	Now    compat.AdaptiveColor // live/today/scrub readout (warm amber)
 
 	// The three token series (input, output, cache) are colored from the ANSI
 	// palette in buildCtx so they adapt to the user's terminal theme; they are
 	// not stored here. cache combines the DB read+creation sub-types on screen.
 
-	Positive lipgloss.AdaptiveColor // down-spend vs prior period (good)
-	Good     lipgloss.AdaptiveColor // alias of Positive
-	Warn     lipgloss.AdaptiveColor // up-spend / anomaly / error (red)
+	Positive compat.AdaptiveColor // down-spend vs prior period (good)
+	Good     compat.AdaptiveColor // alias of Positive
+	Warn     compat.AdaptiveColor // up-spend / anomaly / error (red)
 
 	// Reusable styles.
 	Title       lipgloss.Style
@@ -53,24 +54,30 @@ type Theme struct {
 	Number      lipgloss.Style
 }
 
+// adaptive builds a compat.AdaptiveColor from light/dark hex strings, keeping
+// the palette literals as readable as the v1 AdaptiveColor{Light, Dark} form.
+func adaptive(light, dark string) compat.AdaptiveColor {
+	return compat.AdaptiveColor{Light: lipgloss.Color(light), Dark: lipgloss.Color(dark)}
+}
+
 // NewTheme builds the default theme.
 func NewTheme() Theme {
 	t := Theme{
-		Bg:          lipgloss.AdaptiveColor{Light: "#FBFCFE", Dark: "#0B0E14"},
-		Surface:     lipgloss.AdaptiveColor{Light: "#F1F4F9", Dark: "#11161F"},
-		SurfaceHi:   lipgloss.AdaptiveColor{Light: "#E7ECF4", Dark: "#161D29"},
-		Border:      lipgloss.AdaptiveColor{Light: "#D2DAE6", Dark: "#232B38"},
-		BorderFocus: lipgloss.AdaptiveColor{Light: "#0E8C97", Dark: "#3DD6E0"},
-		Text:        lipgloss.AdaptiveColor{Light: "#10151D", Dark: "#E8EEF6"},
-		Muted:       lipgloss.AdaptiveColor{Light: "#5A6B82", Dark: "#7C8DA6"},
-		Faint:       lipgloss.AdaptiveColor{Light: "#9AA3AE", Dark: "#4A535F"},
+		Bg:          adaptive("#FBFCFE", "#0B0E14"),
+		Surface:     adaptive("#F1F4F9", "#11161F"),
+		SurfaceHi:   adaptive("#E7ECF4", "#161D29"),
+		Border:      adaptive("#D2DAE6", "#232B38"),
+		BorderFocus: adaptive("#0E8C97", "#3DD6E0"),
+		Text:        adaptive("#10151D", "#E8EEF6"),
+		Muted:       adaptive("#5A6B82", "#7C8DA6"),
+		Faint:       adaptive("#9AA3AE", "#4A535F"),
 
-		Accent: lipgloss.AdaptiveColor{Light: "#0E8C97", Dark: "#3DD6E0"},
-		Now:    lipgloss.AdaptiveColor{Light: "#B5780A", Dark: "#F2B441"},
+		Accent: adaptive("#0E8C97", "#3DD6E0"),
+		Now:    adaptive("#B5780A", "#F2B441"),
 
-		Positive: lipgloss.AdaptiveColor{Light: "#1A7F37", Dark: "#56D364"},
-		Good:     lipgloss.AdaptiveColor{Light: "#1A7F37", Dark: "#56D364"},
-		Warn:     lipgloss.AdaptiveColor{Light: "#C0362C", Dark: "#E5534B"},
+		Positive: adaptive("#1A7F37", "#56D364"),
+		Good:     adaptive("#1A7F37", "#56D364"),
+		Warn:     adaptive("#C0362C", "#E5534B"),
 	}
 
 	t.Title = lipgloss.NewStyle().Bold(true).Foreground(t.Text)
@@ -137,14 +144,14 @@ func (t Theme) Errored() lipgloss.Style {
 // and rows are visually distinguishable. copilot/gemini are nudged off cyan so
 // they don't collide with the interaction Accent. Unknown tools fall back to the
 // theme accent.
-var toolAccents = map[string]lipgloss.AdaptiveColor{
-	model.ToolClaudeCode: {Light: "#B25000", Dark: "#E8924A"}, // amber
-	model.ToolCodex:      {Light: "#1A7F37", Dark: "#3FB950"}, // green
-	model.ToolCopilot:    {Light: "#0969DA", Dark: "#5C9CE6"}, // blue
-	model.ToolOpenCode:   {Light: "#7C3AED", Dark: "#A78BFA"}, // violet
-	model.ToolHermes:     {Light: "#BF3989", Dark: "#F778BA"}, // magenta
-	"gemini":             {Light: "#0F6FC4", Dark: "#6BC2FF"}, // sky
-	model.ToolAgy:        {Light: "#6E7781", Dark: "#8B949E"}, // grey (no data)
+var toolAccents = map[string]compat.AdaptiveColor{
+	model.ToolClaudeCode: adaptive("#B25000", "#E8924A"), // amber
+	model.ToolCodex:      adaptive("#1A7F37", "#3FB950"), // green
+	model.ToolCopilot:    adaptive("#0969DA", "#5C9CE6"), // blue
+	model.ToolOpenCode:   adaptive("#7C3AED", "#A78BFA"), // violet
+	model.ToolHermes:     adaptive("#BF3989", "#F778BA"), // magenta
+	"gemini":             adaptive("#0F6FC4", "#6BC2FF"), // sky
+	model.ToolAgy:        adaptive("#6E7781", "#8B949E"), // grey (no data)
 }
 
 // toolGlyphs maps each known tool to a stable glyph so legends/bars survive
@@ -174,7 +181,7 @@ var canonicalTools = []string{
 
 // ToolAccent returns the accent color for a tool, falling back to the theme
 // accent when the tool is unknown.
-func (t Theme) ToolAccent(tool string) lipgloss.AdaptiveColor {
+func (t Theme) ToolAccent(tool string) compat.AdaptiveColor {
 	if c, ok := toolAccents[tool]; ok {
 		return c
 	}

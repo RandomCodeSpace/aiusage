@@ -3,9 +3,9 @@ package views
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/table"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/table"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -146,7 +146,10 @@ func (b *Browse) SetData(c Ctx, dim string, rows []store.Bucket, grand int64) {
 	b.ctx = c
 	b.applyColumns()
 	b.applyRows()
-	if b.table.Cursor() >= len(rows) {
+	// bubbles v2 table.SetRows clamps the cursor to -1 while the table is empty
+	// and never restores it when rows arrive, so a stale negative cursor must be
+	// reset here or SelectedValue/SelectedBucket go blind forever.
+	if c := b.table.Cursor(); c < 0 || c >= len(rows) {
 		b.table.SetCursor(0)
 	}
 }
@@ -167,7 +170,7 @@ func (b Browse) Update(msg tea.Msg) (Browse, tea.Cmd) {
 func (b Browse) View() string {
 	c := b.ctx
 	if len(b.rows) == 0 {
-		return c.panelStyle(b.focused == PaneBrowseTable).Width(maxInt(b.width-2, 20)).Render(
+		return c.panelStyle(b.focused == PaneBrowseTable).Width(maxInt(b.width, 22)).Render(
 			c.PanelTitle.Render(strings.ToUpper(title(b.dim))) + "\n" +
 				emptyChartFrame(c, maxInt(b.width-4, 16), maxInt(b.height-3, 4)),
 		)
@@ -185,7 +188,7 @@ func (b Browse) tablePanel() string {
 	c := b.ctx
 	body := b.markedRows()
 	focused := b.focused == PaneBrowseTable
-	style := c.panelStyle(focused).Width(b.tablePanelW() - 2)
+	style := c.panelStyle(focused).Width(b.tablePanelW())
 	return style.Render(c.titleChip(strings.ToUpper(title(b.dim)), focused) + "\n" + body)
 }
 
@@ -214,9 +217,9 @@ func (b Browse) previewPanel() string {
 	c := b.ctx
 	prevW := b.previewPanelW()
 	pfocus := b.focused == PaneBrowsePreview
-	// Fill the box to the body height (border = 2 rows) so the preview matches the
-	// table panel's height instead of floating short above empty terminal.
-	style := c.panelStyle(pfocus).Width(prevW - 2).Height(maxInt(b.height-2, 1))
+	// Fill the box to the body height so the preview matches the table panel's
+	// height instead of floating short above empty terminal.
+	style := c.panelStyle(pfocus).Width(prevW).Height(maxInt(b.height, 3))
 	inner := prevW - 4
 
 	sb, ok := b.SelectedBucket()

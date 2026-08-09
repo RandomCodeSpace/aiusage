@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // TestResponsiveNoOverflow is the core anti-overflow gate: it drives every view
@@ -50,7 +50,7 @@ func assertNoOverflow(t *testing.T, m Model, v View, w, h int, help bool) {
 				t.Fatalf("panic rendering view %v at %dx%d (help=%v): %v", v, w, h, help, r)
 			}
 		}()
-		out = m.View()
+		out = m.View().Content
 	}()
 	if out == "" {
 		t.Fatalf("empty frame for view %v at %dx%d (help=%v)", v, w, h, help)
@@ -73,7 +73,7 @@ func TestResponsiveTooSmallCard(t *testing.T) {
 		m := NewModel(&fakeData{}, Options{DBPath: "/tmp/usage.db"})
 		tm, _ := m.Update(tea.WindowSizeMsg{Width: c.w, Height: c.h})
 		m = loadOnce(tm.(Model))
-		out := m.View()
+		out := m.View().Content
 		if !strings.Contains(out, "too small") {
 			t.Fatalf("%dx%d did not render the resize card:\n%s", c.w, c.h, out)
 		}
