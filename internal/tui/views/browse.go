@@ -35,10 +35,13 @@ const (
 	PaneBrowsePreview
 )
 
-// NewBrowse builds an empty Browse view.
-func NewBrowse() Browse {
+// NewBrowse builds an empty Browse view. The Ctx is wired at construction, not
+// only via SetData: with async loads the view can be rendered before its first
+// data arrives, and the empty-state frame must not draw with zero-value styles
+// (a zero compat.AdaptiveColor panics inside lipgloss).
+func NewBrowse(c Ctx) Browse {
 	t := table.New(table.WithFocused(true), table.WithHeight(10))
-	return Browse{table: t}
+	return Browse{table: t, ctx: c}
 }
 
 // Dim is the dimension currently displayed (tool/model/project/session).
@@ -98,6 +101,12 @@ func (b *Browse) SetPreview(trend []store.Bucket) { b.preview = trend }
 // layout. The preview pane shows only when the layout grants a side panel; the
 // table panel takes the primary column (or the whole body otherwise).
 func (b *Browse) SetLayout(lay Layout) {
+	if lay == b.lay {
+		// Identical geometry: everything derived below is already in place.
+		// Skipping avoids the double column+row build on every data load, whose
+		// loadBrowse calls SetData (rows built) and then relayouts unchanged.
+		return
+	}
 	b.lay = lay
 	b.width = lay.BodyW
 	b.height = lay.BodyH

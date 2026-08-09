@@ -8,10 +8,10 @@ import (
 )
 
 // benchModel builds a loaded 120x40 Overview model over fakeData with a pinned
-// clock: filterFor keys the cache on now() at second precision, so a rolling
-// clock would silently turn the warm path cold mid-run. prevTotals still reads
-// the real time.Now(), but with fakeData its once-per-second cache miss is an
-// in-memory call, not I/O.
+// clock. Cache keys are quantized to bucket granularity and every query of a
+// load generation resolves the same clock (Model.loadNow), so the warm path
+// stays warm; pinning data.now keeps the benchmark hermetic across hour/day
+// boundaries anyway.
 func benchModel(b *testing.B) Model {
 	b.Helper()
 	m := NewModel(&fakeData{}, Options{DBPath: "/tmp/usage.db"})
@@ -29,6 +29,24 @@ func BenchmarkReload(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		m.reload()
+	}
+}
+
+// BenchmarkScrubStep measures one pinned scrub step on warm data: the KPI
+// re-price projects from the timeline bucket and the side bars read the
+// prewarmed composition, so this is pure in-memory work — no store, no cache.
+func BenchmarkScrubStep(b *testing.B) {
+	m := benchModel(b)
+	m.scrubPinned = true
+	dir := 1
+	b.ReportAllocs()
+	for b.Loop() {
+		if m.scrubIndex <= 0 {
+			dir = 1
+		} else if m.scrubIndex >= len(m.tlData.Buckets)-1 {
+			dir = -1
+		}
+		m.scrubBy(dir)
 	}
 }
 

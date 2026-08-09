@@ -18,7 +18,14 @@ import (
 //	  dataLoadedMsg                → reload() from warm cache, mark loaded, stop spinner
 //	  refreshTickMsg (every 10s)   → os.Stat(db); reload only if mtime changed; re-arm tick
 //	  spinner.TickMsg              → advance frame only while still loading
-//	  manual `r`                   → force reload (Invalidate + loadCmd)
+//	  manual `r`                   → force reload (Invalidate + startLoad)
+//
+// Every dispatch is stamped with a monotonic load generation (Model.loadGen)
+// and the clock resolved for that generation (Model.loadNow). handleDataLoaded
+// applies a flight only if its generation is still current — stale flights
+// (superseded by a navigation, refresh or invalidation) are dropped, so they
+// can neither roll back view state nor advance lastMTime. The generation is
+// also the identity of the on-screen dataset: render memoization keys on it.
 //
 // Idle cost: once loaded, the spinner stops ticking and the ONLY recurring
 // command is a single os.Stat per 10s. No time.Sleep, no busy loop. A reload
@@ -32,8 +39,15 @@ const refreshInterval = 10 * time.Second
 // for the captured (view, range, filter, drill) snapshot. Update applies it by
 // running reload() against the now-warm cache on the UI thread (no I/O there).
 type dataLoadedMsg struct {
-	// mtime is the db file's modification time observed at load dispatch, used
-	// to gate future refresh ticks. Zero when the file could not be stat'd.
+	// gen is the load generation stamped at dispatch. handleDataLoaded drops the
+	// message when it no longer matches Model.loadGen (a stale flight).
+	gen uint64
+	// now is the generation clock the flight's queries resolved against; applied
+	// to Model.loadNow so the apply-side reload derives identical cache keys.
+	now time.Time
+	// mtime is the db file's modification time observed BEFORE the flight
+	// queried, used to gate future refresh ticks. Zero when the file could not
+	// be stat'd.
 	mtime time.Time
 }
 
@@ -54,9 +68,21 @@ func refreshTickCmd() tea.Cmd {
 func (m Model) loadCmd() tea.Cmd {
 	mc := m
 	dbPath := m.dbPath
+	gen := m.loadGen
 	return func() tea.Msg {
+		// Stat BEFORE querying: a daemon write landing between the queries and a
+		// trailing stat would be credited to lastMTime while being absent from
+		// the rendered data, and the refresh tick would then skip it until the
+		// NEXT write. Stat-first keeps lastMTime at-or-before the query snapshot
+		// so such a write is re-detected by the next tick.
+		mt := fileMTime(dbPath)
+		if mc.loadNow.IsZero() {
+			// Init dispatches before any startLoad stamps a generation clock;
+			// resolve it here so the flight and the apply share one instant.
+			mc.loadNow = mc.data.now()
+		}
 		mc.reload()
-		return dataLoadedMsg{mtime: fileMTime(dbPath)}
+		return dataLoadedMsg{gen: gen, now: mc.loadNow, mtime: mt}
 	}
 }
 
@@ -74,19 +100,38 @@ func fileMTime(path string) time.Time {
 	return fi.ModTime()
 }
 
-// startLoad marks a load in flight and returns the load cmd. Kept as a helper so
-// the in-flight flag and the cmd dispatch never drift apart.
+// startLoad opens a new load generation and returns its load cmd: it bumps the
+// generation (superseding any in-flight load, whose apply will now be dropped),
+// resolves the generation clock, marks a load in flight and dispatches. Kept as
+// the single dispatch path so generation, clock and in-flight flag never drift
+// apart.
 func (m *Model) startLoad() tea.Cmd {
+	m.loadGen++
+	m.loadNow = m.data.now()
 	m.loading = true
 	return m.loadCmd()
 }
 
+// qnow returns the clock of the current load generation: resolved once per
+// dispatch so every query of a generation — in the background flight and in the
+// apply-side reload — derives the same windows and therefore the same cache
+// keys. Falls back to the live clock before the first dispatch (direct reload()
+// calls in tests).
+func (m *Model) qnow() time.Time {
+	if !m.loadNow.IsZero() {
+		return m.loadNow
+	}
+	return m.data.now()
+}
+
 // handleRefreshTick stats the db; if its mtime advanced since the last load it
 // dispatches a reload, otherwise it just re-arms the tick. The tick is ALWAYS
-// re-armed so the live poll never dies.
+// re-armed so the live poll never dies. A load already in flight does not block
+// the dispatch: the new generation supersedes it and the stale flight's apply
+// is dropped, so fresh data can never lose to an older snapshot.
 func (m Model) handleRefreshTick() (Model, tea.Cmd) {
 	mt := fileMTime(m.dbPath)
-	if !m.loading && mt.After(m.lastMTime) {
+	if mt.After(m.lastMTime) {
 		m.data.Invalidate()
 		cmd := m.startLoad()
 		return m, tea.Batch(cmd, refreshTickCmd())
@@ -96,10 +141,21 @@ func (m Model) handleRefreshTick() (Model, tea.Cmd) {
 
 // handleDataLoaded applies a finished background load: it reloads the active
 // view from the now-warm cache (cheap, no I/O), flips out of the loading state
-// and records the observed mtime so the next tick can gate on it.
+// and records the observed mtime so the next tick can gate on it. A flight
+// whose generation is no longer current is dropped whole — it must not touch
+// loading/loaded, lastMTime or the view data; the superseding dispatch owns
+// them now.
 func (m Model) handleDataLoaded(msg dataLoadedMsg) (Model, tea.Cmd) {
+	if msg.gen != m.loadGen {
+		return m, nil
+	}
 	m.loading = false
 	m.loaded = true
+	m.loadNow = msg.now
+	// The applied generation is the identity of the on-screen dataset: render
+	// memoization keys on it (a dispatch alone must not re-key — the stale frame
+	// keeps rendering the old data until its flight lands).
+	m.dataGen = msg.gen
 	if !msg.mtime.IsZero() {
 		m.lastMTime = msg.mtime
 	}

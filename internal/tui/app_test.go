@@ -13,78 +13,100 @@ import (
 	tea "charm.land/bubbletea/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // fakeData is a tiny in-test DataSource. It returns a fixed grouping for any
-// single-dimension Summarize and a couple of canned events, so model
-// transitions can be exercised without a real database. Call counters are
-// atomic so load cmds running off the test goroutine are counted safely.
+// single-dimension Summarize, so model transitions can be exercised without a
+// real database. The call counter is atomic so load cmds running off the test
+// goroutine are counted safely.
 type fakeData struct {
 	summarizeCalls atomic.Int64
-	listCalls      atomic.Int64
 }
 
-func (f *fakeData) Summarize(_ context.Context, fl store.Filter) (*store.Summary, error) {
-	f.summarizeCalls.Add(1)
-	if len(fl.GroupBy) == 0 {
-		return &store.Summary{
-			Totals: store.Bucket{Events: 12, Input: 1000, Output: 2000, CacheRead: 4000, Total: 7000},
-		}, nil
-	}
-	dim := fl.GroupBy[0]
+// fakeRows returns the canned single-dimension buckets for dim. Sessions
+// mirrors Events (each fake event its own session) so the store-level distinct
+// count has a deterministic value to assert on.
+func fakeRows(dim string) []store.Bucket {
 	mk := func(val string, total, events int64) store.Bucket {
 		return store.Bucket{
 			Keys:        map[string]string{dim: val},
 			OrderedKeys: []string{dim},
 			Events:      events,
+			Sessions:    events,
 			Input:       total / 4,
 			Output:      total / 4,
 			CacheRead:   total / 2,
 			Total:       total,
 		}
 	}
-	var buckets []store.Bucket
 	switch dim {
 	case "tool":
-		buckets = []store.Bucket{mk("claude-code", 2_000_000, 8), mk("codex", 912_300, 4)}
+		return []store.Bucket{mk("claude-code", 2_000_000, 8), mk("codex", 912_300, 4)}
 	case "model":
-		buckets = []store.Bucket{mk("claude-opus", 1_500_000, 5), mk("gpt-5", 800_000, 3)}
+		return []store.Bucket{mk("claude-opus", 1_500_000, 5), mk("gpt-5", 800_000, 3)}
 	case "project":
-		buckets = []store.Bucket{mk("/work/a", 600_000, 4), mk("/work/b", 300_000, 2)}
+		return []store.Bucket{mk("/work/a", 600_000, 4), mk("/work/b", 300_000, 2)}
 	case "session":
-		buckets = []store.Bucket{mk("sess-1", 400_000, 3), mk("sess-2", 100_000, 1)}
+		return []store.Bucket{mk("sess-1", 400_000, 3), mk("sess-2", 100_000, 1)}
 	case "day":
-		buckets = []store.Bucket{mk("2026-05-28", 1_000_000, 6), mk("2026-05-29", 2_000_000, 6)}
+		return []store.Bucket{mk("2026-05-28", 1_000_000, 6), mk("2026-05-29", 2_000_000, 6)}
 	case "hour":
-		buckets = []store.Bucket{mk("2026-05-29 13", 500_000, 3), mk("2026-05-29 14", 700_000, 4)}
+		return []store.Bucket{mk("2026-05-29 13", 500_000, 3), mk("2026-05-29 14", 700_000, 4)}
 	case "week":
-		buckets = []store.Bucket{mk("2026-05-18", 3_000_000, 18)}
+		return []store.Bucket{mk("2026-05-18", 3_000_000, 18)}
 	case "month":
-		buckets = []store.Bucket{mk("2026-05", 9_000_000, 50)}
+		return []store.Bucket{mk("2026-05", 9_000_000, 50)}
 	}
-	return &store.Summary{GroupBy: fl.GroupBy, Buckets: buckets}, nil
+	return nil
 }
 
-func (f *fakeData) ListEvents(_ context.Context, _ store.Filter) ([]model.UsageEvent, error) {
-	f.listCalls.Add(1)
-	return []model.UsageEvent{
-		{
-			Tool: model.ToolClaudeCode, Model: "claude-opus", SessionID: "sess-1",
-			Project: "/work/a", EventTime: time.Now(), ObservedTime: time.Now(),
-			InputTokens: 100, OutputTokens: 200, CacheReadTokens: 50, TotalTokens: 350,
-			DedupKey: "claude-code|abc", Kind: model.KindUsage,
-			Raw: `{"usage":{"input_tokens":100,"output_tokens":200}}`,
-		},
-	}, nil
+// fakeCross composes a two-dimension grouping from the single-dim tables. The
+// index-aligned pair (i, i%len(secondary)) dominates each primary bucket (two
+// shares vs one), so reductions — model owners, top tool per timeline bucket —
+// resolve deterministically: model claude-opus → claude-code, gpt-5 → codex.
+func fakeCross(primary, secondary string) []store.Bucket {
+	prows, srows := fakeRows(primary), fakeRows(secondary)
+	var out []store.Bucket
+	for i, p := range prows {
+		shares := int64(len(srows) + 1)
+		for j, s := range srows {
+			w := int64(1)
+			if len(srows) > 0 && j == i%len(srows) {
+				w = 2
+			}
+			out = append(out, store.Bucket{
+				Keys: map[string]string{
+					primary:   p.Keys[primary],
+					secondary: s.Keys[secondary],
+				},
+				OrderedKeys: []string{primary, secondary},
+				Events:      p.Events * w / shares,
+				Total:       p.Total * w / shares,
+			})
+		}
+	}
+	return out
 }
 
-// queries returns the total number of DataSource calls f has served
-// (Summarize + ListEvents).
+func (f *fakeData) Summarize(_ context.Context, fl store.Filter) (*store.Summary, error) {
+	f.summarizeCalls.Add(1)
+	if len(fl.GroupBy) == 0 {
+		return &store.Summary{
+			Totals: store.Bucket{Events: 12, Sessions: 5, Input: 1000, Output: 2000, CacheRead: 4000, Total: 7000},
+		}, nil
+	}
+	if len(fl.GroupBy) == 2 {
+		return &store.Summary{GroupBy: fl.GroupBy, Buckets: fakeCross(fl.GroupBy[0], fl.GroupBy[1])}, nil
+	}
+	return &store.Summary{GroupBy: fl.GroupBy, Buckets: fakeRows(fl.GroupBy[0])}, nil
+}
+
+// queries returns the total number of DataSource (Summarize) calls f has
+// served.
 func (f *fakeData) queries() int64 {
-	return f.summarizeCalls.Load() + f.listCalls.Load()
+	return f.summarizeCalls.Load()
 }
 
 // queriesDuring reports how many DataSource queries f served while fn ran, so
@@ -162,47 +184,59 @@ func send(m Model, msg tea.Msg) Model {
 	return tm.(Model)
 }
 
+// step sends msg through Update and drives any dispatched cmds (async loads) to
+// completion, applying their messages: one full interaction round-trip as the
+// Bubble Tea runtime would run it. Use it for interactions that now dispatch a
+// background load (view/range/sort/filter/drill/back); send() drops the cmd.
+func step(t *testing.T, m Model, msg tea.Msg) Model {
+	t.Helper()
+	tm, cmd := m.Update(msg)
+	return runPending(t, tm.(Model), cmd)
+}
+
 // runPending invokes a cmd (possibly a tea.Batch) and applies the resulting
 // messages to the model, EXCEPT pure timer ticks (the spinner tick, whose
 // follow-up cmd re-arms forever, and the 10s refresh tick, whose cmd is a real
 // tea.Tick). Neither carries state these tests assert on. It is the headless
-// stand-in for the Bubble Tea runtime draining a batch returned from Update.
+// stand-in for the Bubble Tea runtime draining everything returned from Update
+// — including follow-up cmds (a detail debounce timer whose firing dispatches
+// a flight whose apply may re-arm), which it drives recursively to a bounded
+// depth so a step() settles the whole interaction.
 //
 // The real runtime runs each cmd in its own goroutine, so a long-running tick
-// never blocks the others; mirror that here by evaluating each batched cmd in a
+// never blocks the others; mirror that here by evaluating each cmd in a
 // goroutine guarded by a short deadline. A cmd that does not return promptly is
 // the 10s refresh re-arm — we drop it (its eventual refreshTickMsg is moot for
 // these assertions) instead of blocking the test for the full interval.
 func runPending(t *testing.T, m Model, cmd tea.Cmd) Model {
 	t.Helper()
-	if cmd == nil {
-		return m
-	}
-	apply := func(c tea.Cmd) {
-		if c == nil {
+	var drive func(c tea.Cmd, depth int)
+	drive = func(c tea.Cmd, depth int) {
+		if c == nil || depth > 8 {
 			return
 		}
 		done := make(chan tea.Msg, 1)
 		go func() { done <- c() }()
 		select {
 		case msg := <-done:
-			if !isTimerTick(msg) {
-				m = send(m, msg)
+			switch v := msg.(type) {
+			case tea.BatchMsg:
+				for _, bc := range v {
+					drive(bc, depth+1)
+				}
+			default:
+				if isTimerTick(msg) {
+					return
+				}
+				tm, next := m.Update(msg)
+				m = tm.(Model)
+				drive(next, depth+1)
 			}
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(200 * time.Millisecond):
 			// A slow cmd is the refresh tick re-arm; skip it.
 		}
 	}
-	switch v := cmd().(type) {
-	case tea.BatchMsg:
-		for _, c := range v {
-			apply(c)
-		}
-	default:
-		if !isTimerTick(v) {
-			m = send(m, v)
-		}
-	}
+	drive(cmd, 0)
 	return m
 }
 
@@ -299,7 +333,7 @@ func TestTabCyclesViews(t *testing.T) {
 
 func TestDrillPushPop(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("4")) // Browse, dim=tool
+	m = step(t, m, keyMsg("4")) // Browse, dim=tool
 
 	if got := m.browse.Dim(); got != "tool" {
 		t.Fatalf("browse dim = %q, want tool", got)
@@ -308,7 +342,7 @@ func TestDrillPushPop(t *testing.T) {
 		t.Fatalf("crumbs not empty at start: %v", m.crumbs)
 	}
 
-	m = send(m, keyMsg("enter")) // tool -> model
+	m = step(t, m, keyMsg("enter")) // tool -> model
 	if len(m.crumbs) != 1 || m.crumbs[0].Dim != "tool" {
 		t.Fatalf("after drill crumbs = %v, want [tool]", m.crumbs)
 	}
@@ -316,17 +350,17 @@ func TestDrillPushPop(t *testing.T) {
 		t.Fatalf("after drill dim = %q, want model", m.browse.Dim())
 	}
 
-	m = send(m, keyMsg("enter")) // model -> project
+	m = step(t, m, keyMsg("enter")) // model -> project
 	if len(m.crumbs) != 2 || m.browse.Dim() != "project" {
 		t.Fatalf("after 2nd drill crumbs=%v dim=%q", m.crumbs, m.browse.Dim())
 	}
 
-	m = send(m, keyMsg("enter")) // project -> session
+	m = step(t, m, keyMsg("enter")) // project -> session
 	if len(m.crumbs) != 3 || m.browse.Dim() != "session" {
 		t.Fatalf("after 3rd drill crumbs=%v dim=%q", m.crumbs, m.browse.Dim())
 	}
 
-	m = send(m, keyMsg("enter")) // deepest -> no-op (drilling stops at Sessions)
+	m = step(t, m, keyMsg("enter")) // deepest -> no-op (drilling stops at Sessions)
 	if m.view != ViewBrowse {
 		t.Fatalf("deepest drill view = %v, want Browse (stays)", m.view)
 	}
@@ -338,12 +372,12 @@ func TestDrillPushPop(t *testing.T) {
 	}
 
 	for want := 2; want >= 0; want-- {
-		m = send(m, keyMsg("esc"))
+		m = step(t, m, keyMsg("esc"))
 		if len(m.crumbs) != want {
 			t.Fatalf("after pop crumbs len = %d, want %d", len(m.crumbs), want)
 		}
 	}
-	m = send(m, keyMsg("esc")) // no-op at root
+	m = step(t, m, keyMsg("esc")) // no-op at root
 	if len(m.crumbs) != 0 {
 		t.Fatalf("esc at root changed crumbs: %v", m.crumbs)
 	}
@@ -351,11 +385,11 @@ func TestDrillPushPop(t *testing.T) {
 
 func TestByToolDrillIntoBrowse(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("2")) // By-Tool
+	m = step(t, m, keyMsg("2")) // By-Tool
 	if len(m.byTool.Rows) == 0 {
 		t.Fatal("by-tool has no rows")
 	}
-	m = send(m, keyMsg("enter")) // drill selected tool into Browse
+	m = step(t, m, keyMsg("enter")) // drill selected tool into Browse
 	if m.view != ViewBrowse {
 		t.Fatalf("after by-tool drill view = %v, want Browse", m.view)
 	}
@@ -366,7 +400,7 @@ func TestByToolDrillIntoBrowse(t *testing.T) {
 
 func TestSelectionMoves(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("2")) // By-Tool
+	m = step(t, m, keyMsg("2")) // By-Tool
 	if m.byTool.Selected != 0 {
 		t.Fatalf("initial selection = %d, want 0", m.byTool.Selected)
 	}
@@ -391,25 +425,25 @@ func TestRangeAndSortCycle(t *testing.T) {
 		t.Fatalf("initial range = %v, want 7d", m.rng)
 	}
 	for _, want := range []Range{Range30d, RangeAll, RangeToday, Range7d} {
-		m = send(m, keyMsg("t"))
+		m = step(t, m, keyMsg("t"))
 		if m.rng != want {
 			t.Fatalf("after 't' range = %v, want %v", m.rng, want)
 		}
 	}
 
 	// Range change resets the drill stack.
-	m = send(m, keyMsg("4"))
-	m = send(m, keyMsg("enter"))
+	m = step(t, m, keyMsg("4"))
+	m = step(t, m, keyMsg("enter"))
 	if len(m.crumbs) == 0 {
 		t.Fatal("expected crumbs after drill")
 	}
-	m = send(m, keyMsg("t"))
+	m = step(t, m, keyMsg("t"))
 	if len(m.crumbs) != 0 {
 		t.Fatalf("range change did not reset crumbs: %v", m.crumbs)
 	}
 
 	for _, want := range []Sort{SortEvents, SortName, SortTotal} {
-		m = send(m, keyMsg("s"))
+		m = step(t, m, keyMsg("s"))
 		if m.sort != want {
 			t.Fatalf("after 's' sort = %v, want %v", m.sort, want)
 		}
@@ -418,7 +452,7 @@ func TestRangeAndSortCycle(t *testing.T) {
 
 func TestFilterFlow(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("4")) // Browse
+	m = step(t, m, keyMsg("4")) // Browse
 
 	m = send(m, keyMsg("/"))
 	if !m.filtering {
@@ -427,7 +461,7 @@ func TestFilterFlow(t *testing.T) {
 	for _, r := range "codex" {
 		m = send(m, keyMsg(string(r)))
 	}
-	m = send(m, keyMsg("enter"))
+	m = step(t, m, keyMsg("enter"))
 	if m.filtering {
 		t.Fatal("still filtering after enter")
 	}
@@ -542,7 +576,7 @@ func TestMouseClickRangePill(t *testing.T) {
 
 func TestMouseClickRowSelects(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("4")) // Browse
+	m = step(t, m, keyMsg("4")) // Browse
 	m2, found := click(t, m, views.RowZone(1))
 	if !found {
 		t.Skip("row zone not laid out at this size; covered by keyboard path")
@@ -572,7 +606,7 @@ func TestMouseWheelScrubsOverview(t *testing.T) {
 
 func TestMouseWheelScrollsBrowse(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("4")) // Browse (2 tool rows)
+	m = step(t, m, keyMsg("4")) // Browse (2 tool rows)
 	wheelDown := tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 5, Y: 5}
 	m = send(m, wheelDown)
 	if m.browse.Cursor() != 1 {
@@ -646,7 +680,7 @@ func TestQuitWhileFiltering(t *testing.T) {
 // keys, not hardcoded literals, so a rebind keeps selection and help in sync.
 func TestSelectionFollowsRebinding(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("2")) // By-Tool
+	m = step(t, m, keyMsg("2")) // By-Tool
 	m.keys.Up = key.NewBinding(key.WithKeys("w"))
 	m.keys.Down = key.NewBinding(key.WithKeys("x"))
 	m = send(m, keyMsg("x"))

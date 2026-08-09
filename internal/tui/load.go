@@ -31,17 +31,18 @@ func (m *Model) reload() {
 // bars. When the scrub crosshair is pinned, the KPI tiles + side bars re-price
 // to the scrubbed bucket via syncScrub (called after the base load).
 func (m *Model) loadOverview() {
-	tot, err := m.data.Totals(m.rng, m.crumbs)
+	now := m.qnow()
+	tot, err := m.data.Totals(now, m.rng, m.crumbs)
 	if err != nil {
 		m.err = err
 		return
 	}
-	byTool, err := m.data.GroupBy(m.rng, m.crumbs, "tool", SortTotal)
+	byTool, err := m.data.GroupBy(now, m.rng, m.crumbs, "tool", SortTotal)
 	if err != nil {
 		m.err = err
 		return
 	}
-	tl, dim, err := m.data.Timeline(m.rng, m.crumbs)
+	tl, dim, err := m.data.Timeline(now, m.rng, m.crumbs)
 	if err != nil {
 		m.err = err
 		return
@@ -49,6 +50,16 @@ func (m *Model) loadOverview() {
 	m.tlData.Buckets = tl.Buckets
 	m.tlData.Dim = dim
 	m.clampScrub()
+
+	// Prewarm every scrub position in ONE [dim, tool] grouped query: the
+	// per-bucket by-tool compositions land in m.scrubComp, so a scrub sweep is
+	// fully local — no windowed per-bucket queries, warm or cold.
+	comp, err := m.data.GroupByDims(now, m.rng, m.crumbs, []string{dim, "tool"})
+	if err != nil {
+		m.err = err
+		return
+	}
+	m.scrubComp = buildScrubComp(tl.Buckets, comp.Buckets, dim)
 
 	m.overview = views.OverviewData{
 		Totals:      tot,
@@ -68,14 +79,14 @@ func (m *Model) loadOverview() {
 
 // loadByTool builds the by-tool bars + selected-tool detail.
 func (m *Model) loadByTool() {
-	s, err := m.data.GroupBy(m.rng, m.crumbs, "tool", m.sort)
+	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, "tool", m.sort)
 	if err != nil {
 		m.err = err
 		return
 	}
 	rows := filterBuckets(s.Buckets, "tool", m.filter)
 	m.byTool.Rows = rows
-	m.byTool.Grand = grandOf(m.data, m.rng, m.crumbs, rows)
+	m.byTool.Grand = grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows)
 	m.byTool.RangeLbl = m.rng.Label()
 	m.byTool.ActivePane = views.PaneByXBars
 	m.byTool.CopilotAbsent = copilotAbsent(rows)
@@ -85,7 +96,10 @@ func (m *Model) loadByTool() {
 	m.loadByToolDetail()
 }
 
-// loadByToolDetail loads the selected tool's daily trend + distinct sessions.
+// loadByToolDetail loads the selected tool's daily trend, querying the store —
+// background flights and warm apply-side reloads only. The distinct-session
+// count comes straight off the selected row (store-level COUNT DISTINCT), so
+// no per-session bucket materialization happens anywhere.
 func (m *Model) loadByToolDetail() {
 	b, ok := m.selectedByToolBucket()
 	if !ok {
@@ -93,25 +107,43 @@ func (m *Model) loadByToolDetail() {
 		m.byTool.SelSessions = 0
 		return
 	}
-	tool := b.Keys["tool"]
-	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: tool})
-	trend, _, err := m.data.Timeline(m.rng, crumbs)
+	m.byTool.SelSessions = b.Sessions
+	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: b.Keys["tool"]})
+	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
 	if err == nil {
 		m.byTool.SelTrend = trend.Buckets
 	}
-	m.byTool.SelSessions = m.distinctSessions(crumbs)
+}
+
+// syncByToolDetail is the cache-only twin of loadByToolDetail for the UI
+// thread: selection moves reprice from cache; a miss keeps the previous trend
+// on screen and requests a debounced background load (detail.go).
+func (m *Model) syncByToolDetail() {
+	b, ok := m.selectedByToolBucket()
+	if !ok {
+		m.byTool.SelTrend = nil
+		m.byTool.SelSessions = 0
+		return
+	}
+	m.byTool.SelSessions = b.Sessions
+	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: b.Keys["tool"]})
+	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
+		m.byTool.SelTrend = trend.Buckets
+	} else {
+		m.detailWanted = true
+	}
 }
 
 // loadByModel builds the by-model bars (colored by owning tool) + detail.
 func (m *Model) loadByModel() {
-	s, err := m.data.GroupBy(m.rng, m.crumbs, "model", m.sort)
+	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, "model", m.sort)
 	if err != nil {
 		m.err = err
 		return
 	}
 	rows := filterBuckets(s.Buckets, "model", m.filter)
 	m.byModel.Rows = rows
-	m.byModel.Grand = grandOf(m.data, m.rng, m.crumbs, rows)
+	m.byModel.Grand = grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows)
 	m.byModel.RangeLbl = m.rng.Label()
 	m.byModel.ActivePane = views.PaneByXBars
 	m.byModel.ModelTool = m.modelOwners()
@@ -121,7 +153,8 @@ func (m *Model) loadByModel() {
 	m.loadByModelDetail()
 }
 
-// loadByModelDetail loads the selected model's daily trend.
+// loadByModelDetail loads the selected model's daily trend (querying;
+// background flights and warm apply-side reloads only).
 func (m *Model) loadByModelDetail() {
 	b, ok := m.selectedByModelBucket()
 	if !ok {
@@ -130,9 +163,25 @@ func (m *Model) loadByModelDetail() {
 	}
 	mdl := b.Keys["model"]
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: mdl})
-	trend, _, err := m.data.Timeline(m.rng, crumbs)
+	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
 	if err == nil {
 		m.byModel.SelTrend = trend.Buckets
+	}
+}
+
+// syncByModelDetail is the cache-only twin of loadByModelDetail (see
+// syncByToolDetail).
+func (m *Model) syncByModelDetail() {
+	b, ok := m.selectedByModelBucket()
+	if !ok {
+		m.byModel.SelTrend = nil
+		return
+	}
+	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: b.Keys["model"]})
+	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
+		m.byModel.SelTrend = trend.Buckets
+	} else {
+		m.detailWanted = true
 	}
 }
 
@@ -142,19 +191,40 @@ func (m *Model) loadBrowse() {
 	if !ok {
 		dim = drillDims[len(drillDims)-1]
 	}
-	s, err := m.data.GroupBy(m.rng, m.crumbs, dim, m.sort)
+	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, dim, m.sort)
 	if err != nil {
 		m.err = err
 		return
 	}
 	rows := filterBuckets(s.Buckets, dim, m.filter)
-	m.browse.SetData(m.vctx, dim, rows, grandOf(m.data, m.rng, m.crumbs, rows))
+	m.browse.SetData(m.vctx, dim, rows, grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows))
 	m.layout()
-	m.syncBrowsePreview()
+	m.loadBrowsePreview()
 }
 
-// syncBrowsePreview loads the selected Browse row's daily trend into the
-// preview pane.
+// loadBrowsePreview loads the selected Browse row's daily trend into the
+// preview pane, querying the store (background flights and warm apply-side
+// reloads only).
+func (m *Model) loadBrowsePreview() {
+	if m.view != ViewBrowse {
+		return
+	}
+	dim := m.browse.Dim()
+	val, ok := m.browse.SelectedValue()
+	if !ok {
+		m.browse.SetPreview(nil)
+		return
+	}
+	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: dim, Value: val})
+	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
+	if err == nil {
+		m.browse.SetPreview(trend.Buckets)
+	}
+}
+
+// syncBrowsePreview is the cache-only twin of loadBrowsePreview for UI-thread
+// cursor moves: a miss keeps the previous preview and requests a debounced
+// background load (detail.go).
 func (m *Model) syncBrowsePreview() {
 	if m.view != ViewBrowse {
 		return
@@ -166,15 +236,22 @@ func (m *Model) syncBrowsePreview() {
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: dim, Value: val})
-	trend, _, err := m.data.Timeline(m.rng, crumbs)
-	if err == nil {
+	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
 		m.browse.SetPreview(trend.Buckets)
+	} else {
+		m.detailWanted = true
 	}
 }
 
 // syncScrub re-prices the Overview KPI tiles + side bars to the scrubbed bucket
-// (or back to full-range when unpinned), via a windowed Summarize that reuses
-// the data cache. Also updates the timeline cursor/readout state.
+// (or back to full-range when unpinned). Also updates the timeline
+// cursor/readout state. It NEVER queries: pinned repricing projects the KPI
+// totals from the timeline bucket and reads the side bars from the prewarmed
+// per-bucket composition (scrubComp), so a scrub sweep of any length touches
+// neither the store nor the cache. The unpinned spring-back reads full-range
+// summaries from cache only; a miss (possible only between an Invalidate and
+// its flight landing) keeps the previous numbers and requests a debounced
+// reprice (detail.go).
 func (m *Model) syncScrub() {
 	n := len(m.tlData.Buckets)
 	m.tlData.Cursor = m.scrubIndex
@@ -191,18 +268,22 @@ func (m *Model) syncScrub() {
 		// Spring back to full-range totals (and hide the crosshair even if a stale
 		// pin survived a timeline shrink — the KPIs below show full-range data).
 		m.overview.Pinned = false
-		tot, _ := m.data.Totals(m.rng, m.crumbs)
-		m.overview.Totals = tot
-		m.overview.Prev = m.prevTotals()
 		m.overview.ScrubLabel = ""
-		if byTool, err := m.data.GroupBy(m.rng, m.crumbs, "tool", SortTotal); err == nil {
-			m.overview.ByTool = filterBuckets(byTool.Buckets, "tool", m.filter)
+		now := m.qnow()
+		tot, okT := m.data.TotalsCached(now, m.rng, m.crumbs)
+		prev, okP := m.prevTotalsCached()
+		byTool, okB := m.data.GroupByCached(now, m.rng, m.crumbs, "tool", SortTotal)
+		if !okT || !okP || !okB {
+			m.detailWanted = true
+			return
 		}
+		m.overview.Totals = tot
+		m.overview.Prev = prev
+		m.overview.ByTool = filterBuckets(byTool.Buckets, "tool", m.filter)
 		return
 	}
 
 	b := m.tlData.Buckets[m.scrubIndex]
-	since, until := m.bucketWindow(b)
 	m.overview.Totals = bucketTotalsFromBucket(b)
 	m.overview.ScrubLabel = views.BucketTimestamp(b, m.tlData.Dim)
 	if m.scrubIndex > 0 {
@@ -210,8 +291,12 @@ func (m *Model) syncScrub() {
 	} else {
 		m.overview.Prev = store.Bucket{}
 	}
-	if s, err := m.data.GroupByWindow(since, until, m.crumbs, "tool", SortTotal); err == nil {
-		m.overview.ByTool = filterBuckets(s.Buckets, "tool", m.filter)
+	if m.scrubIndex < len(m.scrubComp) {
+		m.overview.ByTool = filterBuckets(m.scrubComp[m.scrubIndex], "tool", m.filter)
+	} else {
+		// Composition misaligned with the timeline (defensive; a load rebuilds
+		// both together) — keep the previous bars, reprice when the flight lands.
+		m.detailWanted = true
 	}
 }
 
@@ -230,103 +315,105 @@ func (m *Model) clampScrub() {
 	}
 }
 
+// prevWindow resolves the previous-period comparison window for delta chips.
+// ok=false for open-ended ranges (all), which have no prior period.
+//
+// Windows derive from the load-generation clock (qnow), quantized to bucket
+// granularity so their cache keys stay stable: 7d/30d compare against the prior
+// N local calendar days (AddDate keeps local midnights across DST); today
+// compares against the same-length tail of yesterday, with "now" rounded down
+// to the hour so the key moves once per hour, not per second.
+func (m *Model) prevWindow() (since, until time.Time, ok bool) {
+	now := m.qnow()
+	cur, _ := m.rng.Window(now)
+	if cur.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	switch m.rng {
+	case Range7d:
+		return cur.AddDate(0, 0, -7), cur, true
+	case Range30d:
+		return cur.AddDate(0, 0, -30), cur, true
+	default: // RangeToday
+		y, mo, d := now.Date()
+		end := time.Date(y, mo, d, now.Hour(), 0, 0, 0, now.Location())
+		return cur.Add(-end.Sub(cur)), cur, true
+	}
+}
+
 // prevTotals returns the grand total for the immediately-prior equal-length
-// period, for delta chips. Open-ended ranges (all) have no prior period. The
-// store treats a zero Until as "now", so we resolve it to now() to size the
-// prior window.
+// period (querying; background flights and warm apply-side reloads only). It
+// reads the store's own Totals aggregate off one ungrouped Summarize — no
+// in-memory summing of grouped rows.
 func (m *Model) prevTotals() store.Bucket {
-	now := time.Now()
-	since, until := m.rng.Window(now)
-	if since.IsZero() {
+	since, until, ok := m.prevWindow()
+	if !ok {
 		return store.Bucket{}
 	}
-	if until.IsZero() {
-		until = now
-	}
-	span := until.Sub(since)
-	prevSince := since.Add(-span)
-	s, err := m.data.GroupByWindow(prevSince, since, m.crumbs, "tool", SortTotal)
+	b, err := m.data.WindowTotals(since, until, m.crumbs)
 	if err != nil {
 		return store.Bucket{}
-	}
-	var b store.Bucket
-	for _, x := range s.Buckets {
-		b.Events += x.Events
-		b.Input += x.Input
-		b.Output += x.Output
-		b.Reasoning += x.Reasoning
-		b.CacheCreation += x.CacheCreation
-		b.CacheRead += x.CacheRead
-		b.Total += x.Total
 	}
 	return b
 }
 
-// bucketWindow resolves a timeline bucket to a [since,until) window for windowed
-// re-pricing during scrub.
-func (m *Model) bucketWindow(b store.Bucket) (since, until time.Time) {
-	t, ok := views.ParseBucketTime(b.Keys[m.tlData.Dim], m.tlData.Dim)
+// prevTotalsCached is the cache-only twin of prevTotals. Open-ended ranges
+// report ok=true with a zero bucket — no prior period exists, so there is
+// nothing to query.
+func (m *Model) prevTotalsCached() (store.Bucket, bool) {
+	since, until, ok := m.prevWindow()
 	if !ok {
-		return time.Time{}, time.Time{}
+		return store.Bucket{}, true
 	}
-	switch m.tlData.Dim {
-	case "hour":
-		return t, t.Add(time.Hour)
-	case "week":
-		return t, t.AddDate(0, 0, 7)
-	case "month":
-		return t, t.AddDate(0, 1, 0)
-	default: // day
-		return t, t.AddDate(0, 0, 1)
-	}
+	return m.data.WindowTotalsCached(since, until, m.crumbs)
 }
 
-// topToolAt returns the dominant tool at a timeline bucket index, querying the
-// windowed by-tool composition (cached).
+// buildScrubComp reduces one [dim, tool] grouped summary into per-timeline-
+// bucket by-tool compositions, index-aligned with the timeline. Membership is
+// exact by construction: the composition rows carry the same strftime bucket
+// keys as the timeline itself, so no window arithmetic (and none of its
+// week/year edge cases) is involved.
+func buildScrubComp(timeline, comp []store.Bucket, dim string) [][]store.Bucket {
+	byKey := make(map[string][]store.Bucket, len(timeline))
+	for _, b := range comp {
+		k := b.Keys[dim]
+		byKey[k] = append(byKey[k], b)
+	}
+	out := make([][]store.Bucket, len(timeline))
+	for i, tb := range timeline {
+		rows := byKey[tb.Keys[dim]]
+		sortBuckets(rows, "tool", SortTotal)
+		out[i] = rows
+	}
+	return out
+}
+
+// topToolAt returns the dominant tool at a timeline bucket index from the
+// prewarmed composition — no store access.
 func (m *Model) topToolAt(idx int) string {
-	if idx < 0 || idx >= len(m.tlData.Buckets) {
+	if idx < 0 || idx >= len(m.scrubComp) || len(m.scrubComp[idx]) == 0 {
 		return ""
 	}
-	since, until := m.bucketWindow(m.tlData.Buckets[idx])
-	if since.IsZero() {
-		return ""
-	}
-	s, err := m.data.GroupByWindow(since, until, m.crumbs, "tool", SortTotal)
-	if err != nil || len(s.Buckets) == 0 {
-		return ""
-	}
-	return s.Buckets[0].Keys["tool"]
+	return m.scrubComp[idx][0].Keys["tool"]
 }
 
-// distinctSessions counts distinct sessions matching the crumbs by grouping on
-// session under the current range.
-func (m *Model) distinctSessions(crumbs []Crumb) int64 {
-	s, err := m.data.GroupBy(m.rng, crumbs, "session", SortTotal)
-	if err != nil {
-		return 0
-	}
-	return int64(len(s.Buckets))
-}
-
-// modelOwners maps each model id to its dominant owning tool via a single
-// model×tool grouping.
+// modelOwners maps each model id to its dominant owning tool, reduced in
+// memory from ONE Summarize grouped by [model, tool] (replaces the per-model
+// N+1). Ties keep the store's tool order (lexicographic), matching the old
+// stable-sorted first-bucket pick.
 func (m *Model) modelOwners() map[string]string {
 	out := map[string]string{}
-	s, err := m.data.GroupBy(m.rng, m.crumbs, "model", SortTotal)
+	s, err := m.data.GroupByDims(m.qnow(), m.rng, m.crumbs, []string{"model", "tool"})
 	if err != nil {
 		return out
 	}
-	// For each model, find the owning tool by a windowed model+tool query is
-	// heavy; instead group by tool within each model's crumb. Cheap enough for a
-	// handful of models.
+	best := map[string]int64{}
 	for _, b := range s.Buckets {
 		mdl := b.Keys["model"]
-		crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: mdl})
-		bt, err := m.data.GroupBy(m.rng, crumbs, "tool", SortTotal)
-		if err != nil || len(bt.Buckets) == 0 {
-			continue
+		if top, seen := best[mdl]; !seen || b.Total > top {
+			best[mdl] = b.Total
+			out[mdl] = b.Keys["tool"]
 		}
-		out[mdl] = bt.Buckets[0].Keys["tool"]
 	}
 	return out
 }
@@ -349,12 +436,12 @@ func bucketTotalsFromBucket(b store.Bucket) store.Bucket {
 // grand-total bucket and the sum of the visible rows. Taking the max keeps
 // share ≤ 100% even when filtering hides rows or a provider's grand total
 // double-counts differently from the per-group totals.
-func grandOf(d *Data, r Range, crumbs []Crumb, rows []store.Bucket) int64 {
+func grandOf(d *Data, now time.Time, r Range, crumbs []Crumb, rows []store.Bucket) int64 {
 	var sum int64
 	for _, b := range rows {
 		sum += b.Total
 	}
-	tot, err := d.Totals(r, crumbs)
+	tot, err := d.Totals(now, r, crumbs)
 	if err != nil {
 		return sum
 	}

@@ -50,7 +50,7 @@ func TestBrowseTableFitsPanel(t *testing.T) {
 	cell := lipgloss.NewStyle().PaddingRight(1)
 	for _, w := range []int{40, 56, 64, 80, 100, 120, 160, 200} {
 		lay := ComputeLayout(w, 40)
-		b := NewBrowse()
+		b := NewBrowse(c)
 		b.ApplyStyles(cell, cell, cell)
 		b.SetData(c, "model", rows, 5)
 		b.SetLayout(lay)

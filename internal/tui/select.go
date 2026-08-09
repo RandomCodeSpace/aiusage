@@ -38,8 +38,9 @@ func (m Model) currentSelection() int {
 	}
 }
 
-// setSelection clamps and applies a bar selection, reloading the selected
-// entity's detail trend.
+// setSelection clamps and applies a bar selection, repricing the selected
+// entity's detail from cache only — a miss schedules a debounced background
+// load (detail.go), so selection storms never query on the UI thread.
 func (m *Model) setSelection(i int) {
 	n := m.selectionCount()
 	if n == 0 {
@@ -54,10 +55,10 @@ func (m *Model) setSelection(i int) {
 	switch m.view {
 	case ViewByTool:
 		m.byTool.Selected = i
-		m.loadByToolDetail()
+		m.syncByToolDetail()
 	case ViewByModel:
 		m.byModel.Selected = i
-		m.loadByModelDetail()
+		m.syncByModelDetail()
 	}
 }
 

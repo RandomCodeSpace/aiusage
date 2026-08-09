@@ -49,12 +49,13 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case strings.HasPrefix(zid, "rail:"):
 		if idx, err := strconv.Atoi(strings.TrimPrefix(zid, "rail:")); err == nil && idx >= 0 && idx < int(viewCount) {
-			m.setView(View(idx))
+			cmd := m.setView(View(idx))
+			return m, cmd
 		}
 		return m, nil
 
 	case zid == views.ZoneRangePill:
-		return m.cycleRange(), nil
+		return m.cycleRange()
 
 	case zid == views.ZoneHelp:
 		m.toggleHelp()
@@ -62,7 +63,8 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 	case strings.HasPrefix(zid, "crumb:"):
 		if depth, err := strconv.Atoi(strings.TrimPrefix(zid, "crumb:")); err == nil {
-			m.popCrumbsTo(depth)
+			cmd := m.popCrumbsTo(depth)
+			return m, cmd
 		}
 		return m, nil
 

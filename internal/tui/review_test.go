@@ -32,7 +32,7 @@ func TestTabCyclesAllViews(t *testing.T) {
 // bar view responds to ↑/↓ once that tab is active (no focus step needed).
 func TestBarSelectionMovesWithArrows(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("3")) // By-Model
+	m = step(t, m, keyMsg("3")) // By-Model
 	if m.view != ViewByModel {
 		t.Fatalf("view = %v, want By-Model", m.view)
 	}
@@ -51,8 +51,8 @@ func TestBarSelectionMovesWithArrows(t *testing.T) {
 // if a stale index is set (e.g. after a filter shrinks the rows).
 func TestSelectionClampOnShrink(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
-	m = send(m, keyMsg("3")) // By-Model
-	m.setSelection(50)       // deliberately out of range
+	m = step(t, m, keyMsg("3")) // By-Model
+	m.setSelection(50)          // deliberately out of range
 	if m.byModel.Selected >= len(m.byModel.Rows) {
 		t.Fatalf("selection %d not clamped to rows %d", m.byModel.Selected, len(m.byModel.Rows))
 	}

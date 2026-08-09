@@ -17,35 +17,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// Resize is pure relayout: the view-model is size-independent and
+		// View() re-renders it at the new geometry (the hero memo is keyed on
+		// w/h), so no data reload — and therefore no store access — belongs
+		// here on any path, warm or cold.
 		m.layout()
-		// Until the first dataLoadedMsg lands, resize is pure relayout: Init's
-		// async loadCmd delivers the data, and reloading here on a cold cache
-		// would run the same queries a second time, on the UI thread.
-		if m.loaded {
-			m.reload()
-		}
 		return m, nil
 
 	case dataLoadedMsg:
-		return m.handleDataLoaded(msg)
+		return scheduleDetail(m.handleDataLoaded(msg))
+
+	case detailDebounceMsg:
+		return m.handleDetailDebounce(msg)
+
+	case detailLoadedMsg:
+		return scheduleDetail(m.handleDetailLoaded(msg))
 
 	case refreshTickMsg:
 		return m.handleRefreshTick()
 
 	case sysTickMsg:
-		return m.handleSysTick()
+		return m.handleSysTick(msg)
 
 	case spinner.TickMsg:
 		return m.handleSpinnerTick(msg)
 
 	case tea.MouseMsg:
-		return m.updateMouse(msg)
+		return scheduleDetail(m.updateMouse(msg))
 
 	case tea.KeyPressMsg:
 		if m.filtering {
 			return m.updateFiltering(msg)
 		}
-		return m.updateKey(msg)
+		return scheduleDetail(m.updateKey(msg))
 	}
 	return m.forward(msg)
 }
@@ -62,8 +66,8 @@ func (m Model) updateFiltering(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.filter = strings.TrimSpace(m.filterUI.Value())
 		m.filtering = false
 		m.filterUI.Blur()
-		m.reload()
-		return m, nil
+		cmd := m.startLoad()
+		return m, cmd
 	case "esc":
 		m.filtering = false
 		m.filterUI.Blur()
@@ -91,32 +95,32 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.NextPane):
-		m.setView(nextView(m.view))
-		return m, nil
+		cmd := m.setView(nextView(m.view))
+		return m, cmd
 	case key.Matches(msg, m.keys.PrevPane):
-		m.setView(prevView(m.view))
-		return m, nil
+		cmd := m.setView(prevView(m.view))
+		return m, cmd
 
 	case key.Matches(msg, m.keys.View1):
-		m.setView(ViewOverview)
-		return m, nil
+		cmd := m.setView(ViewOverview)
+		return m, cmd
 	case key.Matches(msg, m.keys.View2):
-		m.setView(ViewByTool)
-		return m, nil
+		cmd := m.setView(ViewByTool)
+		return m, cmd
 	case key.Matches(msg, m.keys.View3):
-		m.setView(ViewByModel)
-		return m, nil
+		cmd := m.setView(ViewByModel)
+		return m, cmd
 	case key.Matches(msg, m.keys.View4):
-		m.setView(ViewBrowse)
-		return m, nil
+		cmd := m.setView(ViewBrowse)
+		return m, cmd
 
 	case key.Matches(msg, m.keys.Range):
-		return m.cycleRange(), nil
+		return m.cycleRange()
 
 	case key.Matches(msg, m.keys.Sort):
 		m.sort = m.sort.Next()
-		m.reload()
-		return m, nil
+		cmd := m.startLoad()
+		return m, cmd
 
 	case key.Matches(msg, m.keys.Filter):
 		m.filtering = true
@@ -127,7 +131,8 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Force a reload: drop the cache and re-warm off the UI thread. The last
 		// frame stays on screen (with a refreshing hint) until the load lands.
 		m.data.Invalidate()
-		return m, tea.Batch(m.startLoad(), m.spin.Tick)
+		cmd := m.startLoad()
+		return m, tea.Batch(cmd, m.spin.Tick)
 
 	case key.Matches(msg, m.keys.Enter):
 		return m.drill()
@@ -236,14 +241,14 @@ func (m *Model) scrubBy(dir int) {
 	m.syncScrub()
 }
 
-// cycleRange advances the range, resetting scrub + drill path, then reloads and
-// persists the new range so it is restored on the next launch.
-func (m Model) cycleRange() Model {
+// cycleRange advances the range, resetting scrub + drill path, persists the new
+// range so it is restored on the next launch, and dispatches an async load.
+func (m Model) cycleRange() (Model, tea.Cmd) {
 	m.rng = m.rng.Next()
 	m.crumbs = nil
 	m.scrubIndex = 0
 	m.scrubPinned = false
 	m.persistUI()
-	m.reload()
-	return m
+	cmd := m.startLoad()
+	return m, cmd
 }

@@ -89,9 +89,23 @@ func trendChart(c Ctx, buckets []store.Bucket, dim string, w, h, scrubIdx int) s
 	if h < 4 {
 		h = 4
 	}
+	tslc, times, ok := buildTrendChart(c, buckets, dim, w, h)
+	if !ok {
+		return emptyChartFrame(c, w, h)
+	}
+	paintTrendHighlights(c, tslc, times, scrubIdx)
+	return c.mark(zoneHero, tslc.View())
+}
+
+// buildTrendChart constructs the braille trend chart WITHOUT the now/scrub
+// column highlights. The split from trendChart exists for the render memo
+// (HeroMemo): the expensive braille build happens once per dataset+geometry and
+// the highlights are applied afterwards as a canvas post-pass, so a scrub step
+// never redraws braille. ok=false when no bucket carries a parseable time key.
+func buildTrendChart(c Ctx, buckets []store.Bucket, dim string, w, h int) (*timeserieslinechart.Model, []time.Time, bool) {
 	times := bucketTimes(buckets, dim)
 	if len(times) == 0 {
-		return emptyChartFrame(c, w, h)
+		return nil, nil, false
 	}
 
 	var maxV int64
@@ -135,12 +149,28 @@ func trendChart(c Ctx, buckets []store.Bucket, dim string, w, h, scrubIdx int) s
 		}
 	}
 	tslc.DrawBrailleDataSets(order)
+	return &tslc, times, true
+}
 
-	tslc.SetColumnBackgroundStyle(times[len(times)-1], lipgloss.NewStyle().Background(c.NowColor))
+// paintTrendHighlights applies the amber "now" column on the latest bucket and
+// (when scrubIdx is a valid index) the accent scrub crosshair. It only touches
+// cell backgrounds on the built canvas — the braille content is untouched.
+func paintTrendHighlights(c Ctx, t *timeserieslinechart.Model, times []time.Time, scrubIdx int) {
+	t.SetColumnBackgroundStyle(times[len(times)-1], lipgloss.NewStyle().Background(c.NowColor))
 	if scrubIdx >= 0 && scrubIdx < len(times) {
-		tslc.SetColumnBackgroundStyle(times[scrubIdx], lipgloss.NewStyle().Background(c.AccentColor))
+		t.SetColumnBackgroundStyle(times[scrubIdx], lipgloss.NewStyle().Background(c.AccentColor))
 	}
-	return c.mark(zoneHero, tslc.View())
+}
+
+// clearTrendHighlights undoes paintTrendHighlights on a retained chart so the
+// memo can re-highlight it for a different scrub position later. An empty
+// style's background is lipgloss's "no color" sentinel, which the renderer
+// skips, so a repainted column renders exactly as if never highlighted.
+func clearTrendHighlights(t *timeserieslinechart.Model, times []time.Time, scrubIdx int) {
+	t.SetColumnBackgroundStyle(times[len(times)-1], lipgloss.NewStyle())
+	if scrubIdx >= 0 && scrubIdx < len(times) {
+		t.SetColumnBackgroundStyle(times[scrubIdx], lipgloss.NewStyle())
+	}
 }
 
 // trendStrip is the small-pane fallback: one self-scaled sparkline row per series

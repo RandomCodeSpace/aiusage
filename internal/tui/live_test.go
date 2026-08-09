@@ -10,7 +10,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
@@ -156,10 +155,6 @@ func (raceSource) Summarize(_ context.Context, f store.Filter) (*store.Summary, 
 		GroupBy: f.GroupBy,
 		Buckets: []store.Bucket{mk("a", 10, 4), mk("b", 40, 1), mk("c", 20, 3), mk("d", 30, 2)},
 	}, nil
-}
-
-func (raceSource) ListEvents(context.Context, store.Filter) ([]model.UsageEvent, error) {
-	return nil, nil
 }
 
 // TestUIReloadDuringBackgroundLoad overlaps the background load cmd (as Init and

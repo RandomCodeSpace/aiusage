@@ -5,34 +5,45 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/RandomCodeSpace/aiusage/internal/sysmon"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
 
 // sysgauge.go drives the container resource gauges (CPU/mem/disk for the current
 // pod) shown as a compact strip on the Overview tab. It samples on its own short
 // ticker — separate from the 10s data-refresh poll — because CPU is a rate that
-// needs two closely-spaced samples to read meaningfully. Sampling is a handful
-// of small cgroup file reads, so it runs synchronously in the tick handler.
+// needs two closely-spaced samples to read meaningfully. Sampling runs INSIDE
+// the tick Cmd, off the UI thread: it includes a syscall.Statfs on the workspace
+// path, and a hung network/FUSE mount must stall the tick goroutine, never
+// Update. The render memo's key also excludes the sys snapshot, so a fresh
+// sample never rebuilds the hero chart.
 
 // sysInterval is the resource-gauge sample cadence. Short enough that the CPU
 // gauge feels live, long enough to be negligible overhead.
 const sysInterval = 2 * time.Second
 
-// sysTickMsg fires every sysInterval to re-sample container resource usage.
-type sysTickMsg struct{}
+// sysTickMsg delivers one background resource sample every sysInterval.
+type sysTickMsg struct{ snap sysmon.Snapshot }
 
-// sysTickCmd schedules the next resource-gauge sample.
-func sysTickCmd() tea.Cmd {
-	return tea.Tick(sysInterval, func(time.Time) tea.Msg { return sysTickMsg{} })
+// sysTickCmd schedules the next resource-gauge sample and takes it inside the
+// Cmd goroutine, so the sample's file reads and Statfs never run in Update.
+func sysTickCmd(mon *sysmon.Monitor) tea.Cmd {
+	return tea.Tick(sysInterval, func(time.Time) tea.Msg {
+		var s sysmon.Snapshot
+		if mon != nil {
+			s = mon.Sample()
+		}
+		return sysTickMsg{snap: s}
+	})
 }
 
-// handleSysTick samples the container's CPU/memory/disk usage and re-arms the
-// ticker. It always re-arms so the strip stays live for the session's lifetime.
-func (m Model) handleSysTick() (tea.Model, tea.Cmd) {
+// handleSysTick stores the background sample and re-arms the ticker. It always
+// re-arms so the strip stays live for the session's lifetime.
+func (m Model) handleSysTick(msg sysTickMsg) (tea.Model, tea.Cmd) {
 	if m.mon != nil {
-		m.sys = m.mon.Sample()
+		m.sys = msg.snap
 	}
-	return m, sysTickCmd()
+	return m, sysTickCmd(m.mon)
 }
 
 // sysGauges maps the latest sysmon snapshot into the view-layer gauge list the

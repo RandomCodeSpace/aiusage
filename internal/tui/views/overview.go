@@ -24,6 +24,12 @@ type OverviewData struct {
 	Cursor      int        // highlighted timeline bucket index (scrub crosshair)
 	Pinned      bool       // whether the scrub is pinned (crosshair renders only then)
 	Sys         []SysGauge // container CPU/mem/disk gauges (empty → strip omitted)
+
+	// Render memoization (issue #4, 1f): Gen identifies the applied dataset and
+	// Memo caches the built hero chart + KPI sparklines across frames. A nil
+	// Memo renders everything directly (headless views tests).
+	Gen  uint64
+	Memo *HeroMemo
 }
 
 // Overview view panes (focus order; pane 0 = rail is owned by the root frame).
@@ -85,7 +91,7 @@ func Overview(c Ctx, d OverviewData, lay Layout) string {
 type kpiSpec struct {
 	label, foot        string
 	value, prev        int64
-	series             []float64 // nil → no sparkline (total/events are never graphed)
+	spark              string // pre-rendered sparkline row; "" → none (total/events are never graphed)
 	style              lipgloss.Style
 	shareVal, shareTot int64 // shareTot>0 shows a share %
 }
@@ -100,14 +106,40 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 	prev := Split(d.Prev)
 	sum := tot.Sum()
 
-	specs := make([]kpiSpec, 0, len(c.Comp)+2)
+	// Tile geometry first: the sparkline width is needed while building specs
+	// (memoized sparklines key on their rendered width). How many tiles fit
+	// across, given a minimum useful tile width + 1-col gutters.
+	nspec := len(c.Comp) + 2
+	const minTileW = 16
+	per := (width + 1) / (minTileW + 1)
+	if per > nspec {
+		per = nspec
+	}
+	if per < 1 {
+		per = 1
+	}
+	tileW := (width - (per - 1)) / per // total tile width (lipgloss v2 sizes are border-inclusive)
+	if tileW < 16 {
+		tileW = 16
+	}
+	// Content width inside a tile: border (2) + Padding(0,1) (2). Must mirror
+	// kpiTile's cw clamp so the sparkline fills the tile exactly.
+	cw := tileW - 4
+	if cw < 6 {
+		cw = 6
+	}
+
+	specs := make([]kpiSpec, 0, nspec)
 	for _, s := range c.Comp {
-		s := s
+		spark := ""
+		if lay.Sparklines {
+			spark = kpiSparkline(c, d, s, cw)
+		}
 		specs = append(specs, kpiSpec{
 			label:    s.Short,
 			value:    s.Pick(tot),
 			prev:     s.Pick(prev),
-			series:   SeriesFor(d.Timeline, func(b store.Bucket) int64 { return s.Pick(Split(b)) }),
+			spark:    spark,
 			style:    s.Style(),
 			shareVal: s.Pick(tot),
 			shareTot: sum,
@@ -118,23 +150,9 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 		kpiSpec{label: "events", foot: "requests", value: d.Totals.Events, prev: d.Prev.Events, style: c.Subtle},
 	)
 
-	// How many tiles fit across, given a minimum useful tile width + 1-col gutters.
-	const minTileW = 16
-	per := (width + 1) / (minTileW + 1)
-	if per > len(specs) {
-		per = len(specs)
-	}
-	if per < 1 {
-		per = 1
-	}
-	tileW := (width - (per - 1)) / per // total tile width (lipgloss v2 sizes are border-inclusive)
-	if tileW < 16 {
-		tileW = 16
-	}
-
 	tiles := make([]string, len(specs))
 	for i, s := range specs {
-		tiles[i] = kpiTile(c, s, tileW, lay.Sparklines)
+		tiles[i] = kpiTile(c, s, tileW)
 	}
 
 	// Arrange the tiles into rows of `per`.
@@ -156,11 +174,25 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
+// kpiSparkline renders one KPI tile's self-scaled sparkline row, through the
+// render memo when one is wired (the series derives only from the timeline, so
+// it is stable for the lifetime of an applied dataset).
+func kpiSparkline(c Ctx, d OverviewData, s CompSpec, w int) string {
+	build := func() string {
+		vals := SeriesFor(d.Timeline, func(b store.Bucket) int64 { return s.Pick(Split(b)) })
+		return newColumnSparkline(vals, w, 1, s.Style())
+	}
+	if d.Memo == nil {
+		return build()
+	}
+	return d.Memo.spark(d.Gen, d.Timeline, s.Key, w, build)
+}
+
 // kpiTile renders one read-only KPI bento card: title on the border, big
 // right-aligned number + delta chip, an optional self-scaled sparkline, then a
 // share % or unit. KPI tiles are not interactive (the trend is the only
 // interactive surface on Overview).
-func kpiTile(c Ctx, s kpiSpec, w int, spark bool) string {
+func kpiTile(c Ctx, s kpiSpec, w int) string {
 	// The border (2) plus Padding(0,1) (2) leave w-4 usable content columns.
 	// Build every row to exactly cw cells so nothing wraps inside the box.
 	cw := w - 4
@@ -197,8 +229,8 @@ func kpiTile(c Ctx, s kpiSpec, w int, spark bool) string {
 	}
 
 	body := numberRow
-	if spark && s.series != nil {
-		body += "\n" + newColumnSparkline(s.series, cw, 1, s.style)
+	if s.spark != "" {
+		body += "\n" + s.spark
 	}
 	body += "\n" + footRow
 
@@ -225,8 +257,23 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 	if d.Pinned {
 		scrubIdx = d.Cursor
 	}
-	body := heroBody(c, d.Timeline, d.TimelineDim, lay, inner, chartH, scrubIdx)
+	body := heroBodyMemo(c, d, lay, inner, chartH, scrubIdx)
 	return style.Render(title + "\n" + body)
+}
+
+// heroBodyMemo routes the hero body through the shared render memo when the
+// root model wired one (d.Memo), falling back to a direct build otherwise. The
+// memo covers only the expensive full braille chart; the gate mirrors
+// heroBody's exactly (its w/h clamps are no-ops above the full-chart minimums),
+// and the degraded strip/empty panes stay direct — they are cheap.
+func heroBodyMemo(c Ctx, d OverviewData, lay Layout, w, h, scrubIdx int) string {
+	if d.Memo != nil && len(d.Timeline) > 0 &&
+		lay.ChartMode == ChartFull && w >= minChartW && h >= 5 {
+		if s, ok := d.Memo.chartBody(c, d.Gen, d.Timeline, d.TimelineDim, w, h, scrubIdx); ok {
+			return s
+		}
+	}
+	return heroBody(c, d.Timeline, d.TimelineDim, lay, w, h, scrubIdx)
 }
 
 // sidePanel renders the read-only by-tool composition bars over a four-component

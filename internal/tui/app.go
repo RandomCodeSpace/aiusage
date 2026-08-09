@@ -67,6 +67,15 @@ type Model struct {
 	scrubIndex  int
 	scrubPinned bool
 
+	// scrubComp holds each timeline bucket's by-tool composition, prewarmed by
+	// loadOverview from ONE [dim, tool] grouped query, index-aligned with
+	// tlData.Buckets. Scrubbing re-prices entirely from this — zero queries.
+	scrubComp [][]store.Bucket
+
+	// Debounced detail loading (selection/scrub/preview) state — see detail.go.
+	detailSeq    uint64 // coalescing token: stale debounce timers and flights drop
+	detailWanted bool   // a cache-only sync missed; scheduleDetail converts it to a dispatch
+
 	// View data (populated by per-view loaders in load.go).
 	overview views.OverviewData
 	tlData   views.TimelineData
@@ -82,12 +91,19 @@ type Model struct {
 	loaded    bool      // first dataLoadedMsg has arrived (dashboard is live)
 	loading   bool      // a load cmd is in flight (drives the refreshing hint)
 	lastMTime time.Time // db file mtime at the last successful load (live poll)
+	loadGen   uint64    // monotonic load generation: stamped on dispatch, checked on apply
+	loadNow   time.Time // clock of the current generation; all its queries key off this
+	dataGen   uint64    // generation whose data is APPLIED to the views (render-memo key)
 
 	// Container resource gauges (CPU/mem/disk for the current pod, not the node).
 	// mon samples on its own tick; sys holds the latest reading for the Overview
 	// gauge strip. Live system state — deliberately never persisted to the DB.
 	mon *sysmon.Monitor
 	sys sysmon.Snapshot
+
+	// heroMemo caches the rendered hero chart + KPI sparklines across frames
+	// (issue #4, 1f); a pointer so it survives Bubble Tea's value copies.
+	heroMemo *views.HeroMemo
 
 	// Double-click tracking for mouse drill.
 	lastClickZone string
@@ -123,7 +139,7 @@ func NewModel(src DataSource, opt Options) Model {
 	sp.Style = lipgloss.NewStyle().Foreground(th.Accent)
 
 	vctx := buildCtx(th, zm)
-	b := views.NewBrowse()
+	b := views.NewBrowse(vctx)
 	// PaddingRight(1) on the per-cell Header/Cell styles gives each column a
 	// 1-cell gutter so values never abut (the column budget in browse.go reserves
 	// for it). The Selected style wraps the WHOLE row, so it must NOT add padding
@@ -171,6 +187,7 @@ func NewModel(src DataSource, opt Options) Model {
 		help:          h,
 		spin:          sp,
 		mon:           sysmon.New(wd),
+		heroMemo:      views.NewHeroMemo(),
 	}
 }
 
@@ -228,7 +245,7 @@ func buildCtx(th Theme, zm *zone.Manager) views.Ctx {
 // 10s refresh tick stats the db file and reloads only when its mtime changes,
 // so steady-state cost is one os.Stat per tick.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, m.loadCmd(), refreshTickCmd(), sysTickCmd())
+	return tea.Batch(m.spin.Tick, m.loadCmd(), refreshTickCmd(), sysTickCmd(m.mon))
 }
 
 // toggleHelp flips the help overlay. It must NOT set m.help.ShowAll: that field
@@ -241,11 +258,13 @@ func (m *Model) toggleHelp() {
 	m.layout()
 }
 
-// setView switches the active tab, persists it, and reloads.
-func (m *Model) setView(v View) {
+// setView switches the active tab, persists it, and dispatches an async load.
+// The previous frame stays on screen (with the refreshing hint) until the warm
+// load applies — no store queries run on the UI thread here.
+func (m *Model) setView(v View) tea.Cmd {
 	m.view = v
 	m.persistUI()
-	m.reload()
+	return m.startLoad()
 }
 
 // applyPaneFocus lights the single interactive pane of each view (its trend,
@@ -285,8 +304,8 @@ func (m Model) drillIntoBrowse(dim, val string) (tea.Model, tea.Cmd) {
 	}
 	m.crumbs = append(m.crumbs, Crumb{Dim: dim, Value: val})
 	m.view = ViewBrowse
-	m.reload()
-	return m, nil
+	cmd := m.startLoad()
+	return m, cmd
 }
 
 // drillBrowse descends the Browse drill stack. At the deepest level there is no
@@ -301,8 +320,8 @@ func (m Model) drillBrowse() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.crumbs = append(m.crumbs, Crumb{Dim: dim, Value: val})
-	m.reload()
-	return m, nil
+	cmd := m.startLoad()
+	return m, cmd
 }
 
 // back pops the scrub pin or the drill stack.
@@ -316,21 +335,24 @@ func (m Model) back() (tea.Model, tea.Cmd) {
 	case ViewBrowse:
 		if len(m.crumbs) > 0 {
 			m.crumbs = m.crumbs[:len(m.crumbs)-1]
-			m.reload()
+			cmd := m.startLoad()
+			return m, cmd
 		}
 	}
 	return m, nil
 }
 
-// popCrumbsTo pops the drill stack down to the given depth (breadcrumb click).
-func (m *Model) popCrumbsTo(depth int) {
+// popCrumbsTo pops the drill stack down to the given depth (breadcrumb click),
+// returning the async load cmd (nil when the depth is already current).
+func (m *Model) popCrumbsTo(depth int) tea.Cmd {
 	if depth < 0 {
 		depth = 0
 	}
 	if depth < len(m.crumbs) {
 		m.crumbs = m.crumbs[:depth]
-		m.reload()
+		return m.startLoad()
 	}
+	return nil
 }
 
 // layout recomputes the responsive frame from the terminal size and pushes the

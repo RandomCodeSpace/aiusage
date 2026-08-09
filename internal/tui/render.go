@@ -208,6 +208,8 @@ func (m Model) renderBody(lay views.Layout) string {
 	case ViewOverview:
 		ov := m.overview
 		ov.Sys = m.sysGauges() // inject live resource gauges at render time
+		ov.Gen = m.dataGen     // render-memo dataset identity (applied generation)
+		ov.Memo = m.heroMemo
 		return views.Overview(m.vctx, ov, lay)
 	case ViewByTool:
 		return views.ByTool(m.vctx, m.byTool, lay)
