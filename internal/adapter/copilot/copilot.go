@@ -435,7 +435,7 @@ func toCandidate(rec *otelRecord, index int, fallbackTS time.Time, traceModels, 
 		reasoning:     reasoning,
 		total:         total,
 		dedupKey:      dedup,
-		raw:           rawAttrs(attrs),
+		raw:           rawAudit(rec, attrs),
 	}
 }
 
@@ -884,10 +884,80 @@ func timestampFromUnixNanos(rawJSON json.RawMessage) (time.Time, bool) {
 	return time.UnixMilli(raw / 1_000_000).UTC(), true
 }
 
-// rawAttrs serialises the attributes object for audit; best-effort. Values
-// keep their original encoding (they are raw JSON), keys are sorted.
-func rawAttrs(attrs map[string]json.RawMessage) string {
-	b, err := json.Marshal(attrs)
+// rawAttrKeys is the ALLOW-LIST of OTEL attributes persisted in
+// UsageEvent.Raw: the usage counters an audit of the stored accounting needs,
+// the model/provider identity behind them, and the identifiers the dedup key
+// and session mapping are built from.
+//
+// It is an allow-list on purpose. An exporter told to capture message content
+// (OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT and the Copilot-specific
+// equivalents) writes prompt and completion text into the same attribute map,
+// under keys that vary by exporter version — so denying known-bad keys would
+// start leaking the day a new content attribute appears, while an unlisted key
+// is simply never read (issue #42, closing the gap #17 left open).
+var rawAttrKeys = []string{
+	// Usage counters, every spelling toCandidate reads.
+	"gen_ai.usage.input_tokens",
+	"gen_ai.usage.output_tokens",
+	"gen_ai.usage.cache_read.input_tokens",
+	"gen_ai.usage.cache_write.input_tokens",
+	"gen_ai.usage.cache_creation.input_tokens",
+	"gen_ai.usage.reasoning.output_tokens",
+	"gen_ai.usage.reasoning_tokens",
+	"gen_ai.usage.total_tokens",
+	"gen_ai.usage.total.token_count",
+	// Model, provider and operation identity.
+	"gen_ai.request.model",
+	"gen_ai.response.model",
+	"gen_ai.system",
+	"gen_ai.provider.name",
+	"gen_ai.operation.name",
+	"event.name",
+	// Call, conversation and turn identity: the dedup-key and session inputs.
+	"gen_ai.response.id",
+	"gen_ai.conversation.id",
+	"copilot_chat.session_id",
+	"copilot_chat.chat_session_id",
+	"session.id",
+	"github.copilot.interaction_id",
+	"turn.index",
+	"copilot_chat.turn.index",
+}
+
+// auditRecord is the stored audit payload. It mirrors the OTEL record's own
+// nesting — span identity and timing at the top, the retained attributes
+// below — so an auditor can compare it against the source line field for
+// field, the same way the claudecode and gemini payloads mirror theirs.
+type auditRecord struct {
+	TraceID    string                     `json:"traceId,omitempty"`
+	SpanID     string                     `json:"spanId,omitempty"`
+	Timestamp  string                     `json:"timestamp,omitempty"`
+	Attributes map[string]json.RawMessage `json:"attributes"`
+}
+
+// rawAudit builds the audit payload for one record from rawAttrKeys.
+// Attribute values keep their original encoding (they are raw JSON) and keys
+// are sorted by json.Marshal. Timestamp is the record's own resolved time and
+// is omitted when the record carried none — the fallback there is the file
+// mtime, which is a property of the poll, not of the record. Best-effort: an
+// un-marshalable payload yields an empty raw rather than failing the parse.
+func rawAudit(rec *otelRecord, attrs map[string]json.RawMessage) string {
+	a := auditRecord{Attributes: make(map[string]json.RawMessage, len(rawAttrKeys))}
+	if v, ok := traceIDFromRecord(rec); ok {
+		a.TraceID = v
+	}
+	if v, ok := spanIDFromRecord(rec); ok {
+		a.SpanID = v
+	}
+	if rec.hasTS {
+		a.Timestamp = rec.ts.UTC().Format(time.RFC3339Nano)
+	}
+	for _, k := range rawAttrKeys {
+		if v, ok := attrs[k]; ok && len(v) > 0 {
+			a.Attributes[k] = v
+		}
+	}
+	b, err := json.Marshal(a)
 	if err != nil {
 		return ""
 	}

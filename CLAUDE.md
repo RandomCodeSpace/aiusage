@@ -15,15 +15,10 @@ kind='adjustment'. aggregate_state and source_checkpoints are the only mutable
 data tables (schema_meta holds the mutable version stamp) — working state, not
 history.
 
-**Raw is usage-object-only** (issue #17, resolved). Every adapter EXCEPT
-copilot builds usage_events.raw / aggregate_state.raw from an explicit
-ALLOW-LIST of usage/model/identity fields — never by stripping content out of
-a whole record, which rots the moment the provider adds a field. Copilot is
-the open exception, tracked separately: rawAttrs in
-internal/adapter/copilot/copilot.go marshals the WHOLE OTEL span attribute
-map, so an exporter configured to capture GenAI message content puts prompt
-and completion text straight into raw. #17's per-adapter policy never named
-copilot; do not read "every adapter" as covering it. Raw is an audit
+**Raw is usage-object-only** (issues #17 and #42, resolved). Every adapter
+builds usage_events.raw / aggregate_state.raw from an explicit ALLOW-LIST of
+usage/model/identity fields — never by stripping content out of a whole
+record, which rots the moment the provider adds a field. Raw is an audit
 payload, never a backfill source: the schema columns carry everything cost and
 reporting need. `privacy.no_raw` drops it everywhere; the collector enforces
 that centrally (collect.WithoutRaw), so adapters stay unaware of it. Rows
