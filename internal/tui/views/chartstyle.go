@@ -52,7 +52,7 @@ func heroBody(c Ctx, buckets []store.Bucket, dim string, lay Layout, w, h, scrub
 	if len(buckets) == 0 {
 		return emptyChartFrame(c, w, h)
 	}
-	if lay.ChartMode == ChartFull && w >= minChartW && h >= 5 {
+	if lay.ChartMode == ChartFull && w >= minChartW && h >= minHeroLogH {
 		// Clamp to exactly h rows: ntcharts can emit one trailing axis/overflow
 		// row beyond the requested canvas height for some data, which would push
 		// the panel one line past its budget. fitHeight makes the contract exact.
@@ -331,6 +331,222 @@ func xLabelFormatter(dim string) linechart.LabelFormatter {
 			return t.Format("15:04")
 		}
 		return t.Format("01/02")
+	}
+}
+
+// --- detented hero (issue #8) ------------------------------------------------
+//
+// Everything below builds the hero's ntcharts widgets. The geometry, series
+// partitioning and text that frame them live in hero.go; the detent arithmetic
+// in scale.go. Keeping widget construction here is the chartstyle seam
+// (issue #13): views never touch ntcharts directly.
+
+// heroPane is one built pane of the hero body: the fixed header line above it,
+// the ntcharts model, and the exact row budget its canvas must fill. An empty
+// header claims no row (the degraded log band has no pane header).
+type heroPane struct {
+	header string
+	model  *timeserieslinechart.Model
+	h      int
+}
+
+// heroFrame is a built hero body — its panes in render order, an optional
+// footer strip, and the bucket times every pane shares. HeroMemo retains it
+// across frames and re-renders it per scrub position: the braille is drawn
+// once, the crosshair is a canvas post-pass.
+type heroFrame struct {
+	panes  []heroPane
+	footer string
+	times  []time.Time
+	h      int
+}
+
+// render paints the now/scrub highlights onto every retained pane, renders the
+// body, then clears them again so the retained canvases stay clean for the next
+// scrub position.
+func (f *heroFrame) render(c Ctx, scrubIdx int) string {
+	rows := make([]string, 0, len(f.panes)*2+1)
+	for _, p := range f.panes {
+		paintTrendHighlights(c, p.model, f.times, scrubIdx)
+		if p.header != "" {
+			rows = append(rows, p.header)
+		}
+		rows = append(rows, fitHeight(p.model.View(), p.h))
+		clearTrendHighlights(p.model, f.times, scrubIdx)
+	}
+	if f.footer != "" {
+		rows = append(rows, f.footer)
+	}
+	return c.mark(zoneHero, fitHeight(strings.Join(rows, "\n"), f.h))
+}
+
+// buildHeroFrame builds the hero body of one kind at (w, h) WITHOUT the
+// now/scrub highlights, so the memo can apply those as a post-pass. lock may be
+// nil (an un-memoized render): then the detents are computed fresh.
+// ok=false when the body cannot be built and the caller must fall back.
+func buildHeroFrame(c Ctx, buckets []store.Bucket, dim string, kind heroFrameKind, w, h int, lock *detentLock) (*heroFrame, bool) {
+	times := bucketTimes(buckets, dim)
+	// Unparseable time keys would desynchronise times from buckets and with it
+	// every index the scrub crosshair resolves; fall back instead of guessing.
+	if len(times) == 0 || len(times) != len(buckets) {
+		return nil, false
+	}
+	switch kind {
+	case heroFrameLeverage:
+		return buildLeverageFrame(c, buckets, times, dim, w, h, lock)
+	case heroFrameTwoPane:
+		return buildTwoPaneFrame(c, buckets, times, dim, w, h, lock)
+	case heroFrameLog:
+		return buildLogFrame(c, buckets, dim, w, h)
+	}
+	return nil, false
+}
+
+// buildLogFrame wraps the pre-hero log-axis trend chart as a heroFrame: the
+// band under the two-pane floor still draws a full braille chart, so it belongs
+// in the memo like every other braille build. It carries no pane header and no
+// detent (the log axis has none). The w/h clamps trendChart applies are no-ops
+// here — this kind is only chosen above minChartW / minHeroLogH.
+func buildLogFrame(c Ctx, buckets []store.Bucket, dim string, w, h int) (*heroFrame, bool) {
+	tslc, times, ok := buildTrendChart(c, buckets, dim, w, h)
+	if !ok {
+		return nil, false
+	}
+	return &heroFrame{panes: []heroPane{{model: tslc, h: h}}, times: times, h: h}, true
+}
+
+// buildTwoPaneFrame builds the hero proper: fresh (input+output) over cache,
+// each pane linearly scaled to its own detent and labelled with it.
+func buildTwoPaneFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int, lock *detentLock) (*heroFrame, bool) {
+	freshSpecs, cacheSpecs := heroPaneSeries(c)
+	if len(freshSpecs) == 0 || len(cacheSpecs) == 0 {
+		return nil, false
+	}
+	freshH, cacheH := heroPaneSplit(h - 2) // two header rows
+	freshGH, cacheGH := freshH, cacheH-2   // the cache pane carries the x axis
+	if freshGH < detentYStep || cacheGH < detentYStep {
+		return nil, false
+	}
+
+	freshStep := lock.pick("fresh", freshGH, detentYStep, seriesMax(buckets, freshSpecs))
+	cacheStep := lock.pick("cache", cacheGH, detentYStep, seriesMax(buckets, cacheSpecs))
+	// The shared gutter width is settled before either widget exists: ntcharts
+	// reserves the Y gutter from its formatter's widest output, and that width
+	// is what column-aligns the two plot areas.
+	labelW := detentLabelWidth(c, []detentAxis{{step: freshStep, graphH: freshGH}, {step: cacheStep, graphH: cacheGH}})
+
+	fresh := detentPane(c, buckets, times, dim, freshSpecs, w, freshH, freshGH, freshStep, 0, labelW)
+	cache := detentPane(c, buckets, times, dim, cacheSpecs, w, cacheH, cacheGH, cacheStep, heroXSteps, labelW)
+	return &heroFrame{
+		panes: []heroPane{
+			{header: paneHeader(c, freshSpecs, "fresh", freshStep, w), model: fresh, h: freshH},
+			{header: paneHeader(c, cacheSpecs, "cache", cacheStep, w), model: cache, h: cacheH},
+		},
+		times: times,
+		h:     h,
+	}, true
+}
+
+// detentPane builds one linearly-scaled braille pane on a detented Y axis.
+// xStep 0 hides the time axis (the fresh pane); the cache pane carries it for
+// both. graphH must be the plot height ntcharts will derive for this canvas —
+// the canvas height, minus two rows when the x axis is drawn — because it is
+// the divisor that makes the ring values exact.
+func detentPane(c Ctx, buckets []store.Bucket, times []time.Time, dim string,
+	specs []CompSpec, w, h, graphH int, step int64, xStep, labelW int) *timeserieslinechart.Model {
+	minT, maxT := times[0], times[len(times)-1]
+	if !maxT.After(minT) {
+		maxT = minT.Add(bucketStep(dim))
+	}
+	axis := lipgloss.NewStyle().Foreground(c.FaintColor)
+	label := lipgloss.NewStyle().Foreground(c.FaintColor)
+	tslc := timeserieslinechart.New(w, h,
+		timeserieslinechart.WithTimeRange(minT, maxT),
+		timeserieslinechart.WithYRange(0, detentViewMax(step, graphH, detentYStep)),
+		timeserieslinechart.WithXYSteps(xStep, detentYStep),
+		timeserieslinechart.WithAxesStyles(axis, label),
+		timeserieslinechart.WithXLabelFormatter(xLabelFormatter(dim)),
+		timeserieslinechart.WithYLabelFormatter(detentYLabel(c, step, detentYStep, labelW)),
+	)
+	// One dataset per contiguous run per series: a braille line only joins
+	// points inside a single dataset, so a missing bucket breaks the line
+	// instead of drawing an interpolated diagonal across the outage.
+	runs := gapRuns(times, dim)
+	order := make([]string, 0, len(specs)*len(runs))
+	for _, s := range specs {
+		for ri, run := range runs {
+			name := s.Key + ":" + strconv.Itoa(ri)
+			tslc.SetDataSetStyle(name, s.Style())
+			for _, i := range run {
+				tslc.PushDataSet(name, timeserieslinechart.TimePoint{
+					Time: times[i], Value: float64(s.Pick(Split(buckets[i])))})
+			}
+			order = append(order, name)
+		}
+	}
+	tslc.DrawBrailleDataSets(order)
+	return &tslc
+}
+
+// buildLeverageFrame builds the pivot: cache-read / input as one ratio line on
+// a detented linear axis, over the magnitude footer. There is no 1x break-even
+// reference — at the 40-310x ratios this data actually shows, a line at 1 is
+// geometrically indistinguishable from the axis.
+func buildLeverageFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int, lock *detentLock) (*heroFrame, bool) {
+	segs, maxRatio := leverageSegments(buckets, times, dim)
+	if len(segs) == 0 {
+		return nil, false
+	}
+	chartH := h - 2 // header + footer
+	graphH := chartH - 2
+	if graphH < minPaneGraphH {
+		return nil, false
+	}
+
+	step := lock.pick("leverage", graphH, detentYStep, int64(math.Ceil(maxRatio)))
+	labelW := leverageLabelWidth(step, graphH)
+
+	minT, maxT := times[0], times[len(times)-1]
+	if !maxT.After(minT) {
+		maxT = minT.Add(bucketStep(dim))
+	}
+	axis := lipgloss.NewStyle().Foreground(c.FaintColor)
+	label := lipgloss.NewStyle().Foreground(c.FaintColor)
+	line := leverageLineStyle(c)
+	tslc := timeserieslinechart.New(w, chartH,
+		timeserieslinechart.WithTimeRange(minT, maxT),
+		timeserieslinechart.WithYRange(0, detentViewMax(step, graphH, detentYStep)),
+		timeserieslinechart.WithXYSteps(heroXSteps, detentYStep),
+		timeserieslinechart.WithAxesStyles(axis, label),
+		timeserieslinechart.WithXLabelFormatter(xLabelFormatter(dim)),
+		timeserieslinechart.WithYLabelFormatter(leverageYLabel(step, detentYStep, labelW)),
+	)
+	order := make([]string, 0, len(segs))
+	for i, seg := range segs {
+		name := "lev:" + strconv.Itoa(i)
+		tslc.SetDataSetStyle(name, line)
+		for _, p := range seg {
+			tslc.PushDataSet(name, timeserieslinechart.TimePoint{Time: p.t, Value: p.v})
+		}
+		order = append(order, name)
+	}
+	tslc.DrawBrailleDataSets(order)
+	return &heroFrame{
+		panes:  []heroPane{{header: leverageHeader(c, step, w), model: &tslc, h: chartH}},
+		footer: leverageFooter(c, buckets, w),
+		times:  times,
+		h:      h,
+	}, true
+}
+
+// leverageYLabel is detentYLabel for the ratio axis: same exact-multiple
+// derivation, rendered as a multiple instead of a token count.
+func leverageYLabel(step int64, yStep, labelW int) linechart.LabelFormatter {
+	return func(i int, _ float64) string {
+		if yStep < 1 || i%yStep != 0 {
+			return ""
+		}
+		return padLeftLocal(leverageRatioLabel(int64(i/yStep)*step), labelW)
 	}
 }
 

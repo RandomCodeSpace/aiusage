@@ -117,6 +117,14 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Range):
 		return m.cycleRange()
 
+	case key.Matches(msg, m.keys.Pivot):
+		// Pure presentation: the pivot re-reads the timeline already applied, so
+		// it never dispatches a load. Only Overview owns a hero.
+		if m.view == ViewOverview {
+			m.heroPivot = !m.heroPivot
+		}
+		return m, nil
+
 	case key.Matches(msg, m.keys.Sort):
 		m.sort = m.sort.Next()
 		cmd := m.startLoad()

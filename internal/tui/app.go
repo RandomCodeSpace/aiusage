@@ -74,6 +74,10 @@ type Model struct {
 	scrubIndex  int
 	scrubPinned bool
 
+	// heroPivot flips the Overview hero from the detented two-pane trend to the
+	// leverage-ratio pivot. Presentation only — it reads the applied timeline.
+	heroPivot bool
+
 	// scrubComp holds each timeline bucket's by-tool composition, prewarmed by
 	// loadOverview from ONE [dim, tool] grouped query, index-aligned with
 	// tlData.Buckets. Scrubbing re-prices entirely from this — zero queries.
@@ -207,6 +211,15 @@ func NewModel(src DataSource, opt Options) Model {
 		mon:           sysmon.New(wd),
 		heroMemo:      views.NewHeroMemo(),
 	}
+}
+
+// heroMode maps the pivot toggle to the view-layer hero mode. It is injected at
+// render time (like the sys gauges), so toggling never touches loaded data.
+func (m Model) heroMode() views.HeroMode {
+	if m.heroPivot {
+		return views.HeroLeverage
+	}
+	return views.HeroTrend
 }
 
 // persistUI writes the current range + tab to the state file (best-effort). It is

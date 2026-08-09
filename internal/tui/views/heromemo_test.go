@@ -37,60 +37,70 @@ func memoTestBuckets(n int) []store.Bucket {
 	return out
 }
 
-// TestHeroMemoChartBuiltOnce locks the 1f keying contract: the braille chart is
-// built once per (generation, w, h) and NOT rebuilt for repeated renders or
-// scrub-index changes; geometry and generation changes re-key.
+// TestHeroMemoChartBuiltOnce locks the 1f keying contract for the detented
+// hero: the braille panes are built once per (generation, mode, w, h) and NOT
+// rebuilt for repeated renders or scrub-index changes; geometry, mode and
+// generation changes re-key.
 func TestHeroMemoChartBuiltOnce(t *testing.T) {
 	c := memoTestCtx()
 	tl := memoTestBuckets(7)
 	m := NewHeroMemo()
 
-	s0, ok := m.chartBody(c, 1, tl, "day", 60, 12, -1)
+	s0, ok := m.frame(c, 1, tl, "day", heroFrameTwoPane, 60, 16, -1)
 	if !ok || s0 == "" {
-		t.Fatal("first chartBody render failed")
+		t.Fatal("first hero frame render failed")
 	}
 	if got := m.Builds(); got != 1 {
 		t.Fatalf("builds after first render = %d, want 1", got)
 	}
 
 	// Repeat render: cached string, no rebuild.
-	if s, _ := m.chartBody(c, 1, tl, "day", 60, 12, -1); s != s0 {
+	if s, _ := m.frame(c, 1, tl, "day", heroFrameTwoPane, 60, 16, -1); s != s0 {
 		t.Fatal("repeat render returned a different frame")
 	}
 	if got := m.Builds(); got != 1 {
-		t.Fatalf("repeat render rebuilt the chart: builds = %d", got)
+		t.Fatalf("repeat render rebuilt the panes: builds = %d", got)
 	}
 
 	// Scrub: the key excludes the scrub index — highlight is a post-pass.
-	s3, _ := m.chartBody(c, 1, tl, "day", 60, 12, 3)
+	s3, _ := m.frame(c, 1, tl, "day", heroFrameTwoPane, 60, 16, 3)
 	if got := m.Builds(); got != 1 {
-		t.Fatalf("scrub change rebuilt the braille chart: builds = %d", got)
+		t.Fatalf("scrub change rebuilt the braille panes: builds = %d", got)
 	}
 	if s3 == s0 {
-		t.Fatal("scrub overlay did not change the rendered chart")
+		t.Fatal("scrub overlay did not change the rendered body")
 	}
 
 	// Geometry re-keys.
-	if _, ok := m.chartBody(c, 1, tl, "day", 70, 12, -1); !ok {
+	if _, ok := m.frame(c, 1, tl, "day", heroFrameTwoPane, 70, 16, -1); !ok {
 		t.Fatal("resized render failed")
 	}
 	if got := m.Builds(); got != 2 {
 		t.Fatalf("resize builds = %d, want 2", got)
 	}
 
-	// A new generation re-keys even over the same slice.
-	if _, ok := m.chartBody(c, 2, tl, "day", 70, 12, -1); !ok {
-		t.Fatal("new-generation render failed")
+	// The pivot is a different body at the same geometry: it must re-key.
+	if _, ok := m.frame(c, 1, tl, "day", heroFrameLeverage, 70, 16, -1); !ok {
+		t.Fatal("pivot render failed")
 	}
 	if got := m.Builds(); got != 3 {
-		t.Fatalf("new generation builds = %d, want 3", got)
+		t.Fatalf("mode change builds = %d, want 3", got)
+	}
+
+	// A new generation re-keys even over the same slice.
+	if _, ok := m.frame(c, 2, tl, "day", heroFrameLeverage, 70, 16, -1); !ok {
+		t.Fatal("new-generation render failed")
+	}
+	if got := m.Builds(); got != 4 {
+		t.Fatalf("new generation builds = %d, want 4", got)
 	}
 }
 
 // TestHeroMemoMatchesDirectRender proves the paint→render→clear post-pass is
-// indistinguishable from a chart built with the highlight baked in, including
-// after highlight cycles on the retained canvas (the clear must restore the
-// columns exactly).
+// indistinguishable from a body built with the highlight baked in, including
+// after highlight cycles on the retained canvases (the clear must restore the
+// columns exactly). The comparison build shares the memo's detent lock, so both
+// sides settle on the same scales.
 func TestHeroMemoMatchesDirectRender(t *testing.T) {
 	c := memoTestCtx()
 	tl := memoTestBuckets(7)
@@ -98,17 +108,21 @@ func TestHeroMemoMatchesDirectRender(t *testing.T) {
 
 	scrubs := []int{-1, 0, 3, 6, 99, -1, 3} // repeats + out-of-range → -1
 	for _, idx := range scrubs {
-		want := fitHeight(trendChart(c, tl, "day", 60, 12, idx), 12)
-		got, ok := m.chartBody(c, 1, tl, "day", 60, 12, idx)
+		direct, ok := buildHeroFrame(c, tl, "day", heroFrameTwoPane, 60, 16, &m.lock)
 		if !ok {
-			t.Fatalf("chartBody(scrub=%d) failed", idx)
+			t.Fatalf("direct build(scrub=%d) failed", idx)
+		}
+		want := direct.render(c, idx)
+		got, ok := m.frame(c, 1, tl, "day", heroFrameTwoPane, 60, 16, idx)
+		if !ok {
+			t.Fatalf("frame(scrub=%d) failed", idx)
 		}
 		if got != want {
 			t.Fatalf("memoized frame diverges from direct render at scrub=%d", idx)
 		}
 	}
 	if got := m.Builds(); got != 1 {
-		t.Fatalf("highlight cycling rebuilt the chart: builds = %d, want 1", got)
+		t.Fatalf("highlight cycling rebuilt the panes: builds = %d, want 1", got)
 	}
 }
 

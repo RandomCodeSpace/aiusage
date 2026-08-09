@@ -21,6 +21,7 @@ type KeyMap struct {
 	Filter   key.Binding
 	Sort     key.Binding
 	Range    key.Binding
+	Pivot    key.Binding // p — pivot the Overview hero between trend and leverage
 	StepBack key.Binding // [ — step time window earlier
 	StepFwd  key.Binding // ] — step time window later
 	Enter    key.Binding
@@ -81,6 +82,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("t"),
 			key.WithHelp("t", "range"),
 		),
+		Pivot: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "pivot"),
+		),
 		StepBack: key.NewBinding(
 			key.WithKeys("["),
 			key.WithHelp("[", "window ←"),
@@ -123,7 +128,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.View1, k.View2, k.View3, k.View4},
 		{k.NextPane, k.PrevPane, k.Up, k.Down, k.Left, k.Right},
 		{k.Enter, k.Back, k.Top, k.Bottom},
-		{k.Range, k.StepBack, k.StepFwd, k.Sort, k.Filter},
+		{k.Range, k.StepBack, k.StepFwd, k.Pivot, k.Sort, k.Filter},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }

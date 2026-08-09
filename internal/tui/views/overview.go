@@ -24,6 +24,7 @@ type OverviewData struct {
 	Cursor      int        // highlighted timeline bucket index (scrub crosshair)
 	Pinned      bool       // whether the scrub is pinned (crosshair renders only then)
 	Sys         []SysGauge // container CPU/mem/disk gauges (empty → strip omitted)
+	Mode        HeroMode   // which reading the hero renders (trend / leverage pivot)
 
 	// Render memoization (issue #4, 1f): Gen identifies the applied dataset and
 	// Memo caches the built hero chart + KPI sparklines across frames. A nil
@@ -246,45 +247,6 @@ func deltaChipStyle(c Ctx, dir int) lipgloss.Style {
 	default:
 		return c.Subtle
 	}
-}
-
-// heroPanel renders the hero time-series chart panel, degrading to a sparkline +
-// top-tool readout when there isn't room for a full axed chart.
-func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
-	style := c.panelStyle(focus).Width(w)
-	inner := w - 4
-	if inner < 4 {
-		inner = 4
-	}
-	title := c.titleChip("TREND", focus) + "  " + c.CompLegend()
-	if d.ScrubLabel != "" {
-		title += "  " + c.now().Render("◷ "+d.ScrubLabel)
-	}
-	chartH := h - 3 // title + border
-	if chartH < 1 {
-		chartH = 1
-	}
-	scrubIdx := -1
-	if d.Pinned {
-		scrubIdx = d.Cursor
-	}
-	body := heroBodyMemo(c, d, lay, inner, chartH, scrubIdx)
-	return style.Render(title + "\n" + body)
-}
-
-// heroBodyMemo routes the hero body through the shared render memo when the
-// root model wired one (d.Memo), falling back to a direct build otherwise. The
-// memo covers only the expensive full braille chart; the gate mirrors
-// heroBody's exactly (its w/h clamps are no-ops above the full-chart minimums),
-// and the degraded strip/empty panes stay direct — they are cheap.
-func heroBodyMemo(c Ctx, d OverviewData, lay Layout, w, h, scrubIdx int) string {
-	if d.Memo != nil && len(d.Timeline) > 0 &&
-		lay.ChartMode == ChartFull && w >= minChartW && h >= 5 {
-		if s, ok := d.Memo.chartBody(c, d.Gen, d.Timeline, d.TimelineDim, w, h, scrubIdx); ok {
-			return s
-		}
-	}
-	return heroBody(c, d.Timeline, d.TimelineDim, lay, w, h, scrubIdx)
 }
 
 // sidePanel renders the read-only by-tool composition bars over a four-component
