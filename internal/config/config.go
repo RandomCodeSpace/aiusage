@@ -62,6 +62,17 @@ type Pricing struct {
 	Overrides map[string]ModelRates `json:"overrides,omitempty"`
 }
 
+// Privacy configures what an install persists beyond the token counters.
+type Privacy struct {
+	// NoRaw drops the per-record audit payload entirely: no adapter's raw JSON
+	// is stored, in usage_events or in aggregate_state. Default false, which
+	// stores the usage-object-only payload (counters, model, message/request
+	// ids, timestamp, service tier, cache-creation split) — never message
+	// content. Existing rows are unaffected either way: usage_events is
+	// append-only, while aggregate_state rows shrink on their next snapshot.
+	NoRaw bool `json:"no_raw"`
+}
+
 // Config holds resolved runtime settings.
 type Config struct {
 	DBPath          string            `json:"db_path,omitempty"`
@@ -71,6 +82,7 @@ type Config struct {
 	IntervalSeconds int               `json:"interval_seconds,omitempty"`
 	SourceRoots     map[string]string `json:"source_roots,omitempty"`
 	Pricing         Pricing           `json:"pricing,omitzero"`
+	Privacy         Privacy           `json:"privacy,omitzero"`
 
 	// derived* track which path fields still hold values derived from Home
 	// rather than explicit overrides (config file, env, or flag). Only derived

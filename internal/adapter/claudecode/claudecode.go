@@ -480,7 +480,7 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		SourcePath:          path,
 		DedupKey:            dedupKey,
 		Kind:                model.KindUsage,
-		Raw:                 rawUsage(line),
+		Raw:                 auditPayload(&rl, msg),
 	}
 
 	return candidate{
@@ -522,14 +522,78 @@ func persistedKey(messageID, path string, line []byte) string {
 	return fmt.Sprintf("%s|%s|%x", model.ToolClaudeCode, path, sum)
 }
 
-// rawUsage extracts the usage object substring for audit, falling back to the
-// whole line. Best-effort; never fails the parse.
-func rawUsage(line []byte) string {
-	s := string(line)
-	if i := strings.Index(s, usageMarker); i >= 0 {
-		return s
+// auditLine is the ALLOW-LIST of transcript fields persisted in
+// UsageEvent.Raw: the token counters an audit of the stored accounting needs,
+// plus the identifiers that tie the row back to its provider request. It
+// deliberately mirrors the transcript's own nesting so an auditor can compare
+// it against the source line field for field.
+//
+// Everything else the line carries — message content, cwd, tool results, the
+// user's prompt — is never read into this shape, so it cannot reach the ledger
+// (issue #17). This is an allow-list on purpose: stripping known-bad keys from
+// the whole line would silently start leaking the day the transcript format
+// grows a new content field.
+type auditLine struct {
+	Timestamp string       `json:"timestamp,omitempty"`
+	RequestID string       `json:"requestId,omitempty"`
+	Message   auditMessage `json:"message"`
+}
+
+type auditMessage struct {
+	ID    string     `json:"id,omitempty"`
+	Model string     `json:"model,omitempty"`
+	Usage auditUsage `json:"usage"`
+}
+
+// auditUsage records the usage block as the transcript reported it: the counts
+// are the provider's, not the clamped values stored in the token columns, so a
+// mismatch between the two stays visible.
+type auditUsage struct {
+	InputTokens         *int64         `json:"input_tokens,omitempty"`
+	OutputTokens        *int64         `json:"output_tokens,omitempty"`
+	CacheCreationTokens *int64         `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadTokens     *int64         `json:"cache_read_input_tokens,omitempty"`
+	ServiceTier         string         `json:"service_tier,omitempty"`
+	Speed               string         `json:"speed,omitempty"`
+	CacheCreation       *cacheCreation `json:"cache_creation,omitempty"`
+}
+
+// auditPayload builds the stored audit payload from the decoded line. Values
+// are copied out of the typed decode, never sliced out of the original bytes.
+// Best-effort: an un-marshalable payload yields an empty raw rather than
+// failing the parse. msg and msg.Usage are non-nil by the time this runs.
+func auditPayload(rl *rawLine, msg *message) string {
+	u := msg.Usage
+	a := auditLine{
+		RequestID: rl.RequestID.Value,
+		Message: auditMessage{
+			ID:    msg.ID.Value,
+			Model: msg.Model.Value,
+			Usage: auditUsage{
+				InputTokens:   u.InputTokens,
+				OutputTokens:  u.OutputTokens,
+				ServiceTier:   string(u.ServiceTier),
+				Speed:         u.Speed.Value,
+				CacheCreation: u.CacheCreation,
+			},
+		},
 	}
-	return s
+	if rl.Timestamp != nil {
+		a.Timestamp = *rl.Timestamp
+	}
+	if u.CacheCreationTokens.Present {
+		v := u.CacheCreationTokens.Value
+		a.Message.Usage.CacheCreationTokens = &v
+	}
+	if u.CacheReadTokens.Present {
+		v := u.CacheReadTokens.Value
+		a.Message.Usage.CacheReadTokens = &v
+	}
+	b, err := json.Marshal(a)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func deref(p *int64) int64 {

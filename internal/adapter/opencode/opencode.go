@@ -29,8 +29,10 @@
 // first, so it wins on INSERT OR IGNORE).
 //
 // CRITICAL: strictly read-only. JSON files are opened O_RDONLY; the database is
-// opened with a read-only, immutable DSN (mode=ro&immutable=1). Nothing under
-// the agent's directories is created, locked, or modified.
+// opened with a read-only DSN (mode=ro plus query_only(1)) — never immutable=1,
+// because opencode writes this database live and keeps a large WAL an immutable
+// reader cannot see (see collectDB). Nothing under the agent's directories is
+// created, locked, or modified.
 package opencode
 
 import (
@@ -201,8 +203,19 @@ func kindOf(src adapter.Source) string {
 // columns are authoritative; the `data` JSON supplies tokens, model, timestamp
 // and project. A malformed or missing column never fails the whole source —
 // the row is skipped, but it also holds the watermark back so it is retried.
+// The DSN is mode=ro (no create/write/lock) plus query_only(1) (the connection
+// refuses any write statement) plus busy_timeout, matching the hermes adapter.
+// immutable=1 is deliberately NOT used: opencode holds this database open and
+// writes it live (three processes on the reference machine), journal_mode is
+// wal, and the WAL held 74.65 MiB of un-checkpointed pages the immutable reader
+// could not see — main-file mtime a full day behind the WAL. immutable=1 makes
+// SQLite skip locking, skip change detection and ignore the WAL entirely, so
+// the adapter reads the database as of its last checkpoint and is exposed to
+// SQLite's documented wrong-result and torn-read behaviour whenever opencode
+// writes mid-scan. None of that fails at open; it surfaces as silently stale
+// rows or SQLITE_CORRUPT at query time.
 func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
-	dsn := "file:" + src.Path + "?mode=ro&immutable=1&_pragma=busy_timeout(5000)"
+	dsn := "file:" + src.Path + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("opencode: open db %s: %w", src.Path, err)

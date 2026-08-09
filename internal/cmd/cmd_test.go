@@ -227,8 +227,8 @@ func TestLoadConfigHomeFlagMovesDerivedPaths(t *testing.T) {
 }
 
 // TestExportIncludeRaw runs `once` then `export`: the default export must omit
-// the Raw payload (it holds the full transcript line for claude-code), and
-// --include-raw must restore it under the historical "Raw" key.
+// the Raw payload (the usage-object audit blob), and --include-raw must restore
+// it under the historical "Raw" key.
 func TestExportIncludeRaw(t *testing.T) {
 	home := writeClaudeFixture(t)
 	db := filepath.Join(t.TempDir(), "usage.db")
@@ -255,6 +255,81 @@ func TestExportIncludeRaw(t *testing.T) {
 	}
 	if !strings.Contains(out, `"Raw"`) || !strings.Contains(out, "input_tokens") {
 		t.Errorf("--include-raw export is missing the raw payload:\n%s", out)
+	}
+}
+
+// TestNoRawConfigStoresNoPayload runs the whole CLI path with
+// privacy.no_raw set and asserts the stored events carry no audit payload:
+// config -> cmd -> collect -> adapter, the wiring the switch depends on.
+func TestNoRawConfigStoresNoPayload(t *testing.T) {
+	home := writeClaudeFixture(t)
+	db := filepath.Join(t.TempDir(), "usage.db")
+	isolateState(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	body := `{"pricing":{"refresh":false},"privacy":{"no_raw":true}}`
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := runCmd(t, "--db", db, "--home", home, "--config", cfg, "once"); err != nil {
+		t.Fatalf("once failed: %v", err)
+	}
+
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	evs, err := st.ListEvents(t.Context(), store.Filter{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Fatal("no events stored; the fixture should have produced one")
+	}
+	for _, e := range evs {
+		if e.Raw != "" {
+			t.Errorf("event %q stored raw %q, want empty under privacy.no_raw", e.DedupKey, e.Raw)
+		}
+	}
+}
+
+// TestDefaultRawIsUsageObjectOnly is the end-to-end counterpart: with the
+// default config the stored payload is the usage sub-object, never the cwd the
+// transcript line carries.
+func TestDefaultRawIsUsageObjectOnly(t *testing.T) {
+	home := writeClaudeFixture(t)
+	db := filepath.Join(t.TempDir(), "usage.db")
+	isolateState(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	if _, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t), "once"); err != nil {
+		t.Fatalf("once failed: %v", err)
+	}
+
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	evs, err := st.ListEvents(t.Context(), store.Filter{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Fatal("no events stored; the fixture should have produced one")
+	}
+	for _, e := range evs {
+		if !strings.Contains(e.Raw, `"input_tokens":100`) {
+			t.Errorf("stored raw is missing the usage block: %q", e.Raw)
+		}
+		if strings.Contains(e.Raw, "/home/dev/projects/demo") {
+			t.Errorf("stored raw leaked the transcript cwd: %q", e.Raw)
+		}
 	}
 }
 
@@ -336,6 +411,40 @@ func TestOncePartialFailureExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(out, "source unreadable") {
 		t.Fatalf("partial-failure errors not visible in output:\n%s", out)
+	}
+}
+
+// TestDoctorReportsAbsentSourceAndEnablement runs doctor against an empty home
+// so every adapter discovers nothing. A count of zero would read as "you used
+// nothing", so the absent state must be stated in words, and the opt-in tool
+// (Copilot, issue #28) must get the checklist that turns its telemetry on.
+func TestDoctorReportsAbsentSourceAndEnablement(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "usage.db")
+
+	// Neutralise ambient env that would hand an adapter a real source.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("COPILOT_OTEL_FILE_EXPORTER_PATH", "")
+	t.Setenv("OPENCODE_DATA_DIR", "")
+
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t),
+		"--no-daemon", "doctor")
+	if err != nil {
+		t.Fatalf("doctor failed: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, absentStatus) {
+		t.Errorf("doctor rendered a zero count instead of %q:\n%s", absentStatus, out)
+	}
+	for _, want := range []string{
+		"export COPILOT_OTEL_ENABLED=true",
+		"export COPILOT_OTEL_EXPORTER_TYPE=file",
+		`export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"`,
+		"Do NOT set OTEL_EXPORTER_OTLP_ENDPOINT",
+		"Not retroactive",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("enablement checklist missing %q:\n%s", want, out)
+		}
 	}
 }
 

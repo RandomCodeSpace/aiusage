@@ -377,8 +377,9 @@ func toCandidate(rec *otelRecord, index int, fallbackTS time.Time, traceModels, 
 	// codex and gemini already follow.
 	//
 	// UNVERIFIED: no local Copilot OTEL data exists to check the reasoning rule
-	// per backing provider (issue #28). model.ReasoningModeFor treats Copilot
-	// reasoning as additive on best evidence; revisit both together.
+	// per backing provider (issue #28). model.ReasoningModeFor now agrees with
+	// this handling and treats Copilot reasoning as a subset of output, so the
+	// attribute is never billed twice; revisit both together.
 	total := totalAttr
 	if total <= 0 {
 		total = input + output + cacheCreation + cacheRead + reasoning

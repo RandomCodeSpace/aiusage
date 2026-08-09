@@ -23,6 +23,7 @@ type DaemonOptions struct {
 	Version  string        // build identity recorded for CLI/daemon version sync
 	Logger   *log.Logger   // optional; defaults to log.Default()
 	Pricer   Pricer        // optional; stamps cost on every new event
+	NoRaw    bool          // config privacy.no_raw: store no audit payloads
 }
 
 // minInterval guards against a pathological tight loop if a caller passes a
@@ -65,10 +66,15 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc ad
 
 	logger.Printf("aiusage daemon started: pid=%d interval=%s pidfile=%s", os.Getpid(), interval, opt.PIDPath)
 
+	cycleOpts := []Option{WithPricer(opt.Pricer)}
+	if opt.NoRaw {
+		cycleOpts = append(cycleOpts, WithoutRaw())
+	}
+
 	runOne := func() {
 		// Cancellation is observed inside RunCycle; an aborted cycle returns the
 		// ctx error which we log without treating it as a fatal collection fault.
-		stats, err := RunCycle(ctx, reg, st, dc, WithPricer(opt.Pricer))
+		stats, err := RunCycle(ctx, reg, st, dc, cycleOpts...)
 		if err != nil && ctx.Err() == nil {
 			logger.Printf("cycle error: %v", err)
 		}

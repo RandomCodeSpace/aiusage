@@ -73,17 +73,19 @@ const (
 //     adapter keeps it out of the authoritative total, which only holds if the
 //     count is already inside output_tokens.
 //   - copilot: the OTEL export reports gen_ai.usage.reasoning.output_tokens as
-//     a distinct attribute. Note that Copilot proxies several vendors and for
-//     Anthropic-backed models reasoning is inside output, so this default
-//     over-bills those models until the rule is verified per provider.
+//     a distinct attribute, but Copilot proxies several vendors and the adapter's
+//     own total handling already asserts that reasoning sits inside output_tokens
+//     for Anthropic-backed models. Subset resolves that contradiction in the
+//     conservative direction: it can only ever under-bill, never charge the same
+//     token twice. Revisit per backing provider once real telemetry exists.
 var reasoningModes = map[string]ReasoningMode{
 	ToolClaudeCode: ReasoningSubset,
 	ToolCodex:      ReasoningSubset,
 	ToolOpenCode:   ReasoningAdditive,
 	ToolGemini:     ReasoningAdditive,
 	ToolAgy:        ReasoningAdditive,
-	ToolHermes:     ReasoningSubset,   // unverified
-	ToolCopilot:    ReasoningAdditive, // unverified
+	ToolHermes:     ReasoningSubset, // unverified
+	ToolCopilot:    ReasoningSubset, // unverified
 }
 
 // ReasoningModeFor returns the reasoning billing mode for a tool id. An unknown
@@ -162,9 +164,13 @@ type UsageEvent struct {
 	SourcePath string // file/db the record came from
 	DedupKey   string // globally-unique stable key; inserts conflict-skip on this
 	Kind       EventKind
-	// Raw is the raw provider usage payload (optional, for audit). It can carry
-	// full transcript content, so it is never marshalled by default; export
-	// restores it only behind the explicit --include-raw flag.
+	// Raw is the provider usage payload kept for audit (optional). Adapters
+	// build it from an explicit allow-list of usage/model/identity fields, so
+	// it never carries message content; config privacy.no_raw drops it
+	// entirely. It is NOT a backfill source — the schema columns carry
+	// everything cost and reporting need — and it is never marshalled by
+	// default: export restores it only behind --include-raw, since rows
+	// appended before the allow-list landed still hold whole transcript lines.
 	Raw string `json:"-"`
 }
 

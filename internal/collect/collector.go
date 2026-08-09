@@ -44,12 +44,23 @@ type Option func(*cycleOptions)
 
 type cycleOptions struct {
 	pricer Pricer
+	noRaw  bool
 }
 
 // WithPricer stamps a cost on every new event from the price table in effect at
 // ingest. Without it (the default) events are stored unpriced.
 func WithPricer(p Pricer) Option {
 	return func(o *cycleOptions) { o.pricer = p }
+}
+
+// WithoutRaw drops every adapter's raw audit payload before it reaches the
+// store (config privacy.no_raw). The collector is the choke point every
+// adapter's output passes through, so the switch holds for adapters that never
+// learn about it — including ones added later — and covers both raw columns:
+// usage_events.raw via the events, aggregate_state.raw and the synthetic delta
+// event via the snapshots.
+func WithoutRaw() Option {
+	return func(o *cycleOptions) { o.noRaw = true }
 }
 
 // CycleStats reports the outcome of a single RunCycle.
@@ -117,6 +128,11 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				// Best-effort: a bad source must not abort the cycle. Still
 				// process whatever observations were returned.
 			}
+			// Before anything is stamped or stored, and regardless of the error
+			// above — a partially-collected observation is persisted too.
+			if o.noRaw {
+				stripRaw(&obs)
+			}
 
 			// The checkpoint rides the events transaction unless snapshots
 			// exist — then it rides the last snapshot's transaction instead,
@@ -169,6 +185,21 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 	}
 
 	return stats, nil
+}
+
+// stripRaw clears every audit payload an observation carries. Snapshots are
+// cleared before the baseline comparison in storeSnapshot, so a cell whose
+// stored state still holds a payload from before the switch counts as changed
+// once and is rewritten without it — aggregate_state is mutable, so the switch
+// is retroactive there. usage_events is not: rows already appended keep what
+// they were written with.
+func stripRaw(obs *adapter.Observation) {
+	for i := range obs.Events {
+		obs.Events[i].Raw = ""
+	}
+	for i := range obs.Snapshots {
+		obs.Snapshots[i].Raw = ""
+	}
 }
 
 // collectSource reads one source, going through the incremental path when the

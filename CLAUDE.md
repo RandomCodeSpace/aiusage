@@ -15,10 +15,22 @@ kind='adjustment'. aggregate_state and source_checkpoints are the only mutable
 data tables (schema_meta holds the mutable version stamp) — working state, not
 history.
 
-**Raw columns are frozen.** Retention for usage_events.raw /
-aggregate_state.raw is undecided (issue #17: privacy vs audit vs size). Leave
-everything about them — what is stored, read, or dropped — exactly as is until
-that ticket closes.
+**Raw is usage-object-only** (issue #17, resolved). Every adapter EXCEPT
+copilot builds usage_events.raw / aggregate_state.raw from an explicit
+ALLOW-LIST of usage/model/identity fields — never by stripping content out of
+a whole record, which rots the moment the provider adds a field. Copilot is
+the open exception, tracked separately: rawAttrs in
+internal/adapter/copilot/copilot.go marshals the WHOLE OTEL span attribute
+map, so an exporter configured to capture GenAI message content puts prompt
+and completion text straight into raw. #17's per-adapter policy never named
+copilot; do not read "every adapter" as covering it. Raw is an audit
+payload, never a backfill source: the schema columns carry everything cost and
+reporting need. `privacy.no_raw` drops it everywhere; the collector enforces
+that centrally (collect.WithoutRaw), so adapters stay unaware of it. Rows
+already in usage_events are never rewritten — history predating the allow-list
+still holds whole transcript lines, which is why export gates raw behind
+--include-raw. aggregate_state is mutable, so its rows shrink on the next
+snapshot cycle.
 
 **Adapters are strictly observational.** They read files/DBs the agent CLIs
 have already produced, nothing more: no writes, no write locks, no rotation.

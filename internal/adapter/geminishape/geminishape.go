@@ -117,6 +117,12 @@ type tokenBlock struct {
 
 // rawRecord is a single decoded telemetry record. A $set wrapper (used by some
 // Gemini sinks) is unwrapped before decoding into this shape.
+//
+// The decoded fields double as the ALLOW-LIST persisted in
+// AggregateSnapshot.Raw (see auditJSON): the audit payload is re-marshalled
+// from them rather than kept as the original bytes, so nothing the record
+// carries outside this shape — prompt or response text in particular — can
+// reach the ledger (issue #17).
 type rawRecord struct {
 	ID        string     `json:"id"`
 	Model     string     `json:"model"`
@@ -124,7 +130,17 @@ type rawRecord struct {
 	SessionID string     `json:"sessionId"`
 	Timestamp string     `json:"timestamp"`
 	Tokens    tokenBlock `json:"tokens"`
-	raw       string     // original JSON for audit
+}
+
+// auditJSON renders the record's allow-listed fields as the stored audit
+// payload. Best-effort: an un-marshalable record yields an empty raw rather
+// than dropping the snapshot.
+func (r rawRecord) auditJSON() string {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // total returns the record's reported provider total when present, else the
@@ -245,16 +261,11 @@ func decodeObject(data []byte) []rawRecord {
 	// Best-effort messages[] blob: collect any messages carrying tokens.
 	var mb messagesBlob
 	if err := json.Unmarshal(data, &mb); err == nil && len(mb.Messages) > 0 {
-		var out []rawRecord
-		for _, m := range mb.Messages {
-			m.raw = "" // per-message raw is the parent blob; omit to keep small
-			out = append(out, m)
-		}
+		out := append([]rawRecord(nil), mb.Messages...)
 		// A messages blob may ALSO carry top-level tokens (a stats summary);
 		// include it too so a summary line is not lost.
 		var top rawRecord
 		if err := json.Unmarshal(data, &top); err == nil && top.Tokens != (tokenBlock{}) {
-			top.raw = string(data)
 			out = append(out, top)
 		}
 		return out
@@ -264,7 +275,6 @@ func decodeObject(data []byte) []rawRecord {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil
 	}
-	r.raw = string(data)
 	return []rawRecord{r}
 }
 
@@ -328,7 +338,7 @@ func (s Shape) toSnapshot(r rawRecord, sourcePath string, now time.Time) (model.
 		ReasoningTokens:     thoughts,
 		TotalTokens:         total,
 		SourcePath:          sourcePath,
-		Raw:                 r.raw,
+		Raw:                 r.auditJSON(),
 	}, true
 }
 

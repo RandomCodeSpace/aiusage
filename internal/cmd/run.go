@@ -42,7 +42,18 @@ func daemonOptions(cfg config.Config) collect.DaemonOptions {
 		PIDPath:  cfg.PIDPath,
 		Version:  buildinfo.Identity(),
 		Pricer:   newPricer(cfg),
+		NoRaw:    cfg.Privacy.NoRaw,
 	}
+}
+
+// cycleOptions builds the RunCycle options for cfg, so a one-shot cycle honours
+// exactly the same pricing and privacy settings the daemon does.
+func cycleOptions(cfg config.Config) []collect.Option {
+	opts := []collect.Option{collect.WithPricer(newPricer(cfg))}
+	if cfg.Privacy.NoRaw {
+		opts = append(opts, collect.WithoutRaw())
+	}
+	return opts
 }
 
 // newRunCmd builds the `run` command: the foreground collection daemon.

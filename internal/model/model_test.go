@@ -11,10 +11,14 @@ func TestReasoningModeForCoversEveryTool(t *testing.T) {
 		ToolClaudeCode: ReasoningSubset,
 		ToolCodex:      ReasoningSubset,
 		ToolHermes:     ReasoningSubset,
-		ToolOpenCode:   ReasoningAdditive,
-		ToolGemini:     ReasoningAdditive,
-		ToolAgy:        ReasoningAdditive,
-		ToolCopilot:    ReasoningAdditive,
+		// copilot: reasoning is billed as a subset of output (issue #28). The
+		// adapter's total handling already assumes reasoning sits inside
+		// output_tokens for Anthropic-backed models, and subset can only
+		// under-bill, never charge the same token twice.
+		ToolCopilot:  ReasoningSubset,
+		ToolOpenCode: ReasoningAdditive,
+		ToolGemini:   ReasoningAdditive,
+		ToolAgy:      ReasoningAdditive,
 	}
 	for tool, mode := range want {
 		if got := ReasoningModeFor(tool); got != mode {

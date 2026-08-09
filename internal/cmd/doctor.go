@@ -23,6 +23,35 @@ var adapterNotes = map[string]string{
 		"adapter is Gemini-shaped and returns empty until data appears.",
 }
 
+// absentStatus is the wording for an adapter that is wired in but located
+// nothing to read. Reporting a count of zero there reads as "you used nothing";
+// the honest statement is that the data source itself does not exist yet. The
+// rule is generic: any adapter whose discovery succeeds with no sources gets it.
+const absentStatus = "configured, no data source"
+
+// enablementGuides carry the steps that turn a tool's local telemetry on,
+// printed only for a tool in the absent state. Keyed by tool id so any adapter
+// can supply one; Copilot is the only source that is opt-in today (issue #28).
+var enablementGuides = map[string][]string{
+	model.ToolCopilot: {
+		"Copilot CLI records token usage only through its OpenTelemetry file",
+		"exporter, which is off by default. To enable it:",
+		"",
+		`  mkdir -p "$HOME/.copilot/otel"`,
+		"  export COPILOT_OTEL_ENABLED=true",
+		"  export COPILOT_OTEL_EXPORTER_TYPE=file",
+		`  export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"`,
+		"",
+		"- Put the exports in your shell profile so every session emits.",
+		"- Leave content capture (OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
+		"  / COPILOT_OTEL_CAPTURE_CONTENT) at its false default: token counts",
+		"  arrive without it.",
+		"- Do NOT set OTEL_EXPORTER_OTLP_ENDPOINT. It auto-enables OpenTelemetry",
+		"  but ships to a collector instead of to disk.",
+		"- Not retroactive: only sessions run after enabling emit anything.",
+	},
+}
+
 // newDoctorCmd builds the `doctor` command: configuration, database and adapter
 // discovery diagnostics, plus notes for opt-in/empty adapters.
 func newDoctorCmd() *cobra.Command {
@@ -127,7 +156,9 @@ func printDBStats(out io.Writer, s store.DBStats) {
 }
 
 // printAdapterDiscovery runs each adapter's read-only discovery and prints how
-// many sources it located, with notes for opt-in/empty adapters.
+// many sources it located, with notes for opt-in/empty adapters. An adapter that
+// discovers nothing reports the absent state rather than a zero count, and gets
+// its enablement checklist when one exists.
 func printAdapterDiscovery(c *cobra.Command, cfg config.Config) {
 	out := c.OutOrStdout()
 	ctx := cmdContext(c)
@@ -137,13 +168,39 @@ func printAdapterDiscovery(c *cobra.Command, cfg config.Config) {
 	fmt.Fprintln(out, strings.Repeat("-", 17))
 	for _, ad := range defaultRegistry().All() {
 		srcs, err := ad.Discover(ctx, dc)
+		absent := err == nil && len(srcs) == 0
 		status := fmt.Sprintf("%d source(s)", len(srcs))
-		if err != nil {
+		switch {
+		case err != nil:
 			status = fmt.Sprintf("%d source(s), error: %v", len(srcs), err)
+		case absent:
+			status = absentStatus
 		}
 		fmt.Fprintf(out, "%-12s %s\n", ad.ID(), status)
 		if note, ok := adapterNotes[ad.ID()]; ok {
 			fmt.Fprintf(out, "             note: %s\n", note)
 		}
+		if absent {
+			printEnablementGuide(out, ad.ID())
+		}
 	}
+}
+
+// printEnablementGuide prints a tool's opt-in checklist, indented under its
+// discovery line. Tools without a guide print nothing. Lines are written
+// verbatim (never as a format string) so shell snippets keep their % verbs.
+func printEnablementGuide(out io.Writer, tool string) {
+	lines, ok := enablementGuides[tool]
+	if !ok {
+		return
+	}
+	fmt.Fprintln(out)
+	for _, ln := range lines {
+		if ln == "" {
+			fmt.Fprintln(out)
+			continue
+		}
+		fmt.Fprintln(out, "    "+ln)
+	}
+	fmt.Fprintln(out)
 }

@@ -399,6 +399,65 @@ func TestDiscoverNoDirIsClean(t *testing.T) {
 	}
 }
 
+// TestReadsUncheckpointedWAL is the regression for issue #18. opencode keeps
+// its database open and writes it live under journal_mode=wal, so committed
+// rows can sit in the -wal file indefinitely (74.65 MiB of them on the machine
+// that motivated the fix). immutable=1 makes SQLite ignore the WAL and read the
+// main file as of its last checkpoint, so those rows silently vanish; the
+// mode=ro + query_only DSN reads them. The writer stays open on purpose:
+// closing it would checkpoint the WAL and the assertion would hold either way.
+func TestReadsUncheckpointedWAL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "opencode.db")
+
+	writer, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(wal)")
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+
+	var mode string
+	if err := writer.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Fatalf("journal_mode = %q, want wal", mode)
+	}
+	if _, err := writer.Exec(`CREATE TABLE message (id TEXT, session_id TEXT, data TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	data := `{"id":"wal1","sessionID":"s","modelID":"gpt-5","tokens":{"input":5,"output":6,"total":11}}`
+	if _, err := writer.Exec(`INSERT INTO message VALUES ('wal1','s',?)`, data); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// The row must still live in the WAL, not the main file, or this test
+	// proves nothing.
+	fi, err := os.Stat(path + "-wal")
+	if err != nil || fi.Size() == 0 {
+		t.Fatalf("no un-checkpointed WAL content (stat err %v); test cannot detect a stale read", err)
+	}
+
+	src := adapter.Source{
+		Tool: model.ToolOpenCode, Class: model.EventLevel,
+		Path: path, Meta: map[string]string{"kind": kindDB},
+	}
+	obs, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
+	if err != nil {
+		t.Fatalf("CollectIncremental: %v", err)
+	}
+	if len(obs.Events) != 1 {
+		t.Fatalf("read %d events, want 1: rows committed to the WAL are invisible", len(obs.Events))
+	}
+	if obs.Events[0].DedupKey != "opencode|wal1" {
+		t.Fatalf("DedupKey = %q, want opencode|wal1", obs.Events[0].DedupKey)
+	}
+	if obs.Events[0].TotalTokens != 11 {
+		t.Fatalf("TotalTokens = %d, want 11", obs.Events[0].TotalTokens)
+	}
+}
+
 // TestIncrementalWatermark: only message rows above the stored rowid watermark
 // are read on re-collect; an unchanged table yields no events and no new
 // checkpoint.
