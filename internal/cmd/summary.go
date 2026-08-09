@@ -26,7 +26,7 @@ func newSummaryCmd() *cobra.Command {
 		Use:   "summary",
 		Short: "Summarise stored usage over a time range",
 		Long: "summary aggregates stored usage between --since and --until, grouped by " +
-			"the --by dimensions (comma-separated: day,tool,model,project,session,...). " +
+			"the --by dimensions (comma-separated: day,tool,model,provider,project,session,...). " +
 			"Renders an aligned table by default, or --json for the summary object. " +
 			"(--csv exports the matching raw events.)",
 		Args: cobra.NoArgs,

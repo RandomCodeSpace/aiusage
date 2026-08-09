@@ -68,7 +68,7 @@ func parseSpan(s string) (time.Duration, bool) {
 // store.Filter.GroupBy.
 var validDims = map[string]bool{
 	"hour": true, "day": true, "week": true, "month": true,
-	"tool": true, "model": true, "project": true, "session": true,
+	"tool": true, "model": true, "provider": true, "project": true, "session": true,
 }
 
 // parseBy splits a comma-separated --by value into validated grouping
@@ -86,7 +86,7 @@ func parseBy(s string) ([]string, error) {
 			continue
 		}
 		if !validDims[d] {
-			return nil, fmt.Errorf("invalid --by dimension %q: want hour,day,week,month,tool,model,project,session", d)
+			return nil, fmt.Errorf("invalid --by dimension %q: want hour,day,week,month,tool,model,provider,project,session", d)
 		}
 		dims = append(dims, d)
 	}

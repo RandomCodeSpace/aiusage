@@ -156,13 +156,30 @@ func keyColumns(sum *store.Summary) []string {
 	return nil
 }
 
+// unknownLabel is what a human-facing surface prints for a grouping value the
+// ledger stores as the empty string. Provider is the only such dimension: an
+// adapter whose source never names the billing provider leaves it empty, and a
+// blank cell mid-table reads as a rendering fault rather than as the honest
+// "not known". The stored value is never rewritten; the CSV export still emits
+// the raw empty field (see eventRecord), because an export mirrors the ledger.
+const unknownLabel = "unknown"
+
+// displayKey renders one grouping value for a human-facing surface (the table
+// and the JSON summary). Every other dimension passes through untouched.
+func displayKey(dim, val string) string {
+	if dim == "provider" && val == "" {
+		return unknownLabel
+	}
+	return val
+}
+
 // bucketRow renders one bucket into ordered string cells: key values then the
 // humanised metric columns. mark is the reasoning marker for the row (empty
 // outside a breakdown, or when the row reports no reasoning tokens).
 func bucketRow(b store.Bucket, keyCols []string, breakdown bool, mark string) []string {
 	row := make([]string, 0, len(keyCols)+7)
 	for _, k := range keyCols {
-		row = append(row, b.Keys[k])
+		row = append(row, displayKey(k, b.Keys[k]))
 	}
 	if breakdown {
 		return append(row,

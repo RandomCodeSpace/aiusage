@@ -47,7 +47,9 @@ func buildWhere(f Filter) (string, []any) {
 // dimensions are formatted in the local timezone (via 'localtime') so day/hour
 // buckets match the wall clock, and use lexically-sortable layouts so callers
 // can order buckets by the string value. Categorical dimensions select the raw
-// column. The result is also used verbatim in GROUP BY / ORDER BY.
+// column, including the empty string an unknown provider stores: display
+// surfaces label that for themselves, so the ledger keeps saying exactly what
+// it holds. The result is also used verbatim in GROUP BY / ORDER BY.
 func groupExpr(dim string) (string, error) {
 	switch dim {
 	case "hour":
@@ -63,6 +65,8 @@ func groupExpr(dim string) (string, error) {
 		return "tool", nil
 	case "model":
 		return "model", nil
+	case "provider":
+		return "provider", nil
 	case "project":
 		return "project", nil
 	case "session":

@@ -36,6 +36,9 @@ var csvHeader = []string{
 	"source_path",
 	"kind",
 	// v3 columns, appended so existing consumers keep their positions.
+	// provider is the raw stored value and stays empty when the source never
+	// named one: the table and the JSON summary label that "unknown", an
+	// export does not relabel the ledger.
 	// cost_micro_usd is the exact stored integer (millionths of USD) and
 	// cost_usd the same value as a decimal string; BOTH are empty for an
 	// unpriced event, never "0" — export mirrors the ledger, so it does not
@@ -123,12 +126,30 @@ func bucketCost(costs *Costs, i int, b store.Bucket) Cost {
 }
 
 func bucketPayload(b store.Bucket, c Cost) bucketJSON {
+	// JSON is a display surface, so it labels an unknown provider exactly as
+	// the table does. The keys are copied rather than edited in place: the same
+	// summary feeds the cost fold-back, which matches buckets on the STORED
+	// values.
+	b.Keys = displayKeys(b.Keys)
 	return bucketJSON{
 		Bucket:              b,
 		DisplayCostMicroUSD: c.MicroUSD,
 		CostApproximate:     c.Approximate,
 		CostKnown:           c.Known,
 	}
+}
+
+// displayKeys copies a bucket's grouping keys with the display rules applied.
+// A nil map stays nil so an ungrouped bucket keeps emitting a JSON null.
+func displayKeys(keys map[string]string) map[string]string {
+	if keys == nil {
+		return nil
+	}
+	out := make(map[string]string, len(keys))
+	for dim, val := range keys {
+		out[dim] = displayKey(dim, val)
+	}
+	return out
 }
 
 // WriteEventsJSON writes a slice of usage events as indented JSON. Raw is

@@ -23,7 +23,9 @@ type Filter struct {
 	Sessions []string // restrict to these sessions (empty = all)
 
 	// GroupBy lists grouping dimensions, applied in order. Valid values:
-	// "hour","day","week","month","tool","model","project","session".
+	// "hour","day","week","month","tool","model","provider","project",
+	// "session". A provider bucket keyed by the empty string is the one
+	// holding the rows whose source never named a billing provider.
 	// Empty means a single grand-total bucket.
 	GroupBy []string
 }
