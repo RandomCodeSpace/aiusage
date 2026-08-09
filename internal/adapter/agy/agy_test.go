@@ -1,9 +1,12 @@
 package agy
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
@@ -154,5 +157,69 @@ func TestDiscoverResolvesSymlinkedRoot(t *testing.T) {
 	}
 	if want := filepath.Join(resolved, "s.jsonl"); srcs[0].Path != want {
 		t.Errorf("Path = %q, want resolved %q", srcs[0].Path, want)
+	}
+}
+
+// TestScanAbortWithholdsCheckpoint: a JSONL line exceeding the scanner buffer
+// aborts the scan mid-file. The records read so far are still returned
+// (best-effort), but the checkpoint must NOT advance — advancing it would skip
+// the unread remainder until the next size/mtime change, a permanent data loss.
+func TestScanAbortWithholdsCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.jsonl")
+	good := `{"id":"t1","model":"m","tokens":{"input":10,"output":5}}` + "\n"
+	// One line larger than the 8 MiB scanner cap, then a record that the
+	// aborted scan never reaches.
+	huge := `{"id":"big","pad":"` + strings.Repeat("x", 9<<20) + `"}` + "\n"
+	tail := `{"id":"t2","model":"m","tokens":{"input":1,"output":1}}` + "\n"
+	if err := os.WriteFile(path, []byte(good+huge+tail), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolAgy, Class: model.Aggregate, Path: path}
+	obs, err := a.CollectIncremental(context.Background(), src, nil)
+	if err == nil {
+		t.Fatal("scan abort must surface a non-fatal error")
+	}
+	if len(obs.Snapshots) != 1 {
+		t.Fatalf("want the 1 snapshot read before the abort, got %d", len(obs.Snapshots))
+	}
+	if obs.Checkpoint != nil {
+		t.Fatalf("checkpoint advanced past an incomplete read: %+v", obs.Checkpoint)
+	}
+}
+
+// TestScanAbortAlsoReportsSkippedCount: when unparseable lines and a scan abort
+// land in the same read, ONE error reports both — the skip count is not dropped
+// in favour of the partial-read error, and the wrapped scanner error stays
+// inspectable.
+func TestScanAbortAlsoReportsSkippedCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.jsonl")
+	good := `{"id":"t1","model":"m","tokens":{"input":10,"output":5}}` + "\n"
+	bad := "not json at all\n"
+	huge := `{"id":"big","pad":"` + strings.Repeat("x", 9<<20) + `"}` + "\n"
+	if err := os.WriteFile(path, []byte(good+bad+huge), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolAgy, Class: model.Aggregate, Path: path}
+	obs, err := a.CollectIncremental(context.Background(), src, nil)
+	if err == nil {
+		t.Fatal("want an error reporting both the partial read and the skipped line")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("error must still wrap the scanner error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "partial read") {
+		t.Errorf("error must report the partial read: %v", err)
+	}
+	if !strings.Contains(err.Error(), "1 unparseable record(s) skipped") {
+		t.Errorf("error must report the skipped count: %v", err)
+	}
+	if obs.Checkpoint != nil {
+		t.Fatalf("checkpoint advanced past an incomplete read: %+v", obs.Checkpoint)
 	}
 }

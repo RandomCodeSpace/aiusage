@@ -1,7 +1,9 @@
 package gemini
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,6 +310,40 @@ func TestScanAbortWithholdsCheckpoint(t *testing.T) {
 	}
 	if len(obs.Snapshots) != 1 {
 		t.Fatalf("want the 1 snapshot read before the abort, got %d", len(obs.Snapshots))
+	}
+	if obs.Checkpoint != nil {
+		t.Fatalf("checkpoint advanced past an incomplete read: %+v", obs.Checkpoint)
+	}
+}
+
+// TestScanAbortAlsoReportsSkippedCount: when unparseable lines and a scan abort
+// land in the same read, ONE error reports both — the skip count is not dropped
+// in favour of the partial-read error, and the wrapped scanner error stays
+// inspectable.
+func TestScanAbortAlsoReportsSkippedCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.jsonl")
+	good := `{"id":"t1","model":"m","tokens":{"input":10,"output":5}}` + "\n"
+	bad := "not json at all\n"
+	huge := `{"id":"big","pad":"` + strings.Repeat("x", 9<<20) + `"}` + "\n"
+	if err := os.WriteFile(path, []byte(good+bad+huge), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: toolID, Class: model.Aggregate, Path: path}
+	obs, err := a.CollectIncremental(context.Background(), src, nil)
+	if err == nil {
+		t.Fatal("want an error reporting both the partial read and the skipped line")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("error must still wrap the scanner error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "partial read") {
+		t.Errorf("error must report the partial read: %v", err)
+	}
+	if !strings.Contains(err.Error(), "1 unparseable record(s) skipped") {
+		t.Errorf("error must report the skipped count: %v", err)
 	}
 	if obs.Checkpoint != nil {
 		t.Fatalf("checkpoint advanced past an incomplete read: %+v", obs.Checkpoint)

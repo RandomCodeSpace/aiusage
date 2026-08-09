@@ -162,6 +162,10 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		}
 	}
 	switch {
+	case res.ScanErr != nil && res.Skipped > 0:
+		// Both happened in this read: report them together rather than dropping
+		// the skip count, which the partial-read error alone would hide.
+		return obs, fmt.Errorf("agy: partial read of %s (%d unparseable record(s) skipped): %w", src.Path, res.Skipped, res.ScanErr)
 	case res.ScanErr != nil:
 		return obs, fmt.Errorf("agy: partial read of %s: %w", src.Path, res.ScanErr)
 	case res.Skipped > 0:
