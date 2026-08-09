@@ -22,9 +22,10 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// schemaVersion is the logical version recorded in schema_meta and reported by
-// doctor. Bump when the schema changes in a way that needs a migration.
-const schemaVersion = 1
+// SchemaVersion is the schema version this binary creates fresh databases at
+// and can open. Bump when the schema changes, keep schema.sql describing the
+// full latest schema, and add the matching step to migrations (migrate.go).
+const SchemaVersion = 1
 
 // SQLite is the concrete append-only store backed by modernc.org/sqlite.
 type SQLite struct {
@@ -34,10 +35,12 @@ type SQLite struct {
 
 var _ Store = (*SQLite)(nil)
 
-// Open opens (creating if absent) the database at path, applies the schema and
-// pragmas (WAL, busy_timeout=5000), and records the schema version. The handle
-// is read/write because the collector appends to it; all reporting paths only
-// issue SELECTs.
+// Open opens (creating if absent) the database at path with WAL and
+// busy_timeout=5000 pragmas, then reads the recorded schema version before
+// touching anything: same version opens as-is, older versions run the ordered
+// migrations (migrate.go), and a newer version is refused so an older binary
+// can never stamp it backwards. The handle is read/write because the collector
+// appends to it; all reporting paths only issue SELECTs.
 func Open(path string) (*SQLite, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store: empty database path")
@@ -47,24 +50,16 @@ func Open(path string) (*SQLite, error) {
 	}
 
 	// modernc driver name is "sqlite". Pragmas applied via the DSN run on every
-	// pooled connection; the schema is applied once below.
+	// pooled connection; the schema is managed once by ensureSchema below.
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := ensureSchema(context.Background(), db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("store: apply schema: %w", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)
-		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		fmt.Sprintf("%d", schemaVersion),
-	); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("store: record schema version: %w", err)
+		return nil, err
 	}
 
 	return &SQLite{db: db, path: path}, nil
@@ -420,7 +415,7 @@ func (s *SQLite) distinctModels(ctx context.Context, tool string) ([]string, err
 
 // Stats returns whole-database diagnostics for the `doctor` command.
 func (s *SQLite) Stats(ctx context.Context) (DBStats, error) {
-	st := DBStats{Path: s.path, SchemaVersion: schemaVersion}
+	st := DBStats{Path: s.path, SchemaVersion: SchemaVersion}
 
 	var (
 		earliest, latest sql.NullInt64
@@ -445,7 +440,7 @@ func (s *SQLite) Stats(ctx context.Context) (DBStats, error) {
 		return DBStats{}, fmt.Errorf("store: snapshot count: %w", err)
 	}
 
-	if v, err := s.readSchemaVersion(ctx); err == nil && v > 0 {
+	if v, err := readSchemaVersion(ctx, s.db); err == nil && v > 0 {
 		st.SchemaVersion = v
 	}
 
@@ -453,19 +448,4 @@ func (s *SQLite) Stats(ctx context.Context) (DBStats, error) {
 		st.SizeBytes = fi.Size()
 	}
 	return st, nil
-}
-
-// readSchemaVersion reads the recorded schema version, or 0 if absent.
-func (s *SQLite) readSchemaVersion(ctx context.Context) (int, error) {
-	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&v)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	var n int
-	_, _ = fmt.Sscanf(v, "%d", &n)
-	return n, nil
 }

@@ -82,7 +82,7 @@ func printDBStats(out io.Writer, s store.DBStats) {
 	fmt.Fprintf(out, "distinct tools: %d\n", s.DistinctTools)
 	fmt.Fprintf(out, "distinct model: %d\n", s.DistinctModel)
 	fmt.Fprintf(out, "size:           %d bytes\n", s.SizeBytes)
-	fmt.Fprintf(out, "schema version: %d\n", s.SchemaVersion)
+	fmt.Fprintf(out, "schema version: %d (binary: %d)\n", s.SchemaVersion, store.SchemaVersion)
 	if !s.EarliestEvent.IsZero() {
 		fmt.Fprintf(out, "earliest:       %s\n", s.EarliestEvent.Local().Format("2006-01-02 15:04"))
 	}

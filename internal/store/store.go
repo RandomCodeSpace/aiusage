@@ -72,7 +72,7 @@ type DBStats struct {
 	SizeBytes     int64
 	EarliestEvent time.Time
 	LatestEvent   time.Time
-	SchemaVersion int
+	SchemaVersion int // version recorded in the database, not the binary's
 }
 
 // Store is the persistence interface used by the collector and reporting.

@@ -251,8 +251,8 @@ func TestStatsAndSourceStats(t *testing.T) {
 	if stats.Events != 2 || stats.DistinctTools != 2 {
 		t.Fatalf("stats events=%d tools=%d want 2,2", stats.Events, stats.DistinctTools)
 	}
-	if stats.SchemaVersion != schemaVersion {
-		t.Fatalf("schema version=%d want %d", stats.SchemaVersion, schemaVersion)
+	if stats.SchemaVersion != SchemaVersion {
+		t.Fatalf("schema version=%d want %d", stats.SchemaVersion, SchemaVersion)
 	}
 	if stats.SizeBytes <= 0 {
 		t.Fatalf("size bytes=%d want >0", stats.SizeBytes)
