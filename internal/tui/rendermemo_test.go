@@ -54,14 +54,14 @@ func TestSecondViewRenderDoesNotRebuildChart(t *testing.T) {
 
 // TestDegradedBandRendersThroughMemo pins the same contract at a terminal too
 // short for the detented panes: 90x26 gives the hero a 12-row body, which is
-// still a full axed braille chart (no pane headers, hence no SCALE readout).
-// That band went through the memo only after the gate was widened — before, it
-// rebuilt the chart on every View and every scrub step.
+// the single-pane decade-ring log — one SCALE readout where the two-pane hero
+// declares two. That band went through the memo only after the gate was
+// widened — before, it rebuilt the chart on every View and every scrub step.
 func TestDegradedBandRendersThroughMemo(t *testing.T) {
 	m := newTestModelWH(t, &fakeData{}, 90, 26)
 	out := ansiMemo.ReplaceAllString(m.View().Content, "")
-	if strings.Contains(out, "SCALE ") {
-		t.Fatal("90x26 now renders the detented panes; pick a size back in the degraded band")
+	if n := strings.Count(out, "SCALE "); n != 1 {
+		t.Fatalf("90x26 carries %d SCALE readouts; pick a size back in the single-pane band", n)
 	}
 	base := m.heroMemo.Builds()
 	if base == 0 {

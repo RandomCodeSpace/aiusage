@@ -34,6 +34,9 @@ import (
 // because internal/tui must not import internal/adapter (layering), the same
 // reason CollectInterval arrives from the caller. A tool MISSING from the map
 // is unknown, not zero: an adapter whose discovery failed says nothing.
+// LeverageFloor is the configured per-bucket input floor for the hero's
+// leverage pivot (config tui.leverage_input_floor); 0 lets the view derive it
+// from the bucket span.
 type Options struct {
 	DBPath          string
 	StatePath       string
@@ -41,6 +44,7 @@ type Options struct {
 	Until           time.Time
 	CollectInterval time.Duration
 	Sources         map[string]int
+	LeverageFloor   int64
 }
 
 // defaultCollectInterval mirrors the config layer's 300s default for when the
@@ -179,7 +183,7 @@ func NewModel(src DataSource, opt Options) Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(th.Accent)
 
-	vctx := buildCtx(th, zm)
+	vctx := buildCtx(th, zm, opt.LeverageFloor)
 	b := views.NewBrowse(vctx)
 	// PaddingRight(1) on the per-cell Header/Cell styles gives each column a
 	// 1-cell gutter so values never abut (the column budget in browse.go reserves
@@ -286,9 +290,12 @@ func detectReducedMotion() bool {
 }
 
 // buildCtx assembles the views.Ctx from a theme + the format helpers + the
-// shared zone manager.
-func buildCtx(th Theme, zm *zone.Manager) views.Ctx {
+// shared zone manager + the injected presentation policy (leverageFloor, 0 =
+// let the view derive it from the bucket span).
+func buildCtx(th Theme, zm *zone.Manager, leverageFloor int64) views.Ctx {
 	return views.Ctx{
+		LeverageFloor: leverageFloor,
+
 		PanelTitle: th.PanelTitle,
 		Stat:       th.Stat,
 		StatLabel:  th.StatLabel,

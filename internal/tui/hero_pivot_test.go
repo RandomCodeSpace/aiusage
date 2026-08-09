@@ -55,6 +55,22 @@ func TestPivotKeyTogglesHero(t *testing.T) {
 	}
 }
 
+// TestPivotFloorReachesTheViews: the configured leverage floor is presentation
+// policy the views resolve, so it has to arrive in the injected Ctx. Nothing
+// else in the model reads Options.LeverageFloor — a dropped assignment would
+// leave the dashboard silently on the derived default with no other symptom.
+func TestPivotFloorReachesTheViews(t *testing.T) {
+	m := NewModel(&fakeData{}, Options{DBPath: "/tmp/usage.db", LeverageFloor: 750_000})
+	if got := m.vctx.LeverageFloor; got != 750_000 {
+		t.Errorf("views.Ctx.LeverageFloor = %d, want 750000", got)
+	}
+	// Unset must stay zero: that is the sentinel the view reads as "derive the
+	// floor from the bucket span", not a floor of zero tokens.
+	if got := NewModel(&fakeData{}, Options{}).vctx.LeverageFloor; got != 0 {
+		t.Errorf("unset Options gave Ctx.LeverageFloor = %d, want 0", got)
+	}
+}
+
 // TestPivotKeyInHelp: an undiscoverable toggle is a hidden feature. The binding
 // has to appear in the expanded help overlay.
 func TestPivotKeyInHelp(t *testing.T) {

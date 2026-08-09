@@ -147,3 +147,105 @@ func TestDetentLockHysteresis(t *testing.T) {
 		t.Fatalf("nil-lock pick = %d, want %d", got, want)
 	}
 }
+
+// TestDecadesForLadder pins the decade count: the smallest n with 10^n >= v,
+// with a peak of one token or less needing none (a log axis bottoms out at one).
+func TestDecadesForLadder(t *testing.T) {
+	cases := []struct {
+		v    int64
+		want int64
+	}{
+		{0, 0}, {1, 0}, {2, 1}, {9, 1}, {10, 1}, {11, 2},
+		{999, 3}, {1_000, 3}, {1_001, 4},
+		{480_000_000, 9}, {1_000_000_000, 9}, {1_000_000_001, 10},
+	}
+	for _, c := range cases {
+		if got := decadesFor(c.v); got != c.want {
+			t.Errorf("decadesFor(%d) = %d, want %d", c.v, got, c.want)
+		}
+	}
+}
+
+// TestDecadeRingRoundTrip is TestDetentRingRoundTrip for the small-terminal
+// hero: for every pane geometry and peak, the value ntcharts computes for a
+// labeled row — viewMaxY*i/graphHeight — is an EXACT whole number of decades,
+// and the label printed there is that exact power of ten. If this drifts the
+// rings are merely decorative gridlines that happen to look logarithmic.
+func TestDecadeRingRoundTrip(t *testing.T) {
+	c := heroTestCtx()
+	peaks := []int64{0, 1, 9, 1_000, 47_500, 912_300, 9_450_000, 480_000_000, 1_230_000_000}
+	for graphH := detentYStep; graphH <= 20; graphH++ {
+		for _, peak := range peaks {
+			pitch := decadePitch(peak, graphH, detentYStep)
+			viewMax := detentViewMax(pitch, graphH, detentYStep)
+
+			if viewMax < float64(decadesFor(peak)) {
+				t.Fatalf("graphH=%d peak=%d: a %g-decade axis does not cover the peak's %d",
+					graphH, peak, viewMax, decadesFor(peak))
+			}
+			label := decadeYLabel(c, pitch, detentYStep, 0)
+			for i := 0; i <= graphH; i += detentYStep {
+				k := int64(i / detentYStep)
+				got := viewMax * float64(i) / float64(graphH)
+				want := float64(k * pitch)
+				if math.Abs(got-want) > 1e-9*math.Max(1, want) {
+					t.Fatalf("graphH=%d peak=%d row=%d: ntcharts value %g decades, want exactly %g",
+						graphH, peak, i, got, want)
+				}
+				if l, wl := label(i, got), detentHuman(c, pow10(k*pitch)); l != wl {
+					t.Fatalf("graphH=%d peak=%d row=%d: ring label %q, want %q", graphH, peak, i, l, wl)
+				}
+			}
+			// Off-ring rows stay blank so no label can land between decades.
+			if l := label(1, 0); l != "" {
+				t.Fatalf("graphH=%d: off-ring row labelled %q", graphH, l)
+			}
+		}
+	}
+}
+
+// TestDecadeLockHysteresis is TestDetentLockHysteresis read in decades: the
+// pitch widens the moment the peak needs more decades than the axis carries and
+// narrows only once the peak has dropped past the margin, so a live dashboard
+// does not re-quantize its log axis on every refresh.
+func TestDecadeLockHysteresis(t *testing.T) {
+	const graphH, key = 6, "log"
+	rings := decadeRings(graphH, detentYStep)
+
+	var l detentLock
+	first := l.pickDecade(key, graphH, detentYStep, 1_000_000_000) // 9 decades over 3 rings
+	if want := decadePitch(1_000_000_000, graphH, detentYStep); first != want {
+		t.Fatalf("first pitch = %d, want the unlocked %d", first, want)
+	}
+
+	// Inside the band: hold, even though a narrower pitch would now fit.
+	if held := l.pickDecade(key, graphH, detentYStep, 1_000_000); held != first {
+		t.Fatalf("held pitch = %d, want %d (inside the hysteresis band)", held, first)
+	}
+
+	// Overflow: widen immediately.
+	over := pow10(first*rings) * 10
+	up := l.pickDecade(key, graphH, detentYStep, over)
+	if up <= first {
+		t.Fatalf("overflow pitch = %d, want wider than %d", up, first)
+	}
+
+	// Past the margin: adopt the narrower pitch.
+	down := l.pickDecade(key, graphH, detentYStep, 1_000)
+	if down >= up {
+		t.Fatalf("shrink pitch = %d, want narrower than %d", down, up)
+	}
+	if want := decadePitch(1_000, graphH, detentYStep); down != want {
+		t.Fatalf("shrink pitch = %d, want the freshly computed %d", down, want)
+	}
+
+	// A different pane height is a different axis: no hold across it.
+	if got, want := l.pickDecade(key, graphH+4, detentYStep, 1_000), decadePitch(1_000, graphH+4, detentYStep); got != want {
+		t.Fatalf("resized pitch = %d, want %d", got, want)
+	}
+
+	var nilLock *detentLock
+	if got, want := nilLock.pickDecade(key, graphH, detentYStep, 42), decadePitch(42, graphH, detentYStep); got != want {
+		t.Fatalf("nil-lock pitch = %d, want %d", got, want)
+	}
+}

@@ -2,10 +2,14 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/tui"
 )
 
 // A discovery sweep that never gets to run must report every tool as unknown -
@@ -38,5 +42,82 @@ func TestDiscoveredSourcesIsBounded(t *testing.T) {
 	case <-done:
 	case <-time.After(discoveryBudget + 5*time.Second):
 		t.Fatal("discoveredSources did not return within its budget; startup would block")
+	}
+}
+
+// The sweep above is only worth running if its result reaches the dashboard.
+// cmd is the composition root - internal/tui must not import internal/adapter -
+// so the counts travel exactly one way: the Sources argument of the tui.Options
+// the root command hands to Run. Nothing about that argument is load-bearing at
+// compile time, so this drives the real command and asserts the VALUES that
+// arrive: the two claude-code roots the fixture home lays down, and, key for
+// key, the same map a direct sweep over the same resolved config produces. A
+// wiring that fed a different config, an empty map or none at all fails here.
+func TestRootHandsDiscoveredSourcesToTheTUI(t *testing.T) {
+	home := t.TempDir()
+	// claude-code accepts both <home>/.config/claude and <home>/.claude when
+	// each holds a projects/ dir, so this fixture home has exactly two of its
+	// sources - a count neither zero nor one, which a nil or empty map cannot
+	// coincidentally match.
+	for _, root := range []string{
+		filepath.Join(home, ".claude", "projects"),
+		filepath.Join(home, ".config", "claude", "projects"),
+	} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", root, err)
+		}
+	}
+
+	// Ambient env that would hand an adapter a source outside the sandbox.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("COPILOT_OTEL_FILE_EXPORTER_PATH", "")
+	t.Setenv("OPENCODE_DATA_DIR", "")
+
+	db := filepath.Join(t.TempDir(), "usage.db")
+	cfgPath := offlineConfig(t)
+
+	prevTTY, prevRun, prevFlags := isTTY, runTUI, flags
+	t.Cleanup(func() { isTTY, runTUI, flags = prevTTY, prevRun, prevFlags })
+
+	var got tui.Options
+	var launched bool
+	isTTY = func() bool { return true }
+	runTUI = func(_ store.Store, opt tui.Options) error {
+		got, launched = opt, true
+		return nil
+	}
+
+	// --no-daemon keeps the run hermetic; the root command with no subcommand is
+	// the TUI launcher.
+	if out, err := runCmd(t, "--db", db, "--home", home, "--config", cfgPath, "--no-daemon"); err != nil {
+		t.Fatalf("root command failed: %v\noutput:\n%s", err, out)
+	}
+	if !launched {
+		t.Fatal("the root command did not launch the TUI; nothing was wired")
+	}
+
+	if n, ok := got.Sources["claude-code"]; !ok || n != 2 {
+		t.Errorf("tui.Options.Sources[claude-code] = %d (present=%v), want 2 - the count the fixture home discovers",
+			n, ok)
+	}
+
+	// The same sweep, run directly over the config the flags resolve to.
+	flags = globalFlags{db: db, home: home, config: cfgPath}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	want := discoveredSources(context.Background(), cfg)
+	if len(want) == 0 {
+		t.Fatal("the direct sweep discovered nothing; the fixture cannot pin the wiring")
+	}
+	if len(got.Sources) != len(want) {
+		t.Errorf("tui.Options.Sources has %d tools, want %d: got %v, want %v",
+			len(got.Sources), len(want), got.Sources, want)
+	}
+	for tool, n := range want {
+		if g, ok := got.Sources[tool]; !ok || g != n {
+			t.Errorf("tui.Options.Sources[%s] = %d (present=%v), want %d", tool, g, ok, n)
+		}
 	}
 }

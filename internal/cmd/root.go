@@ -63,6 +63,13 @@ var daemonSkip = map[string]bool{
 // non-TTY (help-instead-of-TUI) path is testable without a real PTY.
 var isTTY = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
+// runTUI launches the dashboard. It is a seam for the same reason isTTY is: the
+// composition root's job is the Options it hands over - the db path, the state
+// path, the collect interval and the discovery counts (issue #44) - and a value
+// that never leaves this function cannot be asserted on without a real
+// terminal. Every wiring value here is otherwise unobservable from a test.
+var runTUI = tui.Run
+
 // newRootCmd builds the cobra root command with its persistent flags and the
 // full subcommand tree.
 func newRootCmd() *cobra.Command {
@@ -116,11 +123,12 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			return tui.Run(st, tui.Options{
+			return runTUI(st, tui.Options{
 				DBPath:          cfg.DBPath,
 				StatePath:       uiStatePath(cfg),
 				CollectInterval: time.Duration(cfg.IntervalSeconds) * time.Second,
 				Sources:         discoveredSources(cmdContext(c), cfg),
+				LeverageFloor:   cfg.TUI.LeverageInputFloor,
 			})
 		},
 	}

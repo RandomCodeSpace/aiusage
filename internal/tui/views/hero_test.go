@@ -206,29 +206,58 @@ func TestHeroGapRunsBreakSeries(t *testing.T) {
 	}
 }
 
-// TestHeroFallsBackBelowTwoPaneFloor: under the two-pane floor the hero renders
-// the EXISTING treatment (log chart → strip → numbers) rather than a half-built
-// pane pair. The quantized decade-ring log treatment for this band is undesigned
-// (issue #8) — this test pins the seam so it is a deliberate handover.
-func TestHeroFallsBackBelowTwoPaneFloor(t *testing.T) {
+// TestHeroDecadeBandBelowTwoPaneFloor: under the two-pane floor the hero is the
+// quantized decade-ring log (issue #39), NOT the pre-redesign log chart it used
+// to fall back to. One headed pane instead of two, one declared decade pitch
+// instead of two token steps — same family, smaller terminal.
+func TestHeroDecadeBandBelowTwoPaneFloor(t *testing.T) {
 	c := heroTestCtx()
 	lay := ComputeLayout(120, 30)
 	d := heroTestData(HeroTrend)
 	const w = 77
-	for _, h := range []int{6, 9, minHeroTwoPaneH - 1} {
-		got := heroBodyMemo(c, d, lay, w, h, -1)
-		want := heroBody(c, d.Timeline, d.TimelineDim, lay, w, h, -1)
-		if got != want {
-			t.Fatalf("h=%d: body diverges from the existing hero fallback", h)
+	for _, h := range []int{minHeroLogH, 6, 9, minHeroTwoPaneH - 1} {
+		got := ansiHero.ReplaceAllString(heroBodyMemo(c, d, lay, w, h, -1), "")
+		legacy := ansiHero.ReplaceAllString(heroBody(c, d.Timeline, d.TimelineDim, lay, w, h, -1), "")
+		if got == legacy {
+			t.Fatalf("h=%d: the band still renders the pre-redesign log hero", h)
 		}
-		if strings.Contains(ansiHero.ReplaceAllString(got, ""), "SCALE ") {
-			t.Fatalf("h=%d: a detented pane leaked into the fallback band", h)
+		if n := strings.Count(got, "SCALE "); n != 1 {
+			t.Fatalf("h=%d: band carries %d SCALE readouts, want exactly 1:\n%s", h, n, got)
+		}
+		if !strings.Contains(got, "SCALE 10^") {
+			t.Fatalf("h=%d: band declares no decade pitch:\n%s", h, got)
 		}
 	}
 	// At the floor the two panes take over.
 	at := ansiHero.ReplaceAllString(heroBodyMemo(c, d, lay, w, minHeroTwoPaneH, -1), "")
 	if strings.Count(at, "SCALE ") != 2 {
 		t.Fatalf("two-pane hero did not engage at the floor (h=%d):\n%s", minHeroTwoPaneH, at)
+	}
+}
+
+// TestHeroDecadeBandMonoLegibility holds the small-terminal hero to the same
+// monochrome contract as the two-pane one. On a log axis the ring labels ARE
+// the magnitude channel — nothing else on the pane states a size — so the pane
+// name, the SCALE readout and the decade rings must all survive an SGR strip.
+func TestHeroDecadeBandMonoLegibility(t *testing.T) {
+	c := heroTestCtx()
+	lay := ComputeLayout(90, 24)
+	out := ansiHero.ReplaceAllString(heroPanel(c, heroTestData(HeroTrend), 80, 12, lay, true), "")
+
+	for _, want := range []string{"TREND", "tokens", "SCALE 10^", "/div"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("mono decade band is missing %q:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, "SCALE "); n != 1 {
+		t.Errorf("mono decade band carries %d SCALE readouts, want 1:\n%s", n, out)
+	}
+	// The rings are exact powers of ten over a ~480M peak, so the gutter has to
+	// print whole decades and nothing between them.
+	for _, ring := range []string{"1K", "1M", "1B"} {
+		if !strings.Contains(out, ring) {
+			t.Errorf("mono decade band is missing the %s ring:\n%s", ring, out)
+		}
 	}
 }
 
@@ -285,20 +314,24 @@ func TestHeroMemoCoversDegradedBand(t *testing.T) {
 	}
 }
 
-// TestHeroDegradedBandMatchesDirectRender: routing the degraded band through the
-// memo must not change a single cell of the treatment it inherited.
-func TestHeroDegradedBandMatchesDirectRender(t *testing.T) {
+// TestHeroDecadeBandMatchesDirectBuild: routing the band through the memo must
+// not change a single cell of what a direct, unlocked build produces. The lock
+// re-picks whenever the pane geometry changes, so a held pitch can never make
+// the memoized render disagree with a fresh one at the same size.
+func TestHeroDecadeBandMatchesDirectBuild(t *testing.T) {
 	c := heroTestCtx()
 	lay := ComputeLayout(120, 30)
 	d := heroTestData(HeroTrend)
 	d.Gen, d.Memo = 1, NewHeroMemo()
 	const w = 77
 	for h := minHeroLogH; h < minHeroTwoPaneH; h++ {
+		f, ok := buildHeroFrame(c, d.Timeline, d.TimelineDim, heroFrameLog, w, h, nil)
+		if !ok {
+			t.Fatalf("h=%d: the decade band failed to build directly", h)
+		}
 		for _, scrub := range []int{-1, 5} {
-			got := heroBodyMemo(c, d, lay, w, h, scrub)
-			want := heroBody(c, d.Timeline, d.TimelineDim, lay, w, h, scrub)
-			if got != want {
-				t.Fatalf("h=%d scrub=%d: memoized band diverges from the direct render", h, scrub)
+			if got, want := heroBodyMemo(c, d, lay, w, h, scrub), f.render(c, scrub); got != want {
+				t.Fatalf("h=%d scrub=%d: memoized band diverges from the direct build", h, scrub)
 			}
 		}
 	}

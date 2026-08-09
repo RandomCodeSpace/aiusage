@@ -56,6 +56,14 @@ type Ctx struct {
 	// legends stay in lockstep. Built from the theme palette in buildCtx.
 	Comp []CompSpec
 
+	// LeverageFloor is the configured per-bucket input token count below which
+	// the hero's cache-leverage ratio is suppressed as noise. Zero — the
+	// default, and what every partial headless Ctx carries — derives the floor
+	// from the bucket span instead (defaultLeverageFloor). It is injected once
+	// from config and static for the life of the process, which is why the
+	// render memo does not key on it.
+	LeverageFloor int64
+
 	// Formatting helpers.
 	Humanize   func(int64) string
 	PadLeft    func(string, int) string

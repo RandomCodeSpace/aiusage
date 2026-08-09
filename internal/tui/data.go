@@ -1,9 +1,10 @@
 package tui
 
 import (
+	"cmp"
 	"container/list"
 	"context"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -325,23 +326,36 @@ func applyCrumb(f *store.Filter, c Crumb) {
 	}
 }
 
-// cacheKey derives a stable string key from a filter.
+// cacheKeyBuf is the scratch size cacheKey assembles into: two RFC3339
+// timestamps (25 bytes each at worst), six separators and room for the drill
+// values a realistic key carries. It is a stack array rather than a
+// strings.Builder because cacheKey runs five times per reload and the builder's
+// growth steps plus the two intermediate Format strings were, together, nearly
+// half of that reload's allocations (issue #41). Overflowing this is correct,
+// just one heap growth.
+const cacheKeyBuf = 192
+
+// cacheKey derives a stable string key from a filter. The layout is
+// since|until|groupBy|tools|models|projects|sessions with each list
+// comma-joined — byte for byte what the strings.Builder form produced, since a
+// changed key would silently miss every warm entry a load generation depends
+// on.
 func cacheKey(f store.Filter) string {
-	var b strings.Builder
-	b.WriteString(f.Since.Format(time.RFC3339))
-	b.WriteByte('|')
-	b.WriteString(f.Until.Format(time.RFC3339))
-	b.WriteByte('|')
-	b.WriteString(strings.Join(f.GroupBy, ","))
-	b.WriteByte('|')
-	b.WriteString(strings.Join(f.Tools, ","))
-	b.WriteByte('|')
-	b.WriteString(strings.Join(f.Models, ","))
-	b.WriteByte('|')
-	b.WriteString(strings.Join(f.Projects, ","))
-	b.WriteByte('|')
-	b.WriteString(strings.Join(f.Sessions, ","))
-	return b.String()
+	var scratch [cacheKeyBuf]byte
+	b := scratch[:0]
+	b = f.Since.AppendFormat(b, time.RFC3339)
+	b = append(b, '|')
+	b = f.Until.AppendFormat(b, time.RFC3339)
+	for _, list := range [...][]string{f.GroupBy, f.Tools, f.Models, f.Projects, f.Sessions} {
+		b = append(b, '|')
+		for i, v := range list {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			b = append(b, v...)
+		}
+	}
+	return string(b)
 }
 
 // cachedSummary returns the cached summary for f, if present. It never
@@ -449,8 +463,8 @@ func timelineDim(r Range) string {
 // sortTimeline orders timeline buckets ascending by their (lexically sortable)
 // time key.
 func sortTimeline(b []store.Bucket, dim string) {
-	sort.SliceStable(b, func(i, j int) bool {
-		return b[i].Keys[dim] < b[j].Keys[dim]
+	slices.SortStableFunc(b, func(x, y store.Bucket) int {
+		return strings.Compare(x.Keys[dim], y.Keys[dim])
 	})
 }
 
@@ -526,19 +540,24 @@ func copySummary(s *store.Summary) *store.Summary {
 
 // sortBuckets orders buckets in place by the chosen sort mode. Default ordering
 // is descending total so the largest consumers surface first.
+//
+// slices.SortStableFunc rather than sort.SliceStable: both are stable, so ties
+// keep the store's order either way, but the reflect-based form allocated a
+// Swapper and a boxed slice header per call — and a warm reload sorts four
+// times (issue #41).
 func sortBuckets(b []store.Bucket, dim string, srt Sort) {
 	switch srt {
 	case SortName:
-		sort.SliceStable(b, func(i, j int) bool {
-			return b[i].Keys[dim] < b[j].Keys[dim]
+		slices.SortStableFunc(b, func(x, y store.Bucket) int {
+			return strings.Compare(x.Keys[dim], y.Keys[dim])
 		})
 	case SortEvents:
-		sort.SliceStable(b, func(i, j int) bool {
-			return b[i].Events > b[j].Events
+		slices.SortStableFunc(b, func(x, y store.Bucket) int {
+			return cmp.Compare(y.Events, x.Events)
 		})
 	default:
-		sort.SliceStable(b, func(i, j int) bool {
-			return b[i].Total > b[j].Total
+		slices.SortStableFunc(b, func(x, y store.Bucket) int {
+			return cmp.Compare(y.Total, x.Total)
 		})
 	}
 }

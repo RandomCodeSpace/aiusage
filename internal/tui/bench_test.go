@@ -24,6 +24,23 @@ func benchModel(b *testing.B) Model {
 // BenchmarkReload measures a warm reload of the Overview view: every query
 // hits the in-memory cache, so this is the pure recompute/sort/view-model
 // rebuild cost that runs on the UI thread today.
+//
+// ACCEPTED BASELINE (issue #41): ~19 allocs/op, ~2.4 KB/op. It drifted 37 -> 50
+// across the perf and freshness waves without anyone deciding it should; the
+// two cheap causes were reclaimed (cacheKey assembles into a stack scratch
+// instead of a strings.Builder over two Format strings; sortBuckets /
+// sortTimeline use the generic stable sort instead of the reflect-based one),
+// and the 19 that remain are each buying something and are recorded rather than
+// chased:
+//
+//	5  the cache-key strings themselves - one per distinct query of the load
+//	6  copySummary's per-caller copy x3 - the fix for the UI thread and the
+//	   load goroutine sorting one shared cached slice
+//	5  buildScrubComp's per-bucket compositions - what makes a scrub sweep
+//	   cost zero queries
+//	3  the one-element GroupBy slice in each filter
+//
+// Measure the next drift against this list, not against a fresh guess.
 func BenchmarkReload(b *testing.B) {
 	m := benchModel(b)
 	b.ReportAllocs()

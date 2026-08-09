@@ -399,22 +399,73 @@ func buildHeroFrame(c Ctx, buckets []store.Bucket, dim string, kind heroFrameKin
 	case heroFrameTwoPane:
 		return buildTwoPaneFrame(c, buckets, times, dim, w, h, lock)
 	case heroFrameLog:
-		return buildLogFrame(c, buckets, dim, w, h)
+		return buildDecadeLogFrame(c, buckets, times, dim, w, h, lock)
 	}
 	return nil, false
 }
 
-// buildLogFrame wraps the pre-hero log-axis trend chart as a heroFrame: the
-// band under the two-pane floor still draws a full braille chart, so it belongs
-// in the memo like every other braille build. It carries no pane header and no
-// detent (the log axis has none). The w/h clamps trendChart applies are no-ops
-// here — this kind is only chosen above minChartW / minHeroLogH.
-func buildLogFrame(c Ctx, buckets []store.Bucket, dim string, w, h int) (*heroFrame, bool) {
-	tslc, times, ok := buildTrendChart(c, buckets, dim, w, h)
-	if !ok {
+// buildDecadeLogFrame builds the small-terminal hero (issue #39): every series
+// on ONE quantized decade-ring log axis. Below the two-pane floor there is no
+// room for two detented panes, but there is no reason for the band to drop out
+// of the family — it keeps the exact detent rings, the text SCALE readout, the
+// hysteresis lock and the per-run datasets, with a whole-decade pitch standing
+// in for the token step. Labeled rows are therefore exact powers of ten, which
+// is what a log axis can declare and a linear step cannot.
+//
+// ok=false when the pane cannot carry even one ring pitch, which leaves the
+// caller on the sub-floor fallback (strip, then numbers).
+func buildDecadeLogFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int, lock *detentLock) (*heroFrame, bool) {
+	if len(c.Comp) == 0 {
 		return nil, false
 	}
-	return &heroFrame{panes: []heroPane{{model: tslc, h: h}}, times: times, h: h}, true
+	chartH := h - 1      // the pane header
+	graphH := chartH - 2 // the pane carries the x axis
+	if graphH < detentYStep {
+		return nil, false
+	}
+
+	pitch := lock.pickDecade("log", graphH, detentYStep, seriesMax(buckets, c.Comp))
+	labelW := decadeLabelWidth(c, pitch, graphH, detentYStep)
+
+	minT, maxT := times[0], times[len(times)-1]
+	if !maxT.After(minT) {
+		maxT = minT.Add(bucketStep(dim))
+	}
+	axis := lipgloss.NewStyle().Foreground(c.FaintColor)
+	label := lipgloss.NewStyle().Foreground(c.FaintColor)
+	tslc := timeserieslinechart.New(w, chartH,
+		timeserieslinechart.WithTimeRange(minT, maxT),
+		timeserieslinechart.WithYRange(0, detentViewMax(pitch, graphH, detentYStep)),
+		timeserieslinechart.WithXYSteps(heroXSteps, detentYStep),
+		timeserieslinechart.WithAxesStyles(axis, label),
+		timeserieslinechart.WithXLabelFormatter(xLabelFormatter(dim)),
+		timeserieslinechart.WithYLabelFormatter(decadeYLabel(c, pitch, detentYStep, labelW)),
+	)
+	// One dataset per contiguous run per series, exactly as the detented panes
+	// do it: a gap must break the line, not draw a diagonal across the outage.
+	runs := gapRuns(times, dim)
+	order := make([]string, 0, len(c.Comp)*len(runs))
+	for _, s := range c.Comp {
+		for ri, run := range runs {
+			name := s.Key + ":" + strconv.Itoa(ri)
+			tslc.SetDataSetStyle(name, s.Style())
+			for _, i := range run {
+				tslc.PushDataSet(name, timeserieslinechart.TimePoint{
+					Time: times[i], Value: decadeLogValue(s.Pick(Split(buckets[i])))})
+			}
+			order = append(order, name)
+		}
+	}
+	tslc.DrawBrailleDataSets(order)
+	return &heroFrame{
+		panes: []heroPane{{
+			header: paneHeader(c, c.Comp, "tokens", decadePitchLabel(pitch), w),
+			model:  &tslc,
+			h:      chartH,
+		}},
+		times: times,
+		h:     h,
+	}, true
 }
 
 // buildTwoPaneFrame builds the hero proper: fresh (input+output) over cache,
@@ -441,8 +492,8 @@ func buildTwoPaneFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim str
 	cache := detentPane(c, buckets, times, dim, cacheSpecs, w, cacheH, cacheGH, cacheStep, heroXSteps, labelW)
 	return &heroFrame{
 		panes: []heroPane{
-			{header: paneHeader(c, freshSpecs, "fresh", freshStep, w), model: fresh, h: freshH},
-			{header: paneHeader(c, cacheSpecs, "cache", cacheStep, w), model: cache, h: cacheH},
+			{header: paneHeader(c, freshSpecs, "fresh", detentHuman(c, freshStep), w), model: fresh, h: freshH},
+			{header: paneHeader(c, cacheSpecs, "cache", detentHuman(c, cacheStep), w), model: cache, h: cacheH},
 		},
 		times: times,
 		h:     h,
@@ -495,7 +546,7 @@ func detentPane(c Ctx, buckets []store.Bucket, times []time.Time, dim string,
 // reference — at the 40-310x ratios this data actually shows, a line at 1 is
 // geometrically indistinguishable from the axis.
 func buildLeverageFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int, lock *detentLock) (*heroFrame, bool) {
-	segs, maxRatio := leverageSegments(buckets, times, dim)
+	segs, maxRatio := leverageSegments(c, buckets, times, dim)
 	if len(segs) == 0 {
 		return nil, false
 	}

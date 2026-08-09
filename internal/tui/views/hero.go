@@ -43,10 +43,11 @@ const (
 	// its sparkline row (1 header + >=4 plot rows + 2 axis rows + 1 footer).
 	minHeroPivotH = 8
 
-	// minHeroLogH is the body height at which the degraded band still affords a
-	// full axed log chart (the pre-hero treatment). Between it and
-	// minHeroTwoPaneH the hero renders braille without pane headers, which is
-	// why that band is a memoized frame and not a cheap strip.
+	// minHeroLogH is the body height at which the small-terminal band still
+	// affords a headed, axed chart: 1 header + >=2 plot rows + 2 axis rows.
+	// Between it and minHeroTwoPaneH the hero renders the quantized decade-ring
+	// log (issue #39), which is a full braille build and therefore a memoized
+	// frame rather than a cheap strip.
 	minHeroLogH = 5
 
 	// minPaneGraphH is the smallest plot area worth handing a pane.
@@ -55,10 +56,17 @@ const (
 	// heroXSteps is the x-label pitch on the pane that carries the shared axis.
 	heroXSteps = 4
 
-	// leverageInputFloor is the per-bucket input below which the ratio is noise
-	// rather than leverage: a 9M cache read against a 50K input is not 180x of
-	// working leverage, it is a nearly idle day. Such buckets break the line.
-	leverageInputFloor = 200_000
+	// leverageFloorPerDay is the DEFAULT per-bucket input below which the ratio
+	// is noise rather than leverage: a 9M cache read against a 50K input is not
+	// 180x of working leverage, it is a nearly idle day. Such buckets break the
+	// line.
+	//
+	// It is a rate, not a constant, because a bucket's plausible input scales
+	// with its width — one number cannot be right for an hour bucket and a
+	// month bucket at once (issue #39). 200K per day of bucket span keeps the
+	// day figure the pivot shipped with. Ctx.LeverageFloor overrides it
+	// outright when the user has an opinion about their own spend.
+	leverageFloorPerDay = 200_000
 )
 
 // heroPanel renders the hero panel: title chip, then the mode's body. The title
@@ -148,12 +156,12 @@ func heroFrameFor(mode HeroMode, lay Layout, w, h int) heroFrameKind {
 	return heroFrameNone
 }
 
-// heroUsesFrame reports whether the mode's OWN (paned) rendering fits the given
-// body. The degraded log band does not count: it carries no per-series pane
-// headers, so the title has to keep the legend there.
+// heroUsesFrame reports whether the mode renders a HEADED pane at the given
+// body. Every built kind does now that the small-terminal band carries its own
+// glyphs + SCALE header (issue #39); only the strip/numbers fallbacks leave the
+// legend for the title to carry.
 func heroUsesFrame(mode HeroMode, lay Layout, w, h int) bool {
-	k := heroFrameFor(mode, lay, w, h)
-	return k == heroFrameTwoPane || k == heroFrameLeverage
+	return heroFrameFor(mode, lay, w, h) != heroFrameNone
 }
 
 // heroBodyMemo renders the hero body, routing the expensive braille build
@@ -177,12 +185,11 @@ func heroBodyMemo(c Ctx, d OverviewData, lay Layout, w, h, scrubIdx int) string 
 		}
 	}
 	if d.Mode == HeroLeverage {
-		return leverageFallback(c, d.Timeline, w, h)
+		return leverageFallback(c, d.Timeline, d.TimelineDim, w, h)
 	}
-	// SEAM: below the two-pane floor the hero falls back to the EXISTING
-	// rendering (log chart -> per-series sparkline strip -> numbers). The
-	// quantized decade-ring log treatment for this band is undesigned and out
-	// of scope for issue #8.
+	// Below the decade band's own floor there is not even one ring pitch of
+	// plot area left, so the hero degrades to the cheap treatments: a per-series
+	// sparkline strip, then per-series numbers. Never a total.
 	return heroBody(c, d.Timeline, d.TimelineDim, lay, w, h, scrubIdx)
 }
 
@@ -276,19 +283,46 @@ func gapRuns(times []time.Time, dim string) [][]int {
 }
 
 // paneHeader renders one pane's plain-text header: the series glyphs, the pane
-// name, and the declared scale. The scale readout is text, so it survives
-// monochrome and screen readers alike.
-func paneHeader(c Ctx, specs []CompSpec, name string, step int64, w int) string {
+// name, and the declared scale. scale is the readout's magnitude only ("5M",
+// "10^2"); the SCALE/div framing is added here so every detented pane — linear
+// or decade-ring — declares itself in the same words. The readout is text, so
+// it survives monochrome and screen readers alike.
+func paneHeader(c Ctx, specs []CompSpec, name, scale string, w int) string {
 	var glyphs strings.Builder
 	for _, s := range specs {
 		glyphs.WriteString(c.compStyle(s).Render(s.Glyph))
 	}
 	head := glyphs.String() + c.pad(1) + c.StatLabel.Render(name)
-	scale := c.Subtle.Render("SCALE " + detentHuman(c, step) + "/div")
-	if lipgloss.Width(head)+3+lipgloss.Width(scale) <= w {
-		return c.RuleBetween(head, scale, w)
+	tail := c.Subtle.Render("SCALE " + scale + "/div")
+	if lipgloss.Width(head)+3+lipgloss.Width(tail) <= w {
+		return c.RuleBetween(head, tail, w)
 	}
 	return head
+}
+
+// defaultLeverageFloor is the per-bucket input floor derived from the bucket
+// span: leverageFloorPerDay scaled by how much of a day one bucket covers.
+// Hour buckets therefore ask for ~8K rather than the 200K a day bucket does,
+// which is the difference between the pivot working on the "today" range and
+// suppressing all of it.
+func defaultLeverageFloor(dim string) int64 {
+	hours := int64(bucketStep(dim) / time.Hour)
+	if hours < 1 {
+		hours = 1
+	}
+	if n := hours * leverageFloorPerDay / 24; n > 1 {
+		return n
+	}
+	return 1
+}
+
+// leverageFloor resolves the per-bucket input floor for a grouping: the
+// configured value when the user set one, otherwise the bucket span's default.
+func (c Ctx) leverageFloor(dim string) int64 {
+	if c.LeverageFloor > 0 {
+		return c.LeverageFloor
+	}
+	return defaultLeverageFloor(dim)
 }
 
 // leveragePoint is one bucket's cache-read / input ratio.
@@ -298,11 +332,12 @@ type leveragePoint struct {
 }
 
 // leverageSegments splits the ratio series into drawable segments and reports
-// the peak ratio. A segment breaks on a bucket below leverageInputFloor and on
-// a time gap wider than the dim's threshold, so neither an idle day nor an
-// outage renders as a slope.
-func leverageSegments(buckets []store.Bucket, times []time.Time, dim string) ([][]leveragePoint, float64) {
+// the peak ratio. A segment breaks on a bucket below the resolved input floor
+// and on a time gap wider than the dim's threshold, so neither an idle day nor
+// an outage renders as a slope.
+func leverageSegments(c Ctx, buckets []store.Bucket, times []time.Time, dim string) ([][]leveragePoint, float64) {
 	thr := gapThreshold(dim)
+	floor := c.leverageFloor(dim)
 	var (
 		segs [][]leveragePoint
 		cur  []leveragePoint
@@ -315,7 +350,7 @@ func leverageSegments(buckets []store.Bucket, times []time.Time, dim string) ([]
 		}
 	}
 	for i, b := range buckets {
-		if b.Input < leverageInputFloor {
+		if b.Input < floor {
 			flush()
 			continue
 		}
@@ -402,24 +437,26 @@ func leverageFooter(c Ctx, buckets []store.Bucket, w int) string {
 	return line
 }
 
-// leverageFloorLabel names the per-bucket input floor for display. It prefers
-// the injected humanizer and falls back to a plain K form, because headless
-// renders construct partial Ctx values with no humanizer.
-func leverageFloorLabel(c Ctx) string {
-	if s := humanizeOr(c, leverageInputFloor); s != "" {
+// leverageFloorLabel names the RESOLVED per-bucket input floor for display, so
+// the message can never quote a number the segments were not filtered against.
+// It prefers the injected humanizer and falls back to a plain K form, because
+// headless renders construct partial Ctx values with no humanizer.
+func leverageFloorLabel(c Ctx, dim string) string {
+	floor := c.leverageFloor(dim)
+	if s := humanizeOr(c, floor); s != "" {
 		return s
 	}
-	return strconv.FormatInt(leverageInputFloor/1000, 10) + "K"
+	return strconv.FormatInt(floor/1000, 10) + "K"
 }
 
 // leverageBelowFloor is the pivot's treatment when the range HAS buckets but
-// none clears leverageInputFloor: every ratio was suppressed as noise, which is
-// a different fact from an empty range. The no-rows panel would be wrong twice
+// none clears the input floor: every ratio was suppressed as noise, which is a
+// different fact from an empty range. The no-rows panel would be wrong twice
 // over here — the rows exist, and widening the range is not the fix — so the
 // panel states what happened and keeps the magnitude footer, which needs no
 // floor to be true.
-func leverageBelowFloor(c Ctx, buckets []store.Bucket, w, h int) string {
-	note := c.Faint.Render(truncTo(c, "⊘ leverage skipped: no bucket over "+leverageFloorLabel(c)+" input", w))
+func leverageBelowFloor(c Ctx, buckets []store.Bucket, dim string, w, h int) string {
+	note := c.Faint.Render(truncTo(c, "⊘ leverage skipped: no bucket over "+leverageFloorLabel(c, dim)+" input", w))
 	rows := make([]string, 0, h)
 	if h >= 3 {
 		// Sit the note in the middle of the rows the footer does not claim.
@@ -440,18 +477,19 @@ func leverageBelowFloor(c Ctx, buckets []store.Bucket, w, h int) string {
 // leverageFallback is the pivot below its chart floor: the ratio series as one
 // self-scaled sparkline row (order only, no axis) over the magnitude footer, so
 // the toggle stays meaningful at sizes an axed chart cannot fill.
-func leverageFallback(c Ctx, buckets []store.Bucket, w, h int) string {
+func leverageFallback(c Ctx, buckets []store.Bucket, dim string, w, h int) string {
 	if len(buckets) == 0 {
 		return emptyChartFrame(c, w, h)
 	}
+	floor := c.leverageFloor(dim)
 	vals := make([]float64, 0, len(buckets))
 	for _, b := range buckets {
-		if b.Input >= leverageInputFloor {
+		if b.Input >= floor {
 			vals = append(vals, float64(b.CacheRead)/float64(b.Input))
 		}
 	}
 	if len(vals) == 0 {
-		return leverageBelowFloor(c, buckets, w, h)
+		return leverageBelowFloor(c, buckets, dim, w, h)
 	}
 	rows := []string{newColumnSparkline(vals, w, 1, leverageLineStyle(c))}
 	if h >= 2 {

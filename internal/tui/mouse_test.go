@@ -659,6 +659,168 @@ func TestFirstPressOnPreSelectedRowSelects(t *testing.T) {
 	}
 }
 
+// TestDrillLeavesTheOpenedLevelUnchosen: a drill replaces the rows under the
+// selection, so the level it opens starts on a default cursor nobody chose. The
+// press that drilled must NOT carry over into it - otherwise the first tap in
+// the new level descends again, which is issue #43 one level down. startLoad is
+// the single choke point that drops the flag on every one of those paths, and
+// this is the test that pins it: it presses IN the level the drill opens, at
+// both the bar -> Browse and the Browse -> Browse call sites.
+func TestDrillLeavesTheOpenedLevelUnchosen(t *testing.T) {
+	for _, sz := range []struct{ w, h int }{{160, 44}, {120, 40}} {
+		m := newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("2")) // By-Tool
+
+		// Two presses on the same bar: the first selects, the second drills.
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("codex"), tea.MouseLeft)
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("codex"), tea.MouseLeft)
+		if m.view != ViewBrowse || len(m.crumbs) != 1 || m.crumbs[0].Value != "codex" {
+			t.Fatalf("%dx%d: setup: view = %v crumbs = %v, want Browse [tool:codex]",
+				sz.w, sz.h, m.view, m.crumbs)
+		}
+		if m.browse.Cursor() != 0 {
+			t.Fatalf("%dx%d: the opened level starts at cursor %d, want the default 0",
+				sz.w, sz.h, m.browse.Cursor())
+		}
+
+		// The level that just opened: row 0 is a default nobody pressed, so the
+		// first press on it selects.
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 1 {
+			t.Fatalf("%dx%d: the first press in the level the bar drill opened descended again: crumbs = %v",
+				sz.w, sz.h, m.crumbs)
+		}
+		if m.browse.Cursor() != 0 {
+			t.Fatalf("%dx%d: the first press in the opened level left the cursor at %d, want 0",
+				sz.w, sz.h, m.browse.Cursor())
+		}
+
+		// Now the row IS one a press selected, so the next press drills - and
+		// that drill opens another level on another unchosen default.
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 2 || m.crumbs[1].Dim != "model" || m.crumbs[1].Value != "claude-opus" {
+			t.Fatalf("%dx%d: second press in the opened level: crumbs = %v, want [tool:codex model:claude-opus]",
+				sz.w, sz.h, m.crumbs)
+		}
+
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 2 {
+			t.Fatalf("%dx%d: the first press in the level the Browse drill opened descended again: crumbs = %v",
+				sz.w, sz.h, m.crumbs)
+		}
+	}
+}
+
+// TestKeyboardMovementDoesNotConferSelection is the keyboard twin of
+// TestWheelDoesNotConferSelection: arrows, Home and End move the selection, they
+// do not choose it. If a key counted as the selecting press, the next press on
+// the row it landed on would drill on first touch - issue #43 again, one row
+// down. All four keyboard clears (both forward branches, handleHome, handleEnd)
+// are driven here through real key messages, at two sizes because the row and
+// bar geometry the press has to hit moves with the layout.
+func TestKeyboardMovementDoesNotConferSelection(t *testing.T) {
+	for _, sz := range []struct{ w, h int }{{160, 44}, {120, 40}} {
+		// forward: the Browse branch, driven by an arrow key.
+		m := newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("4"))
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft) // row 0 chosen by press
+		m = send(m, keyMsg("down"))
+		if m.browse.Cursor() != 1 {
+			t.Fatalf("%dx%d: setup: the arrow left the cursor at %d, want 1", sz.w, sz.h, m.browse.Cursor())
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(1), tea.MouseLeft)
+		if len(m.crumbs) != 0 {
+			t.Fatalf("%dx%d: a press on the row the ARROW KEY moved to drilled: crumbs = %v",
+				sz.w, sz.h, m.crumbs)
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(1), tea.MouseLeft)
+		if len(m.crumbs) != 1 || m.crumbs[0].Value != "codex" {
+			t.Fatalf("%dx%d: second press on the pressed row: crumbs = %v, want [tool:codex]",
+				sz.w, sz.h, m.crumbs)
+		}
+
+		// handleEnd: the jump to the live edge / last row.
+		m = newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("4"))
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		last := m.browseRowCount() - 1
+		if last < 1 {
+			t.Fatalf("%dx%d: the fixture has %d Browse rows, need >= 2 for End to move",
+				sz.w, sz.h, m.browseRowCount())
+		}
+		m = send(m, tea.KeyPressMsg{Code: tea.KeyEnd})
+		if m.browse.Cursor() != last {
+			t.Fatalf("%dx%d: End left the cursor at %d, want %d", sz.w, sz.h, m.browse.Cursor(), last)
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(last), tea.MouseLeft)
+		if len(m.crumbs) != 0 {
+			t.Fatalf("%dx%d: a press on the row END moved to drilled: crumbs = %v", sz.w, sz.h, m.crumbs)
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(last), tea.MouseLeft)
+		if len(m.crumbs) != 1 || m.crumbs[0].Value != "codex" {
+			t.Fatalf("%dx%d: second press after End: crumbs = %v, want [tool:codex]", sz.w, sz.h, m.crumbs)
+		}
+
+		// handleHome: the jump back to the first row.
+		m = newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("4"))
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(1), tea.MouseLeft) // row 1 chosen by press
+		if m.browse.Cursor() != 1 {
+			t.Fatalf("%dx%d: setup: press left the cursor at %d, want 1", sz.w, sz.h, m.browse.Cursor())
+		}
+		m = send(m, tea.KeyPressMsg{Code: tea.KeyHome})
+		if m.browse.Cursor() != 0 {
+			t.Fatalf("%dx%d: Home left the cursor at %d, want 0", sz.w, sz.h, m.browse.Cursor())
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 0 {
+			t.Fatalf("%dx%d: a press on the row HOME moved to drilled: crumbs = %v", sz.w, sz.h, m.crumbs)
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.RowZone(0), tea.MouseLeft)
+		if len(m.crumbs) != 1 || m.crumbs[0].Value != "claude-code" {
+			t.Fatalf("%dx%d: second press after Home: crumbs = %v, want [tool:claude-code]",
+				sz.w, sz.h, m.crumbs)
+		}
+
+		// forward: the bars branch, driven by the same arrow key.
+		m = newTestModelWH(t, &fakeData{}, sz.w, sz.h)
+		m = step(t, m, keyMsg("2"))
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("claude-code"), tea.MouseLeft) // bar 0 chosen by press
+		m = send(m, keyMsg("down"))
+		if m.byTool.Selected != 1 {
+			t.Fatalf("%dx%d: setup: the arrow left the bar selection at %d, want 1",
+				sz.w, sz.h, m.byTool.Selected)
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("codex"), tea.MouseLeft)
+		if m.view != ViewByTool || len(m.crumbs) != 0 {
+			t.Fatalf("%dx%d: a press on the bar the ARROW KEY moved to drilled: view = %v crumbs = %v",
+				sz.w, sz.h, m.view, m.crumbs)
+		}
+		m = expireClick(m)
+		m = mustPress(t, m, views.BarZone("codex"), tea.MouseLeft)
+		if m.view != ViewBrowse || len(m.crumbs) != 1 || m.crumbs[0].Value != "codex" {
+			t.Fatalf("%dx%d: second press on the pressed bar: view = %v crumbs = %v, want Browse [tool:codex]",
+				sz.w, sz.h, m.view, m.crumbs)
+		}
+	}
+}
+
 // TestWheelDoesNotConferSelection: a notch scrolls, it does not choose. If the
 // wheel counted as the selecting press, the next press on the row it landed on
 // would drill on first touch — the same stray descent as issue #43, one row
