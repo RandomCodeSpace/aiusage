@@ -21,6 +21,8 @@ type OverviewData struct {
 	RangeLbl    string
 	ActivePane  int        // which pane wears the focus ring (see PaneOverview*)
 	ScrubLabel  string     // non-empty when scrub is pinned: the bucket timestamp
+	Cursor      int        // highlighted timeline bucket index (scrub crosshair)
+	Pinned      bool       // whether the scrub is pinned (crosshair renders only then)
 	Sys         []SysGauge // container CPU/mem/disk gauges (empty → strip omitted)
 }
 
@@ -219,7 +221,11 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 	if chartH < 1 {
 		chartH = 1
 	}
-	body := heroBody(c, d.Timeline, d.TimelineDim, lay, inner, chartH, -1)
+	scrubIdx := -1
+	if d.Pinned {
+		scrubIdx = d.Cursor
+	}
+	body := heroBody(c, d.Timeline, d.TimelineDim, lay, inner, chartH, scrubIdx)
 	return style.Render(title + "\n" + body)
 }
 

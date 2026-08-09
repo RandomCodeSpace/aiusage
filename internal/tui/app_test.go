@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	zone "github.com/lrstanley/bubblezone"
@@ -436,6 +437,11 @@ func TestOverviewScrub(t *testing.T) {
 	if m.scrubIndex != 1 {
 		t.Fatalf("after right scrub index = %d, want 1", m.scrubIndex)
 	}
+	// The crosshair cursor is plumbed into the Overview view data (the hero
+	// renders the crosshair column from Cursor/Pinned, not from model state).
+	if !m.overview.Pinned || m.overview.Cursor != 1 {
+		t.Fatalf("overview crosshair not plumbed: pinned=%v cursor=%d", m.overview.Pinned, m.overview.Cursor)
+	}
 	// Cannot move past the end.
 	m = send(m, keyMsg("right"))
 	if m.scrubIndex != 1 {
@@ -450,6 +456,9 @@ func TestOverviewScrub(t *testing.T) {
 	m = send(m, keyMsg("esc"))
 	if m.scrubPinned {
 		t.Fatal("esc did not unpin scrub")
+	}
+	if m.overview.Pinned {
+		t.Fatal("overview crosshair still pinned after esc")
 	}
 	// tlCursor accessor mirrors scrubIndex.
 	if m.tlCursor() != m.scrubIndex {
@@ -587,6 +596,52 @@ func TestHelpAndRefreshNoPanic(t *testing.T) {
 	runPending(t, m, cmd) // drives the load goroutine + spinner tick to completion
 	if f.summarizeCalls <= before {
 		t.Fatal("refresh did not re-query the data source")
+	}
+}
+
+// TestQuitWhileFiltering: ctrl+c must quit even while the filter input has
+// focus, but plain q (also on the Quit binding) stays a typable character.
+func TestQuitWhileFiltering(t *testing.T) {
+	m := newTestModel(t, &fakeData{})
+	m = send(m, keyMsg("/"))
+	if !m.filtering {
+		t.Fatal("expected filtering mode after '/'")
+	}
+	m = send(m, keyMsg("q"))
+	if !m.filtering {
+		t.Fatal("q while filtering left input mode")
+	}
+	if got := m.filterUI.Value(); got != "q" {
+		t.Fatalf("filter input = %q, want q", got)
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c while filtering produced no command")
+	}
+	if cmd() == nil {
+		t.Fatal("ctrl+c while filtering produced no message")
+	}
+}
+
+// TestSelectionFollowsRebinding: bar selection must move via the bound Up/Down
+// keys, not hardcoded literals, so a rebind keeps selection and help in sync.
+func TestSelectionFollowsRebinding(t *testing.T) {
+	m := newTestModel(t, &fakeData{})
+	m = send(m, keyMsg("2")) // By-Tool
+	m.keys.Up = key.NewBinding(key.WithKeys("w"))
+	m.keys.Down = key.NewBinding(key.WithKeys("x"))
+	m = send(m, keyMsg("x"))
+	if m.byTool.Selected != 1 {
+		t.Fatalf("rebound down did not move selection: %d", m.byTool.Selected)
+	}
+	m = send(m, keyMsg("w"))
+	if m.byTool.Selected != 0 {
+		t.Fatalf("rebound up did not move selection: %d", m.byTool.Selected)
+	}
+	// The old literal is no longer bound and must not move the selection.
+	m = send(m, keyMsg("j"))
+	if m.byTool.Selected != 0 {
+		t.Fatalf("unbound j moved selection: %d", m.byTool.Selected)
 	}
 }
 

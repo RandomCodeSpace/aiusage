@@ -53,6 +53,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // updateFiltering handles keys while the filter input is focused.
 func (m Model) updateFiltering(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "ctrl+c":
+		// Quit must work while typing, so the chord is matched before the input
+		// swallows it. Only the chord: the Quit binding also carries plain "q",
+		// which has to stay a typable filter character.
+		return m, tea.Sequence(tea.ClearScreen, tea.Quit)
 	case "enter":
 		m.filter = strings.TrimSpace(m.filterUI.Value())
 		m.filtering = false

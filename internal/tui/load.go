@@ -58,6 +58,8 @@ func (m *Model) loadOverview() {
 		TimelineDim: dim,
 		RangeLbl:    m.rng.Label(),
 		ActivePane:  views.PaneOverviewHero,
+		Cursor:      m.scrubIndex,
+		Pinned:      m.scrubPinned,
 	}
 	if m.scrubPinned {
 		m.syncScrub()
@@ -183,8 +185,12 @@ func (m *Model) syncScrub() {
 	if m.view != ViewOverview {
 		return
 	}
+	m.overview.Cursor = m.scrubIndex
+	m.overview.Pinned = m.scrubPinned
 	if !m.scrubPinned || n == 0 || m.scrubIndex < 0 || m.scrubIndex >= n {
-		// Spring back to full-range totals.
+		// Spring back to full-range totals (and hide the crosshair even if a stale
+		// pin survived a timeline shrink — the KPIs below show full-range data).
+		m.overview.Pinned = false
 		tot, _ := m.data.Totals(m.rng, m.crumbs)
 		m.overview.Totals = tot
 		m.overview.Prev = m.prevTotals()

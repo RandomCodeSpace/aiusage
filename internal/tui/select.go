@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
@@ -63,16 +64,17 @@ func (m *Model) setSelection(i int) {
 // moveSelection steps the bar selection by dir.
 func (m *Model) moveSelection(dir int) { m.setSelection(m.currentSelection() + dir) }
 
-// moveSelectionFromKey maps up/down/j/k to selection steps on bar views.
+// moveSelectionFromKey maps the bound Up/Down keys to selection steps on bar
+// views, so a rebinding moves selection (and help) together.
 func (m *Model) moveSelectionFromKey(msg tea.Msg) {
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return
 	}
-	switch km.String() {
-	case "up", "k":
+	switch {
+	case key.Matches(km, m.keys.Up):
 		m.moveSelection(-1)
-	case "down", "j":
+	case key.Matches(km, m.keys.Down):
 		m.moveSelection(+1)
 	}
 }
