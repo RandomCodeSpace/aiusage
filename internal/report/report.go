@@ -10,20 +10,19 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
 // Opt controls how RenderTable renders a summary.
 type Opt struct {
-	// Breakdown is a presentation hint reserved for the CLI (which controls the
-	// grouping dimensions via Filter.GroupBy). RenderTable adds no extra columns
-	// for it; the flag is kept so callers can thread it through uniformly.
+	// Breakdown replaces the combined Cache column with the stored components
+	// (Reasoning, CacheW, CacheR), and appends the reasoning legend explaining
+	// which accounting rule each row was rendered under.
 	Breakdown bool
 	// Color enables lipgloss styling (headers/totals). When false the output is
 	// plain ASCII suitable for pipes and tests.
 	Color bool
-	// Width is an optional target terminal width. Zero means unconstrained.
-	Width int
 	// Costs adds a trailing Cost column, aligned by index with Summary.Buckets
 	// (see ResolveCosts). Nil renders the table exactly as before.
 	Costs *Costs
@@ -39,15 +38,20 @@ const (
 	colCost   = "Cost"
 )
 
-// metricCols is the number of trailing right-aligned columns without a cost
-// column; with one it is metricCols+1.
-const metricCols = 5
+// Component columns rendered in place of the combined Cache column when
+// Opt.Breakdown is set.
+const (
+	colReasoning = "Reasoning"
+	colCacheW    = "CacheW"
+	colCacheR    = "CacheR"
+)
 
 const totalsLabel = "TOTAL"
 
 // RenderTable renders a summary as an aligned text table. Columns are the
 // grouping-key dimensions (in OrderedKeys order) followed by Events, Input,
-// Output, Cache (= CacheCreation + CacheRead) and Total. Numeric columns are
+// Output, Cache (= CacheCreation + CacheRead) and Total — or, with
+// Opt.Breakdown, the stored components in place of Cache. Numeric columns are
 // right-aligned and humanised (e.g. 2.0M, 912.3K). A TOTAL row is always
 // appended.
 func RenderTable(sum *store.Summary, opt Opt) string {
@@ -56,23 +60,36 @@ func RenderTable(sum *store.Summary, opt Opt) string {
 	}
 
 	keyCols := keyColumns(sum)
-	headers := append(append([]string{}, keyCols...), colEvents, colInput, colOutput, colCache, colTotal)
-	numeric := metricCols
+	metrics := metricHeaders(opt.Breakdown)
+	headers := append(append([]string{}, keyCols...), metrics...)
+	numeric := len(metrics)
 	if opt.Costs != nil {
 		headers = append(headers, colCost)
 		numeric++
 	}
 
+	// Reasoning markers are collected while rendering so the legend lists only
+	// the conventions the table actually used. Without a breakdown there is no
+	// Reasoning column to mark, and therefore nothing to explain.
+	marks := map[string]bool{}
+	markOf := func(mark string) string {
+		if !opt.Breakdown || mark == "" {
+			return ""
+		}
+		marks[mark] = true
+		return mark
+	}
+
 	// Build the data rows as raw strings (already humanised for metrics).
 	rows := make([][]string, 0, len(sum.Buckets)+1)
 	for i, b := range sum.Buckets {
-		row := bucketRow(b, keyCols)
+		row := bucketRow(b, keyCols, opt.Breakdown, markOf(bucketMark(b)))
 		if opt.Costs != nil {
 			row = append(row, costCell(opt.Costs.Buckets, i))
 		}
 		rows = append(rows, row)
 	}
-	totalsRow := bucketRow(sum.Totals, keyCols)
+	totalsRow := bucketRow(sum.Totals, keyCols, opt.Breakdown, markOf(totalsMark(sum)))
 	if opt.Costs != nil {
 		totalsRow = append(totalsRow, opt.Costs.Totals.String())
 	}
@@ -110,7 +127,21 @@ func RenderTable(sum *store.Summary, opt Opt) string {
 	sb.WriteByte('\n')
 	sb.WriteString(renderRow(totalsRow, widths, numericFrom, opt, styleTotal))
 
+	if legend := breakdownLegend(marks); legend != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(legend)
+	}
+
 	return sb.String()
+}
+
+// metricHeaders returns the fixed metric columns: the combined Cache column by
+// default, the stored components with Opt.Breakdown.
+func metricHeaders(breakdown bool) []string {
+	if breakdown {
+		return []string{colEvents, colInput, colOutput, colReasoning, colCacheW, colCacheR, colTotal}
+	}
+	return []string{colEvents, colInput, colOutput, colCache, colTotal}
 }
 
 // keyColumns returns the grouping dimension column names, preferring the order
@@ -126,11 +157,23 @@ func keyColumns(sum *store.Summary) []string {
 }
 
 // bucketRow renders one bucket into ordered string cells: key values then the
-// humanised metric columns.
-func bucketRow(b store.Bucket, keyCols []string) []string {
-	row := make([]string, 0, len(keyCols)+5)
+// humanised metric columns. mark is the reasoning marker for the row (empty
+// outside a breakdown, or when the row reports no reasoning tokens).
+func bucketRow(b store.Bucket, keyCols []string, breakdown bool, mark string) []string {
+	row := make([]string, 0, len(keyCols)+7)
 	for _, k := range keyCols {
 		row = append(row, b.Keys[k])
+	}
+	if breakdown {
+		return append(row,
+			humanize(b.Events),
+			humanize(b.Input),
+			humanize(b.Output),
+			humanize(b.Reasoning)+mark,
+			humanize(b.CacheCreation),
+			humanize(b.CacheRead),
+			humanize(b.Total),
+		)
 	}
 	cache := b.CacheCreation + b.CacheRead
 	row = append(row,
@@ -141,6 +184,85 @@ func bucketRow(b store.Bucket, keyCols []string) []string {
 		humanize(b.Total),
 	)
 	return row
+}
+
+// Reasoning markers. Schema v3 records reasoning per the accounting rule of the
+// tool that produced the row (model.ReasoningModeFor): for some tools the count
+// sits INSIDE Output, for others it is reported alongside it. A breakdown row
+// therefore reconciles to its Total only under the rule that applies to it, so
+// every non-zero Reasoning cell carries the marker for its rule and the legend
+// spells the sum out. ASCII markers survive pipes and dumb terminals.
+const (
+	markSubset   = "*" // reasoning already counted inside Output
+	markAdditive = "+" // reasoning counted alongside Output
+	markUnknown  = "?" // rules differ (or the grouping cannot resolve them)
+)
+
+// bucketMark returns the reasoning marker for one bucket. The rule is a
+// property of the tool, so it is resolvable only when the summary groups by
+// tool; otherwise the bucket may mix both conventions and says so. A bucket
+// with no reasoning tokens carries no marker — there is nothing to reconcile.
+func bucketMark(b store.Bucket) string {
+	if b.Reasoning == 0 {
+		return ""
+	}
+	tool := b.Keys["tool"]
+	if tool == "" {
+		return markUnknown
+	}
+	return markForTool(tool)
+}
+
+// markForTool maps a tool id to its marker through the same rule the pricing
+// engine bills by, so the column and the cost never disagree about a row.
+func markForTool(tool string) string {
+	if model.ReasoningModeFor(tool) == model.ReasoningAdditive {
+		return markAdditive
+	}
+	return markSubset
+}
+
+// totalsMark reduces the per-bucket markers to one for the TOTAL row: a single
+// convention shared by every contributing bucket carries through; anything else
+// (a genuine mix, or a grouping that cannot resolve the rule) is unknown.
+func totalsMark(sum *store.Summary) string {
+	if sum.Totals.Reasoning == 0 {
+		return ""
+	}
+	seen := ""
+	for _, b := range sum.Buckets {
+		mk := bucketMark(b)
+		if mk == "" {
+			continue
+		}
+		if seen == "" {
+			seen = mk
+			continue
+		}
+		if seen != mk {
+			return markUnknown
+		}
+	}
+	if seen == "" {
+		return markUnknown
+	}
+	return seen
+}
+
+// breakdownLegend states, for each marker present, how that row's components
+// reconcile to its Total.
+func breakdownLegend(used map[string]bool) string {
+	lines := make([]string, 0, 3)
+	if used[markSubset] {
+		lines = append(lines, markSubset+" reasoning is inside Output: Total = Input + Output + CacheW + CacheR")
+	}
+	if used[markAdditive] {
+		lines = append(lines, markAdditive+" reasoning is alongside Output: Total = Input + Output + Reasoning + CacheW + CacheR")
+	}
+	if used[markUnknown] {
+		lines = append(lines, markUnknown+" reasoning rules differ across the rows summed here: reconcile row by row (group by tool)")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // costCell renders the cost for bucket i, or the unpriced marker when the

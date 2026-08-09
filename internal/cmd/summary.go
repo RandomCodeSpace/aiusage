@@ -39,7 +39,8 @@ func newSummaryCmd() *cobra.Command {
 	f.StringVar(&o.since, "since", "", "lower time bound (RFC3339, YYYY-MM-DD, or a span like 7d)")
 	f.StringVar(&o.until, "until", "", "upper time bound (RFC3339, YYYY-MM-DD, or a span like 1h)")
 	f.StringVar(&o.by, "by", "", "comma-separated grouping dimensions (e.g. day,tool,model)")
-	f.BoolVar(&o.breakdown, "breakdown", false, "render the component token breakdown")
+	f.BoolVar(&o.breakdown, "breakdown", false,
+		"split the token columns into components (input, output, reasoning, cache write/read)")
 	f.BoolVar(&o.json, "json", false, "emit the summary as JSON")
 	f.BoolVar(&o.csv, "csv", false, "emit the matching raw events as CSV")
 	return cmd
