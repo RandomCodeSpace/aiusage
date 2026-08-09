@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -53,6 +55,8 @@ func runDoctor(c *cobra.Command) error {
 	fmt.Fprintf(out, "interval: %ds\n", cfg.IntervalSeconds)
 	fmt.Fprintln(out)
 
+	printPermWarnings(out, cfg)
+
 	st, err := openStore(cfg)
 	if err != nil {
 		// The DB may legitimately not exist yet; report and continue with
@@ -70,6 +74,36 @@ func runDoctor(c *cobra.Command) error {
 
 	printAdapterDiscovery(c, cfg)
 	return nil
+}
+
+// printPermWarnings warns when the data dir or the DB is accessible by group or
+// other: the raw column holds transcript content, so both must be owner-only
+// (daemon start repairs them; a warning here means that repair has not run or
+// could not take effect).
+func printPermWarnings(out io.Writer, cfg config.Config) {
+	checks := []struct {
+		label string
+		path  string
+		want  os.FileMode
+	}{
+		{"data dir", filepath.Dir(cfg.DBPath), 0o700},
+		{"database", cfg.DBPath, 0o600},
+	}
+	warned := false
+	for _, c := range checks {
+		fi, err := os.Stat(c.path)
+		if err != nil {
+			continue
+		}
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			fmt.Fprintf(out, "warning: %s %s is accessible by other users (mode %03o, want %03o)\n",
+				c.label, c.path, perm, c.want)
+			warned = true
+		}
+	}
+	if warned {
+		fmt.Fprintln(out)
+	}
 }
 
 // printDBStats renders whole-database diagnostics.

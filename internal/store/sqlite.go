@@ -62,7 +62,21 @@ func Open(path string) (*SQLite, error) {
 		return nil, err
 	}
 
+	// The raw column holds transcript content, so the DB must be owner-only.
+	// SQLite creates WAL/SHM sidecars with the main DB file's mode, so tightening
+	// the DB here also covers sidecars created later; existing sidecars are fixed
+	// directly. Best-effort: doctor surfaces perms that could not be repaired.
+	restrictPerms(path)
+
 	return &SQLite{db: db, path: path}, nil
+}
+
+// restrictPerms chmods the DB and its WAL/SHM sidecars to 0600. Missing
+// sidecars and chmod failures are ignored (see Open).
+func restrictPerms(path string) {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		_ = os.Chmod(p, 0o600)
+	}
 }
 
 func ensureParentDir(path string) error {
@@ -70,7 +84,8 @@ func ensureParentDir(path string) error {
 	if dir == "" || dir == "." {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700: the DB inside holds transcript content (raw column).
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("store: create dir %s: %w", dir, err)
 	}
 	return nil

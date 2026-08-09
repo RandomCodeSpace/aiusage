@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"log"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -12,6 +14,22 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
+
+// repairPrivatePerms tightens permissions left behind by older releases, which
+// created the data dir 0755 and the DB/log 0644. store.Open only fixes files it
+// touches and never re-modes an existing dir, so existing installs are repaired
+// here on daemon start. Best-effort: a failure must not stop collection, and
+// doctor surfaces perms that stay loose.
+func repairPrivatePerms(cfg config.Config) {
+	if dir := filepath.Dir(cfg.DBPath); dir != "" && dir != "." {
+		_ = os.Chmod(dir, 0o700)
+	}
+	for _, p := range []string{cfg.DBPath, cfg.DBPath + "-wal", cfg.DBPath + "-shm", cfg.LogPath} {
+		if p != "" {
+			_ = os.Chmod(p, 0o600)
+		}
+	}
+}
 
 // daemonOptions builds the DaemonOptions for cfg (Logger left for the caller to
 // set). It always stamps Version with buildinfo.Identity() so ensureDaemon
@@ -40,6 +58,8 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			repairPrivatePerms(cfg)
 
 			st, err := openStore(cfg)
 			if err != nil {

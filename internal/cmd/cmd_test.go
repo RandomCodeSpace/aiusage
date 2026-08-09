@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
@@ -146,5 +147,70 @@ func TestClampInterval(t *testing.T) {
 		if got := clampInterval(in); got != want {
 			t.Errorf("clampInterval(%d)=%d, want %d", in, got, want)
 		}
+	}
+}
+
+// TestExportIncludeRaw runs `once` then `export`: the default export must omit
+// the Raw payload (it holds the full transcript line for claude-code), and
+// --include-raw must restore it under the historical "Raw" key.
+func TestExportIncludeRaw(t *testing.T) {
+	home := writeClaudeFixture(t)
+	db := filepath.Join(t.TempDir(), "usage.db")
+	cfg := filepath.Join(t.TempDir(), "absent.json")
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	if _, err := runCmd(t, "--db", db, "--home", home, "--config", cfg, "once"); err != nil {
+		t.Fatalf("once failed: %v", err)
+	}
+
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", cfg, "--no-daemon", "export")
+	if err != nil {
+		t.Fatalf("export failed: %v\noutput:\n%s", err, out)
+	}
+	if strings.Contains(out, `"Raw"`) || strings.Contains(out, "input_tokens") {
+		t.Errorf("default export leaked the raw payload:\n%s", out)
+	}
+
+	out, err = runCmd(t, "--db", db, "--home", home, "--config", cfg, "--no-daemon", "export", "--include-raw")
+	if err != nil {
+		t.Fatalf("export --include-raw failed: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, `"Raw"`) || !strings.Contains(out, "input_tokens") {
+		t.Errorf("--include-raw export is missing the raw payload:\n%s", out)
+	}
+}
+
+// TestDoctorWarnsOnLoosePerms loosens the data dir and DB the way pre-#25
+// releases created them and expects doctor to flag both.
+func TestDoctorWarnsOnLoosePerms(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	db := filepath.Join(dataDir, "usage.db")
+
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	st.Close()
+	if err := os.Chmod(dataDir, 0o755); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	if err := os.Chmod(db, 0o644); err != nil {
+		t.Fatalf("chmod db: %v", err)
+	}
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", filepath.Join(t.TempDir(), "absent.json"),
+		"--no-daemon", "doctor")
+	if err != nil {
+		t.Fatalf("doctor failed: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning: data dir") {
+		t.Errorf("doctor did not warn about the data dir:\n%s", out)
+	}
+	if !strings.Contains(out, "warning: database") {
+		t.Errorf("doctor did not warn about the database:\n%s", out)
 	}
 }

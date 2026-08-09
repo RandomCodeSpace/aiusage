@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -271,5 +272,50 @@ func TestStatsAndSourceStats(t *testing.T) {
 	}
 	if ss[0].Sessions != 1 {
 		t.Fatalf("sessions=%d want 1", ss[0].Sessions)
+	}
+}
+
+// TestOpenRestrictsPermissions verifies the privacy contract: a fresh data dir
+// is created owner-only and the DB plus any WAL/SHM sidecars end up 0600 (the
+// raw column holds transcript content).
+func TestOpenRestrictsPermissions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	db := filepath.Join(dir, "usage.db")
+	st, err := Open(db)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	// A committed write forces the WAL sidecars into existence.
+	e := ev("k-perm", model.ToolCodex, time.Now(), 1)
+	if _, err := st.InsertEvents(context.Background(), []model.UsageEvent{e}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("data dir mode = %03o, want no group/other bits", perm)
+	}
+
+	fi, err = os.Stat(db)
+	if err != nil {
+		t.Fatalf("stat db: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("db mode = %03o, want 600", perm)
+	}
+
+	for _, side := range []string{db + "-wal", db + "-shm"} {
+		fi, err := os.Stat(side)
+		if err != nil {
+			continue // sidecar not materialised; nothing to leak
+		}
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("%s mode = %03o, want no group/other bits", side, perm)
+		}
 	}
 }

@@ -14,10 +14,11 @@ import (
 
 // exportOpts holds the flags for the export command.
 type exportOpts struct {
-	since  string
-	until  string
-	format string
-	out    string
+	since      string
+	until      string
+	format     string
+	out        string
+	includeRaw bool
 }
 
 // newExportCmd builds the `export` command: writes the raw matching events as
@@ -40,6 +41,8 @@ func newExportCmd() *cobra.Command {
 	f.StringVar(&o.until, "until", "", "upper time bound (RFC3339, YYYY-MM-DD, or a span like 1h)")
 	f.StringVar(&o.format, "format", "json", "output format: json or csv")
 	f.StringVar(&o.out, "out", "", "output file path (default: stdout)")
+	f.BoolVar(&o.includeRaw, "include-raw", false,
+		"include the raw provider payload per event (may contain full transcript content)")
 	return cmd
 }
 
@@ -73,7 +76,7 @@ func runExport(c *cobra.Command, o exportOpts) error {
 		return fmt.Errorf("list events: %w", err)
 	}
 
-	w, closeFn, err := exportWriter(c, o.out)
+	w, closeFn, err := exportWriter(c, o.out, o.includeRaw)
 	if err != nil {
 		return err
 	}
@@ -81,22 +84,38 @@ func runExport(c *cobra.Command, o exportOpts) error {
 
 	switch format {
 	case "csv":
+		if o.includeRaw {
+			return report.WriteEventsCSVWithRaw(w, evs)
+		}
 		return report.WriteEventsCSV(w, evs)
 	default:
+		if o.includeRaw {
+			return report.WriteEventsJSONWithRaw(w, evs)
+		}
 		return report.WriteEventsJSON(w, evs)
 	}
 }
 
 // exportWriter resolves the output target: stdout when out is empty, otherwise
-// a created/truncated file. The returned closeFn closes the file (and is a
-// no-op for stdout).
-func exportWriter(c *cobra.Command, out string) (io.Writer, func(), error) {
+// a created/truncated file. A file holding raw payloads is created 0600: raw
+// can carry full transcript content. The returned closeFn closes the file (and
+// is a no-op for stdout).
+func exportWriter(c *cobra.Command, out string, includeRaw bool) (io.Writer, func(), error) {
 	if strings.TrimSpace(out) == "" {
 		return c.OutOrStdout(), func() {}, nil
 	}
-	f, err := os.Create(out)
+	mode := os.FileMode(0o644)
+	if includeRaw {
+		mode = 0o600
+	}
+	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create output file %s: %w", out, err)
+	}
+	if includeRaw {
+		// The create mode above only applies to new files; tighten pre-existing
+		// ones too before transcript content is written into them.
+		_ = f.Chmod(0o600)
 	}
 	return f, func() { f.Close() }, nil
 }

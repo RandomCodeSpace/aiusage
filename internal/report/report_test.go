@@ -258,3 +258,73 @@ func TestWriteEventsCSVEmpty(t *testing.T) {
 		t.Fatalf("expected header-only, got %d records", len(records))
 	}
 }
+
+// TestWriteEventsJSONOmitsRaw guards the json:"-" privacy contract: the default
+// event export must never carry the raw provider payload.
+func TestWriteEventsJSONOmitsRaw(t *testing.T) {
+	evs := sampleEvents()
+	evs[0].Raw = `{"input_tokens":100}`
+	var buf bytes.Buffer
+	if err := WriteEventsJSON(&buf, evs); err != nil {
+		t.Fatalf("WriteEventsJSON: %v", err)
+	}
+	if strings.Contains(buf.String(), "Raw") || strings.Contains(buf.String(), "input_tokens") {
+		t.Errorf("default export leaked the raw payload:\n%s", buf.String())
+	}
+}
+
+// TestWriteEventsJSONWithRawRestoresRaw checks the explicit opt-in path keeps
+// the historical "Raw" key alongside the untouched event fields.
+func TestWriteEventsJSONWithRawRestoresRaw(t *testing.T) {
+	evs := sampleEvents()
+	evs[0].Raw = `{"input_tokens":100}`
+	var buf bytes.Buffer
+	if err := WriteEventsJSONWithRaw(&buf, evs); err != nil {
+		t.Fatalf("WriteEventsJSONWithRaw: %v", err)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(got))
+	}
+	if got[0]["Raw"] != evs[0].Raw {
+		t.Errorf("Raw = %v, want %q", got[0]["Raw"], evs[0].Raw)
+	}
+	if got[0]["Tool"] != model.ToolClaudeCode {
+		t.Errorf("Tool = %v, want %q", got[0]["Tool"], model.ToolClaudeCode)
+	}
+	if raw, ok := got[1]["Raw"]; !ok || raw != "" {
+		t.Errorf("event without payload: Raw = %v (present=%v), want empty string", raw, ok)
+	}
+}
+
+// TestWriteEventsCSVWithRawAppendsColumn checks --include-raw appends a "raw"
+// column without disturbing the stable header order.
+func TestWriteEventsCSVWithRawAppendsColumn(t *testing.T) {
+	evs := sampleEvents()
+	evs[0].Raw = `{"input_tokens":100}`
+	var buf bytes.Buffer
+	if err := WriteEventsCSVWithRaw(&buf, evs); err != nil {
+		t.Fatalf("WriteEventsCSVWithRaw: %v", err)
+	}
+	r := csv.NewReader(&buf)
+	records, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("read csv: %v", err)
+	}
+	header := records[0]
+	if !reflect.DeepEqual(header[:len(header)-1], csvHeader) {
+		t.Errorf("existing columns changed:\nwant %v\ngot  %v", csvHeader, header[:len(header)-1])
+	}
+	if header[len(header)-1] != "raw" {
+		t.Errorf("last column = %q, want raw", header[len(header)-1])
+	}
+	if got := records[1][len(header)-1]; got != evs[0].Raw {
+		t.Errorf("raw cell = %q, want %q", got, evs[0].Raw)
+	}
+	if got := records[2][len(header)-1]; got != "" {
+		t.Errorf("raw cell for payload-less event = %q, want empty", got)
+	}
+}

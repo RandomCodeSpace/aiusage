@@ -44,7 +44,8 @@ var spawnDaemon = func(cfg config.Config) error {
 		}
 	}
 
-	logf, err := os.OpenFile(cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// 0600: cycle logs can echo adapter errors that include source paths.
+	logf, err := os.OpenFile(cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open daemon log %s: %w", cfg.LogPath, err)
 	}

@@ -331,6 +331,50 @@ func TestTUISubcommandRemoved(t *testing.T) {
 	}
 }
 
+// TestRepairPrivatePermsTightensExistingInstall lays down an install the way
+// pre-#25 releases did (dir 0755, DB/WAL/SHM/log 0644) and asserts the
+// daemon-start repair makes everything owner-only.
+func TestRepairPrivatePermsTightensExistingInstall(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(dataDir, 0o755); err != nil { // explicit: MkdirAll is umask-subject
+		t.Fatalf("chmod dir: %v", err)
+	}
+
+	db := filepath.Join(dataDir, "usage.db")
+	logPath := filepath.Join(t.TempDir(), "aiusage.log")
+	files := []string{db, db + "-wal", db + "-shm", logPath}
+	for _, p := range files {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+	}
+
+	repairPrivatePerms(config.Config{DBPath: db, LogPath: logPath})
+
+	fi, err := os.Stat(dataDir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("data dir mode = %03o, want 700", perm)
+	}
+	for _, p := range files {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %03o, want 600", p, perm)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (func() bool {
 		for i := 0; i+len(sub) <= len(s); i++ {

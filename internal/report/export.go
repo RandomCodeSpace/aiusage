@@ -47,7 +47,9 @@ func WriteSummaryJSON(w io.Writer, sum *store.Summary) error {
 	return nil
 }
 
-// WriteEventsJSON writes a slice of usage events as indented JSON.
+// WriteEventsJSON writes a slice of usage events as indented JSON. Raw is
+// excluded (json:"-"): it can carry transcript content. WriteEventsJSONWithRaw
+// is the explicit opt-in.
 func WriteEventsJSON(w io.Writer, evs []model.UsageEvent) error {
 	if evs == nil {
 		evs = []model.UsageEvent{}
@@ -60,14 +62,57 @@ func WriteEventsJSON(w io.Writer, evs []model.UsageEvent) error {
 	return nil
 }
 
+// eventWithRaw restores the Raw payload that UsageEvent's json:"-" tag strips.
+// The outer field marshals under the pre-tag key "Raw", so --include-raw
+// output keeps the historical shape.
+type eventWithRaw struct {
+	model.UsageEvent
+	Raw string
+}
+
+// WriteEventsJSONWithRaw is WriteEventsJSON plus the Raw provider payload.
+// Only the export --include-raw path may call it: Raw can carry full
+// transcript content.
+func WriteEventsJSONWithRaw(w io.Writer, evs []model.UsageEvent) error {
+	wrapped := make([]eventWithRaw, len(evs))
+	for i, e := range evs {
+		wrapped[i] = eventWithRaw{UsageEvent: e, Raw: e.Raw}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(wrapped); err != nil {
+		return fmt.Errorf("encode events json: %w", err)
+	}
+	return nil
+}
+
 // WriteEventsCSV writes a slice of usage events as CSV with a stable header.
 func WriteEventsCSV(w io.Writer, evs []model.UsageEvent) error {
+	return writeEventsCSV(w, evs, false)
+}
+
+// WriteEventsCSVWithRaw is WriteEventsCSV plus a trailing "raw" column.
+// Existing columns keep their position; only the export --include-raw path
+// may call it (Raw can carry full transcript content).
+func WriteEventsCSVWithRaw(w io.Writer, evs []model.UsageEvent) error {
+	return writeEventsCSV(w, evs, true)
+}
+
+func writeEventsCSV(w io.Writer, evs []model.UsageEvent, includeRaw bool) error {
+	header := csvHeader
+	if includeRaw {
+		header = append(append([]string{}, csvHeader...), "raw")
+	}
 	cw := csv.NewWriter(w)
-	if err := cw.Write(csvHeader); err != nil {
+	if err := cw.Write(header); err != nil {
 		return fmt.Errorf("write csv header: %w", err)
 	}
 	for _, e := range evs {
-		if err := cw.Write(eventRecord(e)); err != nil {
+		rec := eventRecord(e)
+		if includeRaw {
+			rec = append(rec, e.Raw)
+		}
+		if err := cw.Write(rec); err != nil {
 			return fmt.Errorf("write csv row: %w", err)
 		}
 	}

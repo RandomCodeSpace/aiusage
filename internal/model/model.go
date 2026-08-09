@@ -64,7 +64,10 @@ type UsageEvent struct {
 	SourcePath string // file/db the record came from
 	DedupKey   string // globally-unique stable key; INSERT OR IGNORE on this
 	Kind       EventKind
-	Raw        string // raw provider usage JSON (optional, for audit)
+	// Raw is the raw provider usage payload (optional, for audit). It can carry
+	// full transcript content, so it is never marshalled by default; export
+	// restores it only behind the explicit --include-raw flag.
+	Raw string `json:"-"`
 }
 
 // ComputedTotal sums the token components using Anthropic-style accounting
