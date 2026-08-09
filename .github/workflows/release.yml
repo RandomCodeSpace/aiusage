@@ -1,9 +1,10 @@
 name: Release
 
 # Cuts a GitHub Release when a version tag (vX.Y.Z) is pushed: cross-compiles
-# linux/darwin/windows for amd64+arm64, builds archives + checksums, and injects
-# the tag version into the binary via ldflags (see .goreleaser.yaml). Versioning
-# is tag-driven — `git tag v1.2.3 && git push origin v1.2.3`.
+# linux/darwin for amd64+arm64 (Windows is intentionally not a target — see
+# .goreleaser.yaml), builds archives + checksums, and injects the tag version
+# into the binary via ldflags. Versioning is tag-driven —
+# `git tag v1.2.3 && git push origin v1.2.3`.
 
 on:
   push:

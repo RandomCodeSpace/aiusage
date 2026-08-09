@@ -10,7 +10,11 @@ project_name: aiusage
 
 before:
   hooks:
-    - go mod tidy
+    # Verify tidiness rather than tidy: hooks run AFTER goreleaser's dirty-tree
+    # check, so a plain `go mod tidy` here would silently release from module
+    # files that were never committed. -diff exits non-zero when go.mod/go.sum
+    # would change; fix and re-tag instead.
+    - go mod tidy -diff
 
 builds:
   - id: aiusage

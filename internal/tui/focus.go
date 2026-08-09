@@ -5,7 +5,7 @@ import "github.com/RandomCodeSpace/aiusage/internal/tui/views"
 // View identifies the active tab. The four views form the command-center spine;
 // 1..4 (and clicking a top tab) select them directly, and Tab / Shift+Tab cycle
 // through them. There is no within-view pane cycling: each view has exactly one
-// interactive surface (see interactivePane), and every other panel is read-only.
+// interactive surface, and every other panel is read-only.
 type View int
 
 const (
@@ -58,21 +58,6 @@ func viewFromKey(k string) (View, bool) {
 		}
 	}
 	return ViewOverview, false
-}
-
-// interactivePane returns the single interactive pane index for a view — the
-// only pane that wears the focus ring and that arrows / Enter / wheel act on.
-// Every other pane is read-only and never focusable, so there is no within-view
-// focus cycle (which previously let the ring land on dead panels).
-func interactivePane(v View) int {
-	switch v {
-	case ViewByTool, ViewByModel:
-		return views.PaneByXBars
-	case ViewBrowse:
-		return views.PaneBrowseTable
-	default: // ViewOverview — the trend
-		return views.PaneOverviewHero
-	}
 }
 
 // compile-time check that the view-local pane constants referenced across the

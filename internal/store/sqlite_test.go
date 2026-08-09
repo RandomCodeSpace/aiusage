@@ -39,7 +39,7 @@ func ev(dedup, tool string, et time.Time, total int64) model.UsageEvent {
 }
 
 // TestInsertOrIgnoreIdempotent verifies re-inserting the same dedup key is a
-// no-op and never errors (the append-only INSERT OR IGNORE contract).
+// no-op and never errors (the append-only ON CONFLICT DO NOTHING contract).
 func TestInsertOrIgnoreIdempotent(t *testing.T) {
 	st := openTemp(t)
 	ctx := context.Background()
@@ -474,6 +474,7 @@ func TestSummarizeDistinctSessionCounts(t *testing.T) {
 		mk("d3", "tool-a", "s2"),
 		mk("d4", "tool-a", ""), // sessionless: never counted
 		mk("d5", "tool-b", "s3"),
+		mk("d6", "tool-b", "s1"), // s1 spans two group keys (tool-a AND tool-b)
 	}
 	if _, err := st.InsertEvents(ctx, evs); err != nil {
 		t.Fatalf("InsertEvents: %v", err)
@@ -483,14 +484,16 @@ func TestSummarizeDistinctSessionCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summarize: %v", err)
 	}
-	want := map[string]int64{"tool-a": 2, "tool-b": 1}
+	want := map[string]int64{"tool-a": 2, "tool-b": 2}
 	for _, b := range s.Buckets {
 		if got := b.Sessions; got != want[b.Keys["tool"]] {
 			t.Errorf("tool %s sessions = %d, want %d", b.Keys["tool"], got, want[b.Keys["tool"]])
 		}
 	}
+	// s1 appears under BOTH tools: summing per-bucket distinct counts would
+	// give 4. The grand total must deduplicate across buckets.
 	if s.Totals.Sessions != 3 {
-		t.Errorf("grand total sessions = %d, want 3", s.Totals.Sessions)
+		t.Errorf("grand total sessions = %d, want 3 (s1 must not double count across buckets)", s.Totals.Sessions)
 	}
 
 	// Ungrouped summarize carries the count too.

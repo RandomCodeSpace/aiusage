@@ -104,7 +104,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		if ctx.Err() != nil {
 			return srcs, ctx.Err()
 		}
-		if dir == "" || !isDir(dir) {
+		if dir == "" || !adapter.IsDir(dir) {
 			continue
 		}
 
@@ -122,7 +122,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		}
 
 		msgDir := filepath.Join(dir, storageDirName, messageDirName)
-		if isDir(msgDir) {
+		if adapter.IsDir(msgDir) {
 			if _, dup := seen[msgDir]; !dup {
 				seen[msgDir] = struct{}{}
 				srcs = append(srcs, adapter.Source{
@@ -347,12 +347,12 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 		session = "unknown"
 	}
 
-	input := nonNeg(m.Tokens.Input)
-	output := nonNeg(m.Tokens.Output)
-	cacheCreation := nonNeg(m.Tokens.Cache.Write)
-	cacheRead := nonNeg(m.Tokens.Cache.Read)
-	reasoning := nonNeg(m.Tokens.Reasoning)
-	total := nonNeg(m.Tokens.Total)
+	input := adapter.NonNeg(m.Tokens.Input)
+	output := adapter.NonNeg(m.Tokens.Output)
+	cacheCreation := adapter.NonNeg(m.Tokens.Cache.Write)
+	cacheRead := adapter.NonNeg(m.Tokens.Cache.Read)
+	reasoning := adapter.NonNeg(m.Tokens.Reasoning)
+	total := adapter.NonNeg(m.Tokens.Total)
 
 	// Reconcile against the provider total. opencode cache buckets are additive
 	// (Anthropic-style), so they participate in the known sum; reasoning is a
@@ -400,18 +400,6 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 		Kind:                model.KindUsage,
 	}
 	return ev, true
-}
-
-func nonNeg(v int64) int64 {
-	if v < 0 {
-		return 0
-	}
-	return v
-}
-
-func isDir(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && fi.IsDir()
 }
 
 func isFile(p string) bool {

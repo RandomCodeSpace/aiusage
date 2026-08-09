@@ -81,14 +81,14 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		}
 		// Primary root: <home>/sessions if it is a dir, else <home>.
 		root := filepath.Join(home, dirSessions)
-		if !isDir(root) {
+		if !adapter.IsDir(root) {
 			root = home
 		}
 		a.scanRoot(ctx, root, seen, &srcs)
 
 		// Durability enhancement: also read archived sessions if present.
 		archived := filepath.Join(home, dirArchived)
-		if isDir(archived) {
+		if adapter.IsDir(archived) {
 			a.scanRoot(ctx, archived, seen, &srcs)
 		}
 	}
@@ -98,7 +98,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 // scanRoot recursively collects *.jsonl files under root, tagging each Source
 // with the root for relative-session computation.
 func (a Adapter) scanRoot(ctx context.Context, root string, seen map[string]struct{}, srcs *[]adapter.Source) {
-	if !isDir(root) {
+	if !adapter.IsDir(root) {
 		return
 	}
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -380,19 +380,12 @@ func satSub(a, b int64) int64 {
 // the schema CHECK and poison the insert batch it rides in.
 func (r rawTokens) clamped() rawTokens {
 	return rawTokens{
-		input:     nonNeg(r.input),
-		cached:    nonNeg(r.cached),
-		output:    nonNeg(r.output),
-		reasoning: nonNeg(r.reasoning),
-		total:     nonNeg(r.total),
+		input:     adapter.NonNeg(r.input),
+		cached:    adapter.NonNeg(r.cached),
+		output:    adapter.NonNeg(r.output),
+		reasoning: adapter.NonNeg(r.reasoning),
+		total:     adapter.NonNeg(r.total),
 	}
-}
-
-func nonNeg(v int64) int64 {
-	if v < 0 {
-		return 0
-	}
-	return v
 }
 
 // buildEvent maps raw tokens (cached ⊆ input) onto a UsageEvent. Negative
@@ -464,17 +457,4 @@ func ts(line map[string]json.RawMessage, mtime time.Time) time.Time {
 		}
 	}
 	return mtime
-}
-
-func isDir(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && fi.IsDir()
-}
-
-func fileMTime(p string) time.Time {
-	fi, err := os.Stat(p)
-	if err != nil {
-		return time.Time{}
-	}
-	return fi.ModTime().UTC()
 }

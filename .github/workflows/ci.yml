@@ -1,17 +1,21 @@
 name: CI
 
-# Build, vet, format-check, test (with coverage) and vulnerability scan on every
-# push to main and every pull request. Pure-Go, CGO disabled to match the
-# release build; a separate race job re-enables CGO for the concurrency-sensitive
-# packages only.
+# Build, vet, format-check, test (with coverage), staticcheck, race detection,
+# SonarCloud analysis and vulnerability scan on every push to main and every
+# pull request. Pure-Go, CGO disabled to match the release build; the race job
+# re-enables CGO. The weekly schedule runs ONLY govulncheck (every other job
+# carries an event_name guard, and sonar is skipped through its build-test
+# dependency).
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-  # Weekly run so newly-disclosed vulnerabilities in dependencies are caught even
-  # when there are no new commits (the govulncheck job below).
+  workflow_dispatch:
+  # Weekly run so newly-disclosed vulnerabilities in dependencies are caught
+  # even when there are no new commits (the govulncheck job below — nothing
+  # else runs on this trigger).
   schedule:
     - cron: "0 6 * * 1"
 
@@ -25,6 +29,7 @@ concurrency:
 jobs:
   build-test:
     name: build & test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,8 +70,9 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
-  race:
-    name: race detector
+  staticcheck:
+    name: staticcheck
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,12 +80,76 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # The race detector needs CGO. Scope it to the packages with real
-      # concurrency (TUI ticks, the collection daemon, the store) to keep it fast.
+      # Pinned so a new staticcheck release cannot break CI on unchanged code.
+      # v0.7.0 is the 2026.1 release; bump deliberately, alongside Go upgrades.
+      # U1000 (unused code) is in the default check set, so dead-code
+      # regressions fail the build.
+      - name: staticcheck
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          staticcheck ./...
+
+  race:
+    name: race detector
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The race detector needs CGO. Cover the whole module: scoping to "the
+      # concurrent packages" is how the sysmon race fixed in b9cc4ca stayed
+      # invisible to CI.
       - name: go test -race
         env:
           CGO_ENABLED: "1"
-        run: go test -race -count=1 ./internal/tui/... ./internal/collect/... ./internal/store/...
+        run: go test -race -count=1 ./...
+
+  sonar:
+    name: SonarCloud scan
+    # Reuses build-test's coverage artifact instead of re-running the suite.
+    # The dependency also skips this job on the weekly schedule (build-test is
+    # skipped there, so this job never starts).
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history lets Sonar attribute new code / blame accurately.
+          fetch-depth: 0
+
+      - name: Download coverage
+        if: env.SONAR_TOKEN != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage
+
+      - name: SonarCloud scan
+        if: env.SONAR_TOKEN != ''
+        # Non-blocking: if the SonarCloud project is not yet provisioned (or the
+        # token/org/key do not match), report it but do not fail the build. Once
+        # SonarCloud is set up, the scan's own quality gate governs PR status.
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Explain skipped scan
+        if: env.SONAR_TOKEN == ''
+        run: |
+          echo "SONAR_TOKEN is not configured, so the SonarCloud scan was skipped."
+          echo "Add a repository secret named SONAR_TOKEN to enable this check."
 
   govulncheck:
     name: vulnerability scan
@@ -92,6 +162,8 @@ jobs:
           cache: true
       - name: govulncheck
         # govulncheck reports only vulns actually reachable from this code.
+        # The binary is pinned for reproducibility; the vulnerability database
+        # is fetched live either way, so pinning loses nothing.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...

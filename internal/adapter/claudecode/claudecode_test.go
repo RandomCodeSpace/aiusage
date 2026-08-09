@@ -199,7 +199,7 @@ var benchLine = []byte(`{"type":"assistant","timestamp":"2026-05-10T13:14:19.329
 
 func BenchmarkParseLine(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, ok := parseLine(benchLine, "/p/f.jsonl", "seg", "sess"); !ok {
 			b.Fatal("parse failed")
 		}

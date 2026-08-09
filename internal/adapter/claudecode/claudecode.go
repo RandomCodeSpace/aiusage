@@ -388,8 +388,8 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 
 	in := deref(u.InputTokens)
 	out := deref(u.OutputTokens)
-	cacheC := nonNegative(u.CacheCreationTokens.Value)
-	cacheR := nonNegative(u.CacheReadTokens.Value)
+	cacheC := adapter.NonNeg(u.CacheCreationTokens.Value)
+	cacheR := adapter.NonNeg(u.CacheReadTokens.Value)
 	total := in + out + cacheC + cacheR // cache additive; no reasoning
 
 	project := segment
@@ -488,12 +488,5 @@ func deref(p *int64) int64 {
 	if p == nil {
 		return 0
 	}
-	return nonNegative(*p)
-}
-
-func nonNegative(v int64) int64 {
-	if v < 0 {
-		return 0
-	}
-	return v
+	return adapter.NonNeg(*p)
 }

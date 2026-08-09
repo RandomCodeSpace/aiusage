@@ -150,7 +150,7 @@ var toolAccents = map[string]compat.AdaptiveColor{
 	model.ToolCopilot:    adaptive("#0969DA", "#5C9CE6"), // blue
 	model.ToolOpenCode:   adaptive("#7C3AED", "#A78BFA"), // violet
 	model.ToolHermes:     adaptive("#BF3989", "#F778BA"), // magenta
-	"gemini":             adaptive("#0F6FC4", "#6BC2FF"), // sky
+	model.ToolGemini:     adaptive("#0F6FC4", "#6BC2FF"), // sky
 	model.ToolAgy:        adaptive("#6E7781", "#8B949E"), // grey (no data)
 }
 
@@ -163,20 +163,8 @@ var toolGlyphs = map[string]string{
 	model.ToolCopilot:    "●",
 	model.ToolOpenCode:   "■",
 	model.ToolHermes:     "✦",
-	"gemini":             "◇",
+	model.ToolGemini:     "◇",
 	model.ToolAgy:        "○",
-}
-
-// canonicalTools is the canonical 7-tool set (constants + the string-keyed
-// "gemini" accent which has no model.Tool constant).
-var canonicalTools = []string{
-	model.ToolClaudeCode,
-	model.ToolCodex,
-	model.ToolCopilot,
-	model.ToolOpenCode,
-	model.ToolHermes,
-	"gemini",
-	model.ToolAgy,
 }
 
 // ToolAccent returns the accent color for a tool, falling back to the theme

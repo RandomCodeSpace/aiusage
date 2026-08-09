@@ -22,20 +22,6 @@ type TimelineData struct {
 	Focused  bool   // whether the chart pane wears the focus ring
 }
 
-// dimNoun maps a grouping dimension to a human noun for the title.
-func dimNoun(dim string) string {
-	switch dim {
-	case "hour":
-		return "hourly"
-	case "week":
-		return "weekly"
-	case "month":
-		return "monthly"
-	default:
-		return "daily"
-	}
-}
-
 func bucketLabel(b store.Bucket, dim string) string {
 	if v, ok := b.Keys[dim]; ok {
 		if dim == "hour" {

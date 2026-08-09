@@ -82,12 +82,13 @@ type DBStats struct {
 
 // Store is the persistence interface used by the collector and reporting.
 type Store interface {
-	// InsertEvents appends usage events idempotently (INSERT OR IGNORE on
-	// dedup_key) in a single transaction. Returns the count actually inserted
-	// (i.e. new dedup keys). Never updates or deletes existing rows. A row
-	// whose own insert fails (CHECK violation, empty dedup key) is skipped and
-	// reported via the returned error while the rest of the batch commits, so
-	// the count is meaningful even when the error is non-nil.
+	// InsertEvents appends usage events idempotently (INSERT .. ON
+	// CONFLICT(dedup_key) DO NOTHING — a blanket OR IGNORE would also swallow
+	// CHECK violations) in a single transaction. Returns the count actually
+	// inserted (i.e. new dedup keys). Never updates or deletes existing rows.
+	// A row whose own insert fails (CHECK violation, empty dedup key) is
+	// skipped and reported via the returned error while the rest of the batch
+	// commits, so the count is meaningful even when the error is non-nil.
 	InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error)
 
 	// LastState returns the most recent observed counters for an aggregate

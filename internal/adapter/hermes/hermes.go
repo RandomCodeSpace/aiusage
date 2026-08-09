@@ -198,11 +198,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			continue // row content unchanged since the last applied cycle
 		}
 
-		in := nonNeg(input.Int64)
-		out := nonNeg(output.Int64)
-		cCreate := nonNeg(cacheWrite.Int64) // cache_write_tokens -> CacheCreation
-		cRead := nonNeg(cacheRead.Int64)
-		reasoning := nonNeg(reason.Int64)
+		in := adapter.NonNeg(input.Int64)
+		out := adapter.NonNeg(output.Int64)
+		cCreate := adapter.NonNeg(cacheWrite.Int64) // cache_write_tokens -> CacheCreation
+		cRead := adapter.NonNeg(cacheRead.Int64)
+		reasoning := adapter.NonNeg(reason.Int64)
 		// Anthropic-style additive accounting; reasoning is informational and
 		// (per the spec) not added into the authoritative total.
 		total := in + out + cCreate + cRead
@@ -337,14 +337,6 @@ func quote(s string) string {
 	}
 	b.WriteByte('"')
 	return b.String()
-}
-
-// nonNeg clamps a possibly-negative counter to zero.
-func nonNeg(v int64) int64 {
-	if v < 0 {
-		return 0
-	}
-	return v
 }
 
 // isFile reports whether path exists and is a regular file.

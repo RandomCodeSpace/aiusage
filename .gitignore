@@ -10,6 +10,9 @@
 *.db-shm
 *.db-wal
 
+# Agent session scratch (worktrees, plans) — never commit
+/.claude/
+
 # Agent-generated working docs (promote explicitly if they become deliverables)
 PLAN.md
 NOTES.md

@@ -25,6 +25,7 @@ const (
 	ToolCopilot    = "copilot"
 	ToolOpenCode   = "opencode"
 	ToolHermes     = "hermes"
+	ToolGemini     = "gemini"
 	ToolAgy        = "agy"
 )
 
@@ -62,7 +63,7 @@ type UsageEvent struct {
 	RequestID  string // provider request id (if any)
 	MessageID  string // provider message id (if any)
 	SourcePath string // file/db the record came from
-	DedupKey   string // globally-unique stable key; INSERT OR IGNORE on this
+	DedupKey   string // globally-unique stable key; inserts conflict-skip on this
 	Kind       EventKind
 	// Raw is the raw provider usage payload (optional, for audit). It can carry
 	// full transcript content, so it is never marshalled by default; export
