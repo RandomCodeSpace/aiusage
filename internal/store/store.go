@@ -32,9 +32,14 @@ type Filter struct {
 type Bucket struct {
 	// Keys maps each GroupBy dimension to its value for this bucket
 	// (e.g. {"day":"2026-05-29","tool":"codex"}). Ordered via OrderedKeys.
-	Keys          map[string]string
-	OrderedKeys   []string // dimension names in GroupBy order
-	Events        int64
+	Keys        map[string]string
+	OrderedKeys []string // dimension names in GroupBy order
+	Events      int64
+	// Sessions is the distinct non-empty session_id count within the group,
+	// computed store-level (COUNT DISTINCT) so callers never have to
+	// materialize one bucket per session just to count them. Distinct counts
+	// do not add across buckets.
+	Sessions      int64
 	Input         int64
 	Output        int64
 	CacheCreation int64
@@ -101,10 +106,23 @@ type Store interface {
 	// re-derive the same delta under a fresh dedup key — a permanent double
 	// count). When events is non-empty but every dedup key already exists,
 	// the state write is skipped: an unchanged baseline lets the next poll
-	// re-derive the colliding delta instead of dropping it. Returns the
-	// number of events actually inserted. Future collection-scoped writes
-	// (e.g. cycle checkpoints) are expected to join this same transaction.
-	ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot) (int, error)
+	// re-derive the colliding delta instead of dropping it. A non-nil cp is
+	// upserted under the same condition and in the same transaction, so a
+	// checkpoint can never claim data whose state write was skipped or
+	// rolled back. Returns the number of events actually inserted.
+	ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error)
+
+	// Checkpoint returns the stored incremental-collection state for a
+	// (tool, source path), or nil when none exists.
+	Checkpoint(ctx context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error)
+
+	// ApplyEvents appends usage events (same idempotent semantics as
+	// InsertEvents) and upserts the source checkpoint in ONE transaction. A
+	// checkpoint persisted outside the event transaction could outrun the
+	// events it claims — a crash between the two commits would then skip
+	// data forever. A nil cp degrades to a plain event insert; empty events
+	// with a non-nil cp writes just the checkpoint.
+	ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error)
 
 	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
 	Summarize(ctx context.Context, f Filter) (*Summary, error)

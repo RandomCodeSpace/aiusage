@@ -135,6 +135,23 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 // taking the max (final) cumulative snapshot per id. Malformed records are
 // skipped; a non-fatal error is returned describing how many were skipped.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
+	return a.CollectIncremental(ctx, src, nil)
+}
+
+// CollectIncremental gates the file on size+mtime: unchanged files are not
+// opened at all. Any change re-parses the whole file — records for one turn id
+// are cumulative and the max-per-id grouping needs every record, so a tail
+// read is not applicable. A nil cp is a full read.
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
+	fi, err := os.Stat(src.Path)
+	if err != nil {
+		return adapter.Observation{}, fmt.Errorf("gemini: stat %s: %w", src.Path, err)
+	}
+	size, mtimeNS := fi.Size(), fi.ModTime().UnixNano()
+	if cp != nil && cp.Size == size && cp.MTimeNS == mtimeNS {
+		return adapter.Observation{}, nil // unchanged: skip, keep stored checkpoint
+	}
+
 	recs, skipped, err := readRecords(src.Path)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("gemini: read %s: %w", src.Path, err)
@@ -167,10 +184,18 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		snaps = append(snaps, snap)
 	}
 
-	if skipped > 0 {
-		return adapter.Observation{Snapshots: snaps}, fmt.Errorf("gemini: skipped %d unparseable record(s) in %s", skipped, src.Path)
+	obs := adapter.Observation{
+		Snapshots: snaps,
+		// The read completed (skipped lines are permanently unparseable, not
+		// partial), so the checkpoint may advance.
+		Checkpoint: &model.SourceCheckpoint{
+			Tool: toolID, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
+		},
 	}
-	return adapter.Observation{Snapshots: snaps}, nil
+	if skipped > 0 {
+		return obs, fmt.Errorf("gemini: skipped %d unparseable record(s) in %s", skipped, src.Path)
+	}
+	return obs, nil
 }
 
 // tokenBlock is the per-turn token breakdown emitted by Gemini CLI.

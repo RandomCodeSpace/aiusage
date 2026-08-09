@@ -338,3 +338,82 @@ func TestNumberValueOverflowRejected(t *testing.T) {
 		t.Errorf("numberValue(12) = %d,%v; want 12,true", v, ok)
 	}
 }
+
+// TestIncrementalSizeMtimeGate: an unchanged OTEL file is skipped without
+// opening; any change re-parses the whole file (trace contexts are whole-file
+// scope) and refreshes the checkpoint.
+func TestIncrementalSizeMtimeGate(t *testing.T) {
+	span := `{"type":"span","traceId":"t1","spanId":"s1","name":"chat m","endTime":[1775934264,0],` +
+		`"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"m",` +
+		`"gen_ai.conversation.id":"c1","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":50}}`
+	home := writeOTEL(t, span)
+	path := filepath.Join(home, ".copilot", "otel", "copilot.jsonl")
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolCopilot, Class: model.EventLevel, Path: path}
+
+	obs1, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs1.Events) != 1 || obs1.Checkpoint == nil {
+		t.Fatalf("full read: err=%v events=%d cp=%v", err, len(obs1.Events), obs1.Checkpoint)
+	}
+
+	obs2, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs2.Events) != 0 || obs2.Checkpoint != nil {
+		t.Fatalf("unchanged skip: err=%v events=%d cp=%+v", err, len(obs2.Events), obs2.Checkpoint)
+	}
+
+	// Append a second span: full re-parse emits both; the store dedups the old.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	span2 := `{"type":"span","traceId":"t2","spanId":"s2","name":"chat m","endTime":[1775934300,0],` +
+		`"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"m",` +
+		`"gen_ai.conversation.id":"c2","gen_ai.usage.input_tokens":7,"gen_ai.usage.output_tokens":3}}` + "\n"
+	if _, err := f.WriteString(span2); err != nil {
+		t.Fatalf("write append: %v", err)
+	}
+	f.Close()
+
+	obs3, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs3.Events) != 2 || obs3.Checkpoint == nil {
+		t.Fatalf("changed reparse: err=%v events=%d cp=%v", err, len(obs3.Events), obs3.Checkpoint)
+	}
+}
+
+// TestFailedReadWithholdsCheckpoint guards the checkpoint contract: a file
+// that stats but cannot be read must not be checkpointed, or the size+mtime
+// gate would skip its content forever once the file goes quiet.
+func TestFailedReadWithholdsCheckpoint(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based open failure does not apply to root")
+	}
+	span := `{"type":"span","traceId":"t1","spanId":"s1","name":"chat m","endTime":[1775934264,0],` +
+		`"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"m",` +
+		`"gen_ai.conversation.id":"c1","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":50}}`
+	home := writeOTEL(t, span)
+	path := filepath.Join(home, ".copilot", "otel", "copilot.jsonl")
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolCopilot, Class: model.EventLevel, Path: path}
+
+	obs, err := a.CollectIncremental(context.Background(), src, nil)
+	if err == nil {
+		t.Fatal("want error from unreadable file")
+	}
+	if obs.Checkpoint != nil {
+		t.Fatalf("checkpoint must be withheld on a failed read, got %+v", obs.Checkpoint)
+	}
+
+	// Once readable again, the same (unchanged) file must still be collected.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	obs2, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs2.Events) != 1 || obs2.Checkpoint == nil {
+		t.Fatalf("recovery read: err=%v events=%d cp=%v", err, len(obs2.Events), obs2.Checkpoint)
+	}
+}

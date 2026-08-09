@@ -15,9 +15,12 @@ package hermes
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,10 +108,54 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 	return srcs, nil
 }
 
+// ckptState is the incremental gate persisted in the checkpoint. Level 1: the
+// db + WAL file stamps — every Hermes commit touches one of them, so equal
+// stamps mean the database cannot hold new data and is not even opened.
+// Level 2: a content hash per session row — session rows GROW IN PLACE across
+// polls (a rowid watermark is inapplicable), so an unchanged hash skips the
+// row's snapshot and with it the collector's per-cell state read/write.
+type ckptState struct {
+	DBSize   int64             `json:"dbSize"`
+	DBMTime  int64             `json:"dbMtime"`
+	WALSize  int64             `json:"walSize"`
+	WALMTime int64             `json:"walMtime"`
+	Sessions map[string]string `json:"sessions,omitempty"`
+}
+
+// fileStamp returns (size, mtimeNS) for path, or (-1, 0) when absent — a WAL
+// appearing or vanishing must break gate equality.
+func fileStamp(path string) (int64, int64) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return -1, 0
+	}
+	return fi.Size(), fi.ModTime().UnixNano()
+}
+
 // Collect opens the state database read-only and emits one AggregateSnapshot
 // per session row. A malformed/unreadable row is skipped rather than failing
 // the whole cycle; a non-fatal error is returned describing skipped rows.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
+	return a.CollectIncremental(ctx, src, nil)
+}
+
+// CollectIncremental applies the two-level gate described on ckptState. A nil
+// cp is a full read.
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
+	gate := ckptState{}
+	gate.DBSize, gate.DBMTime = fileStamp(src.Path)
+	gate.WALSize, gate.WALMTime = fileStamp(src.Path + "-wal")
+
+	var prev ckptState
+	if cp != nil && cp.State != "" {
+		if err := json.Unmarshal([]byte(cp.State), &prev); err == nil {
+			if prev.DBSize == gate.DBSize && prev.DBMTime == gate.DBMTime &&
+				prev.WALSize == gate.WALSize && prev.WALMTime == gate.WALMTime {
+				return adapter.Observation{}, nil // untouched db: skip, keep stored checkpoint
+			}
+		}
+	}
+
 	db, err := openReadOnly(src.Path)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("hermes: open %s: %w", src.Path, err)
@@ -122,6 +169,7 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 	defer rows.Close()
 
 	now := time.Now().UTC()
+	gate.Sessions = make(map[string]string)
 	var snaps []model.AggregateSnapshot
 	var skipped int
 	for rows.Next() {
@@ -141,6 +189,13 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		if id == "" || mdl == "" {
 			skipped++
 			continue
+		}
+
+		hash := rowHash(id, mdl, provider.String, startedAt.String, endedAt.String,
+			input.Int64, output.Int64, cacheRead.Int64, cacheWrite.Int64, reason.Int64)
+		gate.Sessions[id] = hash
+		if prev.Sessions[id] == hash {
+			continue // row content unchanged since the last applied cycle
 		}
 
 		in := nonNeg(input.Int64)
@@ -180,12 +235,35 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		})
 	}
 	if err := rows.Err(); err != nil {
+		// Incomplete scan: no checkpoint, so the next cycle re-reads in full.
 		return adapter.Observation{Snapshots: snaps}, fmt.Errorf("hermes: iterate %s: %w", src.Path, err)
 	}
-	if skipped > 0 {
-		return adapter.Observation{Snapshots: snaps}, fmt.Errorf("hermes: skipped %d malformed session row(s) in %s", skipped, src.Path)
+
+	obs := adapter.Observation{Snapshots: snaps}
+	if stateJSON, err := json.Marshal(gate); err == nil {
+		obs.Checkpoint = &model.SourceCheckpoint{
+			Tool: model.ToolHermes, SourcePath: src.Path, State: string(stateJSON),
+		}
 	}
-	return adapter.Observation{Snapshots: snaps}, nil
+	if skipped > 0 {
+		return obs, fmt.Errorf("hermes: skipped %d malformed session row(s) in %s", skipped, src.Path)
+	}
+	return obs, nil
+}
+
+// rowHash fingerprints one session row's read columns. FNV-1a is sufficient:
+// a collision only skips one poll of one row until the row next changes.
+func rowHash(id, mdl, provider, startedAt, endedAt string, nums ...int64) string {
+	h := fnv.New64a()
+	for _, s := range []string{id, mdl, provider, startedAt, endedAt} {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	for _, n := range nums {
+		h.Write([]byte(strconv.FormatInt(n, 10)))
+		h.Write([]byte{0})
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // openReadOnly opens a SQLite database strictly read-only. mode=ro prevents

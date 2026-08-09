@@ -253,7 +253,7 @@ func TestApplySnapshotAtomicCrashWindow(t *testing.T) {
 	applySnapshotFault = func() error { return errors.New("injected crash") }
 	defer func() { applySnapshotFault = nil }()
 
-	if _, err := st.ApplySnapshot(ctx, []model.UsageEvent{delta}, snap); err == nil {
+	if _, err := st.ApplySnapshot(ctx, []model.UsageEvent{delta}, snap, nil); err == nil {
 		t.Fatalf("expected the injected crash to surface")
 	}
 
@@ -269,7 +269,7 @@ func TestApplySnapshotAtomicCrashWindow(t *testing.T) {
 	// under a fresh dedup key; it must land exactly once, together with state.
 	applySnapshotFault = nil
 	delta2 := ev("agg|hermes|cell|2", model.ToolHermes, now.Add(time.Minute), 900_000)
-	if n, err := st.ApplySnapshot(ctx, []model.UsageEvent{delta2}, snap); err != nil || n != 1 {
+	if n, err := st.ApplySnapshot(ctx, []model.UsageEvent{delta2}, snap, nil); err != nil || n != 1 {
 		t.Fatalf("recovery apply n=%d err=%v want 1,nil", n, err)
 	}
 	if got := windowTot(t, st, time.Time{}, time.Time{}); got != 900_000 {
@@ -294,14 +294,14 @@ func TestApplySnapshotCollisionKeepsBaseline(t *testing.T) {
 		Tool: model.ToolHermes, Key: "cell",
 		InputTokens: 100, TotalTokens: 100, ObservedTime: now,
 	}
-	if n, err := st.ApplySnapshot(ctx, []model.UsageEvent{ev("agg|k", model.ToolHermes, now, 100)}, first); err != nil || n != 1 {
+	if n, err := st.ApplySnapshot(ctx, []model.UsageEvent{ev("agg|k", model.ToolHermes, now, 100)}, first, nil); err != nil || n != 1 {
 		t.Fatalf("first apply n=%d err=%v want 1,nil", n, err)
 	}
 
 	grown := first
 	grown.InputTokens = 250
 	grown.TotalTokens = 250
-	n, err := st.ApplySnapshot(ctx, []model.UsageEvent{ev("agg|k", model.ToolHermes, now, 150)}, grown)
+	n, err := st.ApplySnapshot(ctx, []model.UsageEvent{ev("agg|k", model.ToolHermes, now, 150)}, grown, nil)
 	if err != nil || n != 0 {
 		t.Fatalf("collided apply n=%d err=%v want 0,nil", n, err)
 	}
@@ -309,7 +309,7 @@ func TestApplySnapshotCollisionKeepsBaseline(t *testing.T) {
 		t.Fatalf("collided apply advanced state to %+v; baseline must stay at 100", v)
 	}
 
-	if n, err := st.ApplySnapshot(ctx, nil, grown); err != nil || n != 0 {
+	if n, err := st.ApplySnapshot(ctx, nil, grown, nil); err != nil || n != 0 {
 		t.Fatalf("state-only apply n=%d err=%v want 0,nil", n, err)
 	}
 	if v, _ := st.LastState(ctx, model.ToolHermes, "cell"); v == nil || v.TotalTokens != 250 {
@@ -452,5 +452,66 @@ func TestInsertEventsEmptyKeyRowSkippedNotBatch(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "empty dedup key") {
 		t.Fatalf("want empty-dedup-key report, got %v", err)
+	}
+}
+
+// TestSummarizeDistinctSessionCounts: every summarize row (and the grand
+// total) carries a store-level COUNT(DISTINCT session_id) so callers never
+// materialize one bucket per session just to count them. Empty session ids
+// are excluded, matching SourceStats.
+func TestSummarizeDistinctSessionCounts(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	at := time.Now()
+	mk := func(dedup, tool, session string) model.UsageEvent {
+		e := ev(dedup, tool, at, 10)
+		e.SessionID = session
+		return e
+	}
+	evs := []model.UsageEvent{
+		mk("d1", "tool-a", "s1"),
+		mk("d2", "tool-a", "s1"),
+		mk("d3", "tool-a", "s2"),
+		mk("d4", "tool-a", ""), // sessionless: never counted
+		mk("d5", "tool-b", "s3"),
+	}
+	if _, err := st.InsertEvents(ctx, evs); err != nil {
+		t.Fatalf("InsertEvents: %v", err)
+	}
+
+	s, err := st.Summarize(ctx, Filter{GroupBy: []string{"tool"}})
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	want := map[string]int64{"tool-a": 2, "tool-b": 1}
+	for _, b := range s.Buckets {
+		if got := b.Sessions; got != want[b.Keys["tool"]] {
+			t.Errorf("tool %s sessions = %d, want %d", b.Keys["tool"], got, want[b.Keys["tool"]])
+		}
+	}
+	if s.Totals.Sessions != 3 {
+		t.Errorf("grand total sessions = %d, want 3", s.Totals.Sessions)
+	}
+
+	// Ungrouped summarize carries the count too.
+	s, err = st.Summarize(ctx, Filter{Tools: []string{"tool-a"}})
+	if err != nil {
+		t.Fatalf("Summarize(tool-a): %v", err)
+	}
+	if s.Totals.Sessions != 2 {
+		t.Errorf("tool-a total sessions = %d, want 2", s.Totals.Sessions)
+	}
+}
+
+// TestOpenSetsSynchronousNormal: the DSN pragma must actually take effect — a
+// mistyped _pragma key would be silently ignored by the driver.
+func TestOpenSetsSynchronousNormal(t *testing.T) {
+	st := openTemp(t)
+	var v int
+	if err := st.db.QueryRowContext(context.Background(), "PRAGMA synchronous").Scan(&v); err != nil {
+		t.Fatalf("pragma query: %v", err)
+	}
+	if v != 1 {
+		t.Fatalf("synchronous = %d, want 1 (NORMAL)", v)
 	}
 }

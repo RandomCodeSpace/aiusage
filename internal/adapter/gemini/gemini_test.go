@@ -240,3 +240,42 @@ func TestDiscoverResolvesSymlinkedRoot(t *testing.T) {
 		t.Errorf("Path = %q, want resolved %q", srcs[0].Path, want)
 	}
 }
+
+// TestIncrementalSizeMtimeGate: an unchanged file is skipped without opening;
+// a change re-parses the whole file (cumulative per-id records need the
+// max-per-id grouping over every record).
+func TestIncrementalSizeMtimeGate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "turns.jsonl")
+	line1 := `{"id":"t1","model":"gemini-pro","sessionId":"gs","tokens":{"input":50,"output":10,"total":60}}` + "\n"
+	if err := os.WriteFile(path, []byte(line1), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: toolID, Class: model.Aggregate, Path: path}
+
+	obs1, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs1.Snapshots) != 1 || obs1.Checkpoint == nil {
+		t.Fatalf("full read: err=%v snaps=%d cp=%v", err, len(obs1.Snapshots), obs1.Checkpoint)
+	}
+
+	obs2, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs2.Snapshots) != 0 || obs2.Checkpoint != nil {
+		t.Fatalf("unchanged skip: err=%v snaps=%d cp=%+v", err, len(obs2.Snapshots), obs2.Checkpoint)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := f.WriteString(`{"id":"t2","model":"gemini-pro","sessionId":"gs","tokens":{"input":20,"output":5,"total":25}}` + "\n"); err != nil {
+		t.Fatalf("write append: %v", err)
+	}
+	f.Close()
+
+	obs3, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs3.Snapshots) != 2 || obs3.Checkpoint == nil {
+		t.Fatalf("changed reparse: err=%v snaps=%d cp=%v", err, len(obs3.Snapshots), obs3.Checkpoint)
+	}
+}

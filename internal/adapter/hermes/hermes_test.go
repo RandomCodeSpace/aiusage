@@ -323,3 +323,60 @@ func TestCollectWALModeLiveDB(t *testing.T) {
 		t.Fatalf("snapshots = %+v, want one for live-1", obs.Snapshots)
 	}
 }
+
+// TestIncrementalGates covers both checkpoint levels: an untouched database
+// is skipped without opening; when it changes, only sessions whose row
+// content changed are re-emitted (rows grow in place, so a rowid watermark
+// cannot work here).
+func TestIncrementalGates(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, ".hermes")
+	dbPath := makeStateDB(t, home, func(db *sql.DB) {
+		insertSession(t, db, "A", "claude-opus", "anthropic", "2026-05-29T10:00:00Z", 100, 200, 0, 0, 0)
+		insertSession(t, db, "B", "claude-opus", "anthropic", "2026-05-29T10:00:00Z", 10, 10, 0, 0, 0)
+	})
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolHermes, Class: model.Aggregate, Path: dbPath}
+
+	obs1, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs1.Snapshots) != 2 || obs1.Checkpoint == nil {
+		t.Fatalf("full read: err=%v snaps=%d cp=%v", err, len(obs1.Snapshots), obs1.Checkpoint)
+	}
+
+	// Level 1: untouched db -> no open, no snapshots, no new checkpoint.
+	obs2, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs2.Snapshots) != 0 || obs2.Checkpoint != nil {
+		t.Fatalf("unchanged skip: err=%v snaps=%d cp=%+v", err, len(obs2.Snapshots), obs2.Checkpoint)
+	}
+
+	// Level 2: grow only session A -> only A re-emits.
+	writer, err := sql.Open(driverName, "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	if _, err := writer.Exec(`UPDATE sessions SET input_tokens=150 WHERE id='A'`); err != nil {
+		t.Fatalf("grow A: %v", err)
+	}
+	writer.Close()
+
+	obs3, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil {
+		t.Fatalf("changed read: %v", err)
+	}
+	if len(obs3.Snapshots) != 1 || obs3.Snapshots[0].Key != "A" {
+		t.Fatalf("changed read snapshots = %+v want only session A", obs3.Snapshots)
+	}
+	if obs3.Snapshots[0].InputTokens != 150 {
+		t.Fatalf("session A input = %d want 150", obs3.Snapshots[0].InputTokens)
+	}
+	if obs3.Checkpoint == nil {
+		t.Fatalf("changed read returned no checkpoint")
+	}
+
+	// The refreshed checkpoint closes the gate again.
+	obs4, err := a.CollectIncremental(context.Background(), src, obs3.Checkpoint)
+	if err != nil || len(obs4.Snapshots) != 0 {
+		t.Fatalf("re-skip: err=%v snaps=%d", err, len(obs4.Snapshots))
+	}
+}

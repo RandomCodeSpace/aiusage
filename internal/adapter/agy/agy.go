@@ -82,10 +82,11 @@ func (a Adapter) roots(cfg adapter.DiscoverConfig) []string {
 	return out
 }
 
-// Discover scans each Antigravity root for *.json / *.jsonl files that actually
-// carry token usage. Files without a usable token block are ignored, so an
-// unauthenticated install (which emits content-only blobs) yields an empty
-// source list and no error.
+// Discover scans each Antigravity root for *.json / *.jsonl files. Files are
+// NOT pre-parsed for token usage here — that would parse every file twice per
+// cycle (Discover, then Collect). Content-only blobs from an unauthenticated
+// install become sources whose Collect emits nothing: the all-zero filter in
+// toSnapshot rejects every record without tokens.
 func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]adapter.Source, error) {
 	seen := make(map[string]struct{})
 	var srcs []adapter.Source
@@ -113,12 +114,6 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 			if _, dup := seen[path]; dup {
 				return nil
 			}
-			// Only surface files that genuinely carry token usage. This is what
-			// keeps a content-only (unauthenticated) install from producing
-			// spurious empty sources.
-			if !fileHasUsage(path) {
-				return nil
-			}
 			seen[path] = struct{}{}
 			srcs = append(srcs, adapter.Source{
 				Tool:  model.ToolAgy,
@@ -137,6 +132,22 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 // taking the max (final) cumulative snapshot per id. Malformed records are
 // skipped; a non-fatal error is returned describing how many were skipped.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
+	return a.CollectIncremental(ctx, src, nil)
+}
+
+// CollectIncremental gates the file on size+mtime: unchanged files are not
+// opened at all. Any change re-parses the whole file (cumulative records need
+// the max-per-id grouping over every record). A nil cp is a full read.
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
+	fi, err := os.Stat(src.Path)
+	if err != nil {
+		return adapter.Observation{}, fmt.Errorf("agy: stat %s: %w", src.Path, err)
+	}
+	size, mtimeNS := fi.Size(), fi.ModTime().UnixNano()
+	if cp != nil && cp.Size == size && cp.MTimeNS == mtimeNS {
+		return adapter.Observation{}, nil // unchanged: skip, keep stored checkpoint
+	}
+
 	recs, skipped, err := readRecords(src.Path)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("agy: read %s: %w", src.Path, err)
@@ -167,10 +178,18 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		snaps = append(snaps, snap)
 	}
 
-	if skipped > 0 {
-		return adapter.Observation{Snapshots: snaps}, fmt.Errorf("agy: skipped %d unparseable record(s) in %s", skipped, src.Path)
+	obs := adapter.Observation{
+		Snapshots: snaps,
+		// The read completed (skipped lines are permanently unparseable, not
+		// partial), so the checkpoint may advance.
+		Checkpoint: &model.SourceCheckpoint{
+			Tool: model.ToolAgy, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
+		},
 	}
-	return adapter.Observation{Snapshots: snaps}, nil
+	if skipped > 0 {
+		return obs, fmt.Errorf("agy: skipped %d unparseable record(s) in %s", skipped, src.Path)
+	}
+	return obs, nil
 }
 
 // tokenBlock is the per-turn token breakdown (Gemini-shaped).
@@ -203,33 +222,12 @@ func (r rawRecord) total() int64 {
 	return nonNeg(r.Tokens.Input) + nonNeg(r.Tokens.Output) + nonNeg(r.Tokens.Thoughts)
 }
 
-// hasTokens reports whether a record carries any non-zero token field.
-func (r rawRecord) hasTokens() bool {
-	t := r.Tokens
-	return t.Input != 0 || t.Output != 0 || t.Cached != 0 || t.Thoughts != 0 || t.Tool != 0 || t.Total != 0
-}
-
 type setWrapper struct {
 	Set json.RawMessage `json:"$set"`
 }
 
 type messagesBlob struct {
 	Messages []rawRecord `json:"messages"`
-}
-
-// fileHasUsage reports whether a file contains at least one record with a
-// non-zero token field. Used by Discover to ignore content-only blobs.
-func fileHasUsage(path string) bool {
-	recs, _, err := readRecords(path)
-	if err != nil {
-		return false
-	}
-	for _, r := range recs {
-		if r.hasTokens() {
-			return true
-		}
-	}
-	return false
 }
 
 // readRecords parses a *.json or *.jsonl file into decoded records.

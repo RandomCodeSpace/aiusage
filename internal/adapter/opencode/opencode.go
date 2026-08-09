@@ -163,9 +163,17 @@ func findDB(dir string) string {
 
 // Collect reads one discovered source (DB or JSON tree) read-only.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
+	return a.CollectIncremental(ctx, src, nil)
+}
+
+// CollectIncremental reads the DB source with a rowid watermark (only message
+// rows above the last consumed rowid are scanned; the message log is
+// append-only). The JSON tree has no incremental path and is always read in
+// full. A nil cp is a full read.
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
 	switch kindOf(src) {
 	case kindDB:
-		return collectDB(ctx, src)
+		return collectDB(ctx, src, cp)
 	case kindJSON:
 		return collectJSON(ctx, src)
 	default:
@@ -182,11 +190,13 @@ func kindOf(src adapter.Source) string {
 	return ""
 }
 
-// collectDB reads `SELECT id, session_id, data FROM message` read-only. The
-// `id`/`session_id` columns are authoritative; the `data` JSON supplies tokens,
-// model, timestamp and project. A malformed or missing column never fails the
-// whole source — the row is skipped.
-func collectDB(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
+// collectDB reads `SELECT rowid, id, session_id, data FROM message` read-only,
+// restricted to rowids above the checkpoint watermark (the message log is
+// append-only, so already-consumed rowids never change). The `id`/`session_id`
+// columns are authoritative; the `data` JSON supplies tokens, model, timestamp
+// and project. A malformed or missing column never fails the whole source —
+// the row is skipped, but it also holds the watermark back so it is retried.
+func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
 	dsn := "file:" + src.Path + "?mode=ro&immutable=1&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -194,36 +204,58 @@ func collectDB(ctx context.Context, src adapter.Source) (adapter.Observation, er
 	}
 	defer db.Close()
 
-	rows, err := db.QueryContext(ctx, "SELECT id, session_id, data FROM message")
+	watermark := int64(0)
+	if cp != nil {
+		watermark = cp.Watermark
+	}
+
+	rows, err := db.QueryContext(ctx,
+		"SELECT rowid, id, session_id, data FROM message WHERE rowid > ? ORDER BY rowid", watermark)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("opencode: query %s: %w", src.Path, err)
 	}
 	defer rows.Close()
 
-	var events []model.UsageEvent
+	var (
+		events   []model.UsageEvent
+		consumed = watermark // highest rowid fully processed, no gaps skipped
+		clean    = true
+	)
 	for rows.Next() {
 		if ctx.Err() != nil {
 			return adapter.Observation{Events: events}, ctx.Err()
 		}
 		var (
+			rowid     int64
 			id        sql.NullString
 			sessionID sql.NullString
 			data      sql.NullString
 		)
-		if err := rows.Scan(&id, &sessionID, &data); err != nil {
-			continue // skip unreadable row
-		}
-		if !data.Valid || data.String == "" {
+		if err := rows.Scan(&rowid, &id, &sessionID, &data); err != nil {
+			clean = false // unreadable row: retry it next cycle
 			continue
 		}
-		ev, ok := buildEvent([]byte(data.String), id.String, sessionID.String, src.Path)
-		if !ok {
-			continue
+		if data.Valid && data.String != "" {
+			if ev, ok := buildEvent([]byte(data.String), id.String, sessionID.String, src.Path); ok {
+				events = append(events, ev)
+			}
 		}
-		events = append(events, ev)
+		if clean {
+			consumed = rowid
+		}
+	}
+	if rows.Err() != nil {
+		clean = false // iteration broke: do not advance past what we saw cleanly
+	}
+
+	obs := adapter.Observation{Events: events}
+	if consumed > watermark || (cp == nil && clean) {
+		obs.Checkpoint = &model.SourceCheckpoint{
+			Tool: model.ToolOpenCode, SourcePath: src.Path, Watermark: consumed,
+		}
 	}
 	// rows.Err() is intentionally non-fatal: keep best-effort results.
-	return adapter.Observation{Events: events}, nil
+	return obs, nil
 }
 
 // collectJSON walks storage/message/**/*.json read-only, parsing each as a

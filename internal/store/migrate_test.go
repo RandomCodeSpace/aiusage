@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // TestOpenFreshCreatesAtLatestVersion verifies a fresh database is stamped
@@ -145,6 +147,72 @@ func TestMigrationGapDetected(t *testing.T) {
 	steps := []migration{{version: 2}}
 	if err := applyMigrations(context.Background(), db, 0, 2, steps); err == nil {
 		t.Fatalf("expected gap error for missing v1 step")
+	}
+}
+
+// TestMigrateV1ToV2CreatesCheckpoints simulates opening a v1 database with
+// this (v2) binary: the migration must create source_checkpoints and stamp v2.
+// The v1 state is produced by removing the v2 table from a fresh database and
+// rewinding the stamp — bytewise equivalent to what a v1 binary left behind.
+func TestMigrateV1ToV2CreatesCheckpoints(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "usage.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := st.db.Exec(`DROP TABLE source_checkpoints`); err != nil {
+		t.Fatalf("drop v2 table: %v", err)
+	}
+	if _, err := st.db.Exec(`UPDATE schema_meta SET value='1' WHERE key='schema_version'`); err != nil {
+		t.Fatalf("rewind stamp: %v", err)
+	}
+	st.Close()
+
+	st2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen v1 db: %v", err)
+	}
+	defer st2.Close()
+
+	v, err := readSchemaVersion(ctx, st2.db)
+	if err != nil || v != 2 {
+		t.Fatalf("post-migration version=%d err=%v want 2,nil", v, err)
+	}
+	ok, err := tableExists(ctx, st2.db, "source_checkpoints")
+	if err != nil || !ok {
+		t.Fatalf("source_checkpoints exists=%v err=%v want true,nil", ok, err)
+	}
+	// The migrated table must be usable, not just present.
+	cp := model.SourceCheckpoint{Tool: model.ToolCodex, SourcePath: "/p", Size: 1}
+	if _, err := st2.ApplyEvents(ctx, nil, &cp); err != nil {
+		t.Fatalf("checkpoint write on migrated db: %v", err)
+	}
+}
+
+// TestMigrationSkipsWhenAlreadyApplied covers the concurrent-upgrader race:
+// the version is re-checked inside the migration transaction, so a process
+// that finds the step already stamped (another process won the write lock and
+// committed first) skips it instead of re-running the DDL.
+func TestMigrationSkipsWhenAlreadyApplied(t *testing.T) {
+	ctx := context.Background()
+	db := bareMetaDB(t)
+	if _, err := db.Exec(`INSERT INTO schema_meta(key,value) VALUES('schema_version','2')`); err != nil {
+		t.Fatalf("stamp v2: %v", err)
+	}
+
+	// A non-idempotent statement: re-running it would fail loudly.
+	step := migration{version: 2, statements: []string{`CREATE TABLE mig_once (x INTEGER)`}}
+	if _, err := db.Exec(`CREATE TABLE mig_once (x INTEGER)`); err != nil {
+		t.Fatalf("pre-create: %v", err)
+	}
+	if err := applyMigration(ctx, db, step); err != nil {
+		t.Fatalf("already-applied step must be skipped, got: %v", err)
+	}
+
+	v, err := readSchemaVersion(ctx, db)
+	if err != nil || v != 2 {
+		t.Fatalf("version=%d err=%v want 2,nil (untouched)", v, err)
 	}
 }
 

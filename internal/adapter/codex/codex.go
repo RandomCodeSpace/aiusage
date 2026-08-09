@@ -11,10 +11,13 @@
 package codex
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -127,97 +130,204 @@ func (a Adapter) scanRoot(ctx context.Context, root string, seen map[string]stru
 	})
 }
 
-// Collect reads one JSONL session file and returns its usage events.
+// lineMarkers fast-skip lines that can neither carry usage nor set the model:
+// only token_count payloads and turn_context lines matter to this adapter.
+// Unquoted so whitespace-padded type strings (" token_count ") still match.
+var (
+	markerTokenCount  = []byte(`token_count`)
+	markerTurnContext = []byte(`turn_context`)
+)
+
+// ckptState is the per-file parse state persisted in the checkpoint. The
+// cumulative baseline (Prev/HavePrev) is what makes tail reads correct: a
+// naive tail read would count the first cumulative total_token_usage record
+// after the offset IN FULL instead of as a delta. Model is the turn_context
+// carry-forward, which a tail read would otherwise miss.
+type ckptState struct {
+	Model     string `json:"model,omitempty"`
+	HavePrev  bool   `json:"havePrev,omitempty"`
+	Input     int64  `json:"input,omitempty"`
+	Cached    int64  `json:"cached,omitempty"`
+	Output    int64  `json:"output,omitempty"`
+	Reasoning int64  `json:"reasoning,omitempty"`
+	Total     int64  `json:"total,omitempty"`
+}
+
+// Collect reads one JSONL session file in full and returns its usage events.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
+	return a.CollectIncremental(ctx, src, nil)
+}
+
+// CollectIncremental reads only what is new since cp: an unchanged size+mtime
+// skips the file entirely; growth tail-reads from the stored offset with the
+// persisted cumulative baseline; any shrink or same-size rewrite re-reads from
+// zero (re-derived dedup keys collapse in the store). A nil cp is a full read.
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
 	f, err := os.Open(src.Path) // read-only
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("codex: open %s: %w", src.Path, err)
 	}
 	defer f.Close()
 
-	mtime := fileMTime(src.Path)
+	fi, err := f.Stat()
+	if err != nil {
+		return adapter.Observation{}, fmt.Errorf("codex: stat %s: %w", src.Path, err)
+	}
+	size := fi.Size()
+	mtimeNS := fi.ModTime().UnixNano()
+
+	var (
+		start int64
+		state ckptState
+	)
+	if cp != nil {
+		if cp.Size == size && cp.MTimeNS == mtimeNS {
+			return adapter.Observation{}, nil // unchanged: skip, keep stored checkpoint
+		}
+		// Tail-read only on pure growth. A shrink or same-size change means
+		// unknown history: restart from zero with a fresh baseline.
+		if size > cp.Size && cp.Offset >= 0 && cp.Offset <= size {
+			start = cp.Offset
+			if cp.State != "" {
+				if err := json.Unmarshal([]byte(cp.State), &state); err != nil {
+					start, state = 0, ckptState{}
+				}
+			}
+		}
+	}
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return adapter.Observation{}, fmt.Errorf("codex: seek %s: %w", src.Path, err)
+		}
+	}
+
+	mtime := fi.ModTime().UTC()
 	session := a.sessionID(src)
 
 	var (
 		events    []model.UsageEvent
-		curModel  string
-		prevTotal rawTokens
-		havePrev  bool
-		dec       = json.NewDecoder(f)
+		curModel  = state.Model
+		prevTotal = rawTokens{
+			input: state.Input, cached: state.Cached, output: state.Output,
+			reasoning: state.Reasoning, total: state.Total,
+		}
+		havePrev = state.HavePrev
+		consumed = start
+		r        = bufio.NewReaderSize(f, 64*1024)
 	)
-	dec.UseNumber()
 
 	for {
 		if ctx.Err() != nil {
 			return adapter.Observation{Events: events}, ctx.Err()
 		}
-		var line map[string]json.RawMessage
-		if err := dec.Decode(&line); err != nil {
-			// Malformed JSON / partial trailing line: stop, keep what we have.
-			break
+		raw, rerr := r.ReadBytes('\n')
+		terminated := rerr == nil
+		if rerr != nil && rerr != io.EOF {
+			break // unreadable remainder: keep what we have, checkpoint stops here
 		}
-
-		typ := typeOf(line["type"])
-
-		// turn_context lines set the current model (carried forward).
-		if typ == "turn_context" {
-			if m := modelFrom(line["payload"]); m != "" {
-				curModel = m
+		if len(bytes.TrimSpace(raw)) > 0 &&
+			(bytes.Contains(raw, markerTokenCount) || bytes.Contains(raw, markerTurnContext)) {
+			var line map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &line); err != nil {
+				// Malformed line: skip it and keep parsing — one bad line must
+				// not silently drop the rest of the file. But an unterminated
+				// malformed tail is likely a write in progress: leave the
+				// offset before it so the completed line is read next cycle.
+				if !terminated {
+					break
+				}
+			} else if ev, ok := parseUsageLine(line, mtime, session, src.Path,
+				&curModel, &prevTotal, &havePrev); ok {
+				events = append(events, ev)
 			}
+		}
+		if terminated {
+			consumed += int64(len(raw))
 			continue
 		}
-		if typ != "event_msg" {
-			continue
-		}
-
-		payload := objOf(line["payload"])
-		if payload == nil || typeOf(payload["type"]) != "token_count" {
-			continue
-		}
-		info := objOf(payload["info"])
-		if info == nil {
-			continue
-		}
-
-		// Model may also be present on the payload/info; carry forward otherwise.
-		if m := firstModel(payload, info); m != "" {
-			curModel = m
-		}
-		mdl := curModel
-		if mdl == "" {
-			mdl = defaultModel
-		}
-
-		var (
-			tok    rawTokens
-			usable bool
-		)
-		if last := objOf(info["last_token_usage"]); last != nil {
-			tok = readRaw(last)
-			usable = true
-		} else if cum := objOf(info["total_token_usage"]); cum != nil {
-			cur := readRaw(cum)
-			if havePrev {
-				tok = cur.satSub(prevTotal)
-			} else {
-				tok = cur
-			}
-			prevTotal = cur
-			havePrev = true
-			usable = true
-		}
-		if !usable {
-			continue
-		}
-
-		ev, ok := buildEvent(tok, mdl, session, src.Path, ts(line, mtime))
-		if !ok {
-			continue
-		}
-		events = append(events, ev)
+		// Complete-but-unterminated final line: its events were emitted, but
+		// the offset stays before it — if it was mid-append, the next cycle
+		// re-reads the full line and the store collapses the dedup keys.
+		break
 	}
 
-	return adapter.Observation{Events: events}, nil
+	newState, err := json.Marshal(ckptState{
+		Model: curModel, HavePrev: havePrev,
+		Input: prevTotal.input, Cached: prevTotal.cached, Output: prevTotal.output,
+		Reasoning: prevTotal.reasoning, Total: prevTotal.total,
+	})
+	if err != nil {
+		return adapter.Observation{Events: events}, nil // no checkpoint; next cycle re-reads
+	}
+	return adapter.Observation{
+		Events: events,
+		Checkpoint: &model.SourceCheckpoint{
+			Tool: model.ToolCodex, SourcePath: src.Path,
+			Size: size, MTimeNS: mtimeNS, Offset: consumed, State: string(newState),
+		},
+	}, nil
+}
+
+// parseUsageLine handles one decoded JSONL line, updating the model
+// carry-forward and cumulative baseline in place. Returns a usage event when
+// the line is a non-zero token_count record.
+func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, path string,
+	curModel *string, prevTotal *rawTokens, havePrev *bool) (model.UsageEvent, bool) {
+
+	typ := typeOf(line["type"])
+
+	// turn_context lines set the current model (carried forward).
+	if typ == "turn_context" {
+		if m := modelFrom(line["payload"]); m != "" {
+			*curModel = m
+		}
+		return model.UsageEvent{}, false
+	}
+	if typ != "event_msg" {
+		return model.UsageEvent{}, false
+	}
+
+	payload := objOf(line["payload"])
+	if payload == nil || typeOf(payload["type"]) != "token_count" {
+		return model.UsageEvent{}, false
+	}
+	info := objOf(payload["info"])
+	if info == nil {
+		return model.UsageEvent{}, false
+	}
+
+	// Model may also be present on the payload/info; carry forward otherwise.
+	if m := firstModel(payload, info); m != "" {
+		*curModel = m
+	}
+	mdl := *curModel
+	if mdl == "" {
+		mdl = defaultModel
+	}
+
+	var (
+		tok    rawTokens
+		usable bool
+	)
+	if last := objOf(info["last_token_usage"]); last != nil {
+		tok = readRaw(last)
+		usable = true
+	} else if cum := objOf(info["total_token_usage"]); cum != nil {
+		cur := readRaw(cum)
+		if *havePrev {
+			tok = cur.satSub(*prevTotal)
+		} else {
+			tok = cur
+		}
+		*prevTotal = cur
+		*havePrev = true
+		usable = true
+	}
+	if !usable {
+		return model.UsageEvent{}, false
+	}
+
+	return buildEvent(tok, mdl, session, path, ts(line, mtime))
 }
 
 // sessionID computes the session as the file path relative to its sessions root,

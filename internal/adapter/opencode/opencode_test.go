@@ -314,3 +314,54 @@ func TestDiscoverNoDirIsClean(t *testing.T) {
 		t.Fatalf("want 0 sources for missing dir, got %d", len(srcs))
 	}
 }
+
+// TestIncrementalWatermark: only message rows above the stored rowid watermark
+// are read on re-collect; an unchanged table yields no events and no new
+// checkpoint.
+func TestIncrementalWatermark(t *testing.T) {
+	dir := t.TempDir()
+	data1 := `{"id":"w1","sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2}}`
+	dbPath := writeDB(t, dir, [][3]string{{"w1", "s", data1}})
+
+	a := Adapter{}
+	src := adapter.Source{
+		Tool: model.ToolOpenCode, Class: model.EventLevel,
+		Path: dbPath, Meta: map[string]string{"kind": kindDB},
+	}
+
+	obs1, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs1.Events) != 1 || obs1.Checkpoint == nil {
+		t.Fatalf("full read: err=%v events=%d cp=%v", err, len(obs1.Events), obs1.Checkpoint)
+	}
+	if obs1.Checkpoint.Watermark != 1 {
+		t.Fatalf("watermark = %d want 1", obs1.Checkpoint.Watermark)
+	}
+
+	// Unchanged: the watermark query returns nothing.
+	obs2, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs2.Events) != 0 || obs2.Checkpoint != nil {
+		t.Fatalf("unchanged: err=%v events=%d cp=%+v", err, len(obs2.Events), obs2.Checkpoint)
+	}
+
+	// New row: only it is read.
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	data2 := `{"id":"w2","sessionID":"s","modelID":"gpt-5","tokens":{"input":3,"output":4,"total":7}}`
+	if _, err := db.Exec(`INSERT INTO message VALUES ('w2','s',?)`, data2); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	db.Close()
+
+	obs3, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs3.Events) != 1 {
+		t.Fatalf("delta read: err=%v events=%d want 1", err, len(obs3.Events))
+	}
+	if obs3.Events[0].DedupKey != "opencode|w2" {
+		t.Fatalf("delta event = %q want opencode|w2", obs3.Events[0].DedupKey)
+	}
+	if obs3.Checkpoint == nil || obs3.Checkpoint.Watermark != 2 {
+		t.Fatalf("advanced checkpoint = %+v want watermark 2", obs3.Checkpoint)
+	}
+}

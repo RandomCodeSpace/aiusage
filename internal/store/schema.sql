@@ -58,6 +58,20 @@ CREATE TRIGGER IF NOT EXISTS trg_events_no_delete
 BEFORE DELETE ON usage_events
 BEGIN SELECT RAISE(ABORT, 'usage_events is append-only: DELETE forbidden'); END;
 
+-- Mutable per-source incremental-collection state (v2). Losing a row only
+-- costs a full re-read of that source; the collector writes it in the same
+-- transaction as the events it accounts for so it can never outrun the data.
+CREATE TABLE IF NOT EXISTS source_checkpoints (
+  tool        TEXT    NOT NULL,
+  source_path TEXT    NOT NULL,
+  size_bytes  INTEGER NOT NULL DEFAULT 0,
+  mtime_ns    INTEGER NOT NULL DEFAULT 0,
+  read_offset INTEGER NOT NULL DEFAULT 0,
+  watermark   INTEGER NOT NULL DEFAULT 0,
+  state       TEXT,
+  PRIMARY KEY (tool, source_path)
+);
+
 -- Mutable accumulator state: latest observed counters per growing cell.
 CREATE TABLE IF NOT EXISTS aggregate_state (
   tool                  TEXT    NOT NULL,

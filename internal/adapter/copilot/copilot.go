@@ -18,6 +18,7 @@ package copilot
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
@@ -136,20 +137,51 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 }
 
 // Collect parses one OTEL JSONL file, applies cross-record suppression, and
-// returns the surviving usage events. Read errors and malformed lines are
-// tolerated so one bad file never fails the cycle.
+// returns the surviving usage events. Malformed lines are tolerated; a read
+// that does not complete returns an error and no checkpoint so the next cycle
+// retries.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
-	records := readRecords(src.Path)
-	if len(records) == 0 {
-		return adapter.Observation{}, nil
+	return a.CollectIncremental(ctx, src, nil)
+}
+
+// CollectIncremental gates the file on size+mtime: unchanged files are not
+// opened at all. Any change re-parses the whole file — the per-trace fallback
+// model/session context spans all records of a file (a later record may
+// supply the context an earlier usage record needs), so a tail read is not
+// applicable. A nil cp is a full read.
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
+	fi, err := os.Stat(src.Path)
+	if err != nil {
+		return adapter.Observation{}, nil // absent/unreadable: nothing to report (opt-in feature)
+	}
+	size, mtimeNS := fi.Size(), fi.ModTime().UnixNano()
+	if cp != nil && cp.Size == size && cp.MTimeNS == mtimeNS {
+		return adapter.Observation{}, nil // unchanged: skip, keep stored checkpoint
 	}
 
-	fallbackTS := fileMTime(src.Path)
+	newCp := &model.SourceCheckpoint{
+		Tool: model.ToolCopilot, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
+	}
+
+	records, err := readRecords(src.Path)
+	if err != nil {
+		// Failed or partial read: no checkpoint, so the next cycle retries even
+		// if size+mtime are unchanged. Partial records are dropped too —
+		// cross-record suppression needs the whole file, and an unsuppressed
+		// lower-priority record would mint a distinct dedup key (double count).
+		return adapter.Observation{}, fmt.Errorf("copilot: read %s: %w", src.Path, err)
+	}
+	if len(records) == 0 {
+		return adapter.Observation{Checkpoint: newCp}, nil
+	}
+
+	fallbackTS := fi.ModTime().UTC()
 	traceModels, traceSessions := collectTraceContexts(records)
 
 	cands := make([]*candidate, 0, len(records))
 	for i, rec := range records {
 		if ctx.Err() != nil {
+			// Partial parse: no checkpoint, so the next cycle re-reads in full.
 			return adapter.Observation{Events: candidatesToEvents(filterEmitted(cands), src.Path)}, ctx.Err()
 		}
 		if c := toCandidate(rec, i, fallbackTS, traceModels, traceSessions); c != nil {
@@ -157,36 +189,79 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		}
 	}
 
-	return adapter.Observation{Events: candidatesToEvents(filterEmitted(cands), src.Path)}, nil
+	return adapter.Observation{
+		Events:     candidatesToEvents(filterEmitted(cands), src.Path),
+		Checkpoint: newCp,
+	}, nil
 }
 
-// readRecords reads the file and returns each parsed JSON object whose raw line
-// contained the "attributes" marker. Non-object and unparsable lines are
-// skipped.
-func readRecords(path string) []map[string]any {
+// otelRecord is the typed decode of one OTEL JSONL line. Every field stays raw
+// JSON, decoded lazily only where read, so loosely-typed exporters (numeric
+// strings, unexpected shapes in unread fields) never fail a line — matching
+// the tolerance of the previous generic-map decode at a fraction of the
+// allocations.
+type otelRecord struct {
+	Type         json.RawMessage            `json:"type"`
+	Name         json.RawMessage            `json:"name"`
+	Kind         json.RawMessage            `json:"kind"`
+	TraceID      json.RawMessage            `json:"traceId"`
+	SpanID       json.RawMessage            `json:"spanId"`
+	SpanContext  *spanContextObj            `json:"spanContext"`
+	StartTime    json.RawMessage            `json:"startTime"`
+	EndTime      json.RawMessage            `json:"endTime"`
+	Duration     json.RawMessage            `json:"duration"`
+	HrTime       json.RawMessage            `json:"hrTime"`
+	HrTimeAlt    json.RawMessage            `json:"_hrTime"`
+	Time         json.RawMessage            `json:"time"`
+	Timestamp    json.RawMessage            `json:"timestamp"`
+	ObservedTS   json.RawMessage            `json:"observedTimestamp"`
+	TimeUnixNano json.RawMessage            `json:"timeUnixNano"`
+	Body         json.RawMessage            `json:"body"`
+	BodyAlt      json.RawMessage            `json:"_body"`
+	Attributes   map[string]json.RawMessage `json:"attributes"`
+
+	// ts/hasTS are resolved once at read time; stamp is the content-derived
+	// dedup stamp, computed only for timestamp-less records.
+	ts    time.Time
+	hasTS bool
+	stamp string
+}
+
+type spanContextObj struct {
+	TraceID json.RawMessage `json:"traceId"`
+	SpanID  json.RawMessage `json:"spanId"`
+}
+
+// readRecords streams the file line by line into typed records, keeping only
+// lines that contain the "attributes" marker and decode as JSON objects. A
+// non-nil error (open failure or scanner error) means the read did not
+// complete; the caller must not checkpoint the file.
+func readRecords(path string) ([]*otelRecord, error) {
 	f, err := os.Open(path) // O_RDONLY
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer f.Close()
 
-	var out []map[string]any
+	var out []*otelRecord
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // OTEL lines can be large
 	for sc.Scan() {
 		line := sc.Bytes()
-		if !strings.Contains(string(line), attrMarker) {
+		if !bytes.Contains(line, []byte(attrMarker)) {
 			continue
 		}
-		var v any
-		if err := json.Unmarshal(line, &v); err != nil {
+		rec := &otelRecord{}
+		if err := json.Unmarshal(line, rec); err != nil {
 			continue
 		}
-		if m, ok := v.(map[string]any); ok {
-			out = append(out, m)
+		rec.ts, rec.hasTS = timestampFromRecord(rec)
+		if !rec.hasTS {
+			rec.stamp = contentStamp(line)
 		}
+		out = append(out, rec)
 	}
-	return out
+	return out, sc.Err()
 }
 
 // traceContext accumulates fallback model/session for records sharing a traceId.
@@ -198,15 +273,14 @@ type traceContext struct {
 
 // collectTraceContexts builds per-trace fallback model and session, mirroring
 // ccusage: first non-empty model wins; highest-priority session wins.
-func collectTraceContexts(records []map[string]any) (map[string]string, map[string]string) {
+func collectTraceContexts(records []*otelRecord) (map[string]string, map[string]string) {
 	ctxs := make(map[string]*traceContext)
 	for _, rec := range records {
 		trace, ok := traceIDFromRecord(rec)
 		if !ok {
 			continue
 		}
-		attrs, ok := objAttr(rec, "attributes")
-		if !ok {
+		if rec.Attributes == nil {
 			continue
 		}
 		tc := ctxs[trace]
@@ -215,9 +289,9 @@ func collectTraceContexts(records []map[string]any) (map[string]string, map[stri
 			ctxs[trace] = tc
 		}
 		if tc.model == "" {
-			tc.model = firstNonEmptyAttr(attrs, modelAttrs)
+			tc.model = firstNonEmptyAttr(rec.Attributes, modelAttrs)
 		}
-		if sid, prio, ok := bestSessionAttr(attrs); ok && prio > tc.sessionPriority {
+		if sid, prio, ok := bestSessionAttr(rec.Attributes); ok && prio > tc.sessionPriority {
 			tc.sessionID = sid
 			tc.sessionPriority = prio
 		}
@@ -251,9 +325,9 @@ type candidate struct {
 
 // toCandidate classifies a record and maps its token attributes. Records that
 // match no known shape, or that carry no tokens, are dropped (nil).
-func toCandidate(rec map[string]any, index int, fallbackTS time.Time, traceModels, traceSessions map[string]string) *candidate {
-	attrs, ok := objAttr(rec, "attributes")
-	if !ok {
+func toCandidate(rec *otelRecord, index int, fallbackTS time.Time, traceModels, traceSessions map[string]string) *candidate {
+	attrs := rec.Attributes
+	if attrs == nil {
 		return nil
 	}
 
@@ -326,7 +400,7 @@ func toCandidate(rec map[string]any, index int, fallbackTS time.Time, traceModel
 		session = "unknown-session"
 	}
 
-	ts, hasTS := timestampFromRecord(rec)
+	ts, hasTS := rec.ts, rec.hasTS
 	if !hasTS {
 		ts = fallbackTS
 	}
@@ -453,11 +527,11 @@ func candidatesToEvents(cands []*candidate, path string) []model.UsageEvent {
 // Timestamp-less records (hasTS false) get a content-derived stamp instead of
 // ts: ts is then the file mtime, which advances on every append and would mint
 // a fresh key per poll — an unbounded recount.
-func dedupKeyForRecord(source recordSource, rec, attrs map[string]any, trace string, hasTrace bool, session string, ts time.Time, hasTS bool, index int) string {
+func dedupKeyForRecord(source recordSource, rec *otelRecord, attrs map[string]json.RawMessage, trace string, hasTrace bool, session string, ts time.Time, hasTS bool, index int) string {
 	span, hasSpan := spanIDFromRecord(rec)
 	stamp := strconv.FormatInt(ts.UnixMilli(), 10)
 	if !hasTS {
-		stamp = contentStamp(rec)
+		stamp = rec.stamp
 	}
 	switch source {
 	case srcChatSpan, srcAgentSummarySpan:
@@ -472,9 +546,9 @@ func dedupKeyForRecord(source recordSource, rec, attrs map[string]any, trace str
 		return "log:" + session + ":" + stamp + ":" + strconv.Itoa(index)
 	default: // srcAgentTurnLog
 		turnIdx := ""
-		if v, ok := numberValue(attrs["turn.index"]); ok {
+		if v, ok := numberValueRaw(attrs["turn.index"]); ok {
 			turnIdx = strconv.FormatInt(v, 10)
-		} else if v, ok := numberValue(attrs["copilot_chat.turn.index"]); ok {
+		} else if v, ok := numberValueRaw(attrs["copilot_chat.turn.index"]); ok {
 			turnIdx = strconv.FormatInt(v, 10)
 		} else {
 			turnIdx = "idx-" + strconv.Itoa(index)
@@ -487,10 +561,16 @@ func dedupKeyForRecord(source recordSource, rec, attrs map[string]any, trace str
 }
 
 // contentStamp hashes the record's own content — never the file mtime — so a
-// timestamp-less record keeps a stable dedup key across polls. json.Marshal
-// serialises map keys sorted, so the hash is deterministic per record.
-func contentStamp(rec map[string]any) string {
-	b, err := json.Marshal(rec)
+// timestamp-less record keeps a stable dedup key across polls. The line is
+// round-tripped through the generic map decode and json.Marshal (sorted keys)
+// to stay byte-identical with the stamps of previously stored dedup keys; a
+// direct hash of the raw line would re-key (and re-count) history.
+func contentStamp(line []byte) string {
+	var v map[string]any
+	if err := json.Unmarshal(line, &v); err != nil {
+		return "unhashable"
+	}
+	b, err := json.Marshal(v)
 	if err != nil {
 		return "unhashable"
 	}
@@ -500,53 +580,51 @@ func contentStamp(rec map[string]any) string {
 
 // --- record-shape detection (mirrors ccusage parser.rs) ---
 
-func isSpanRecord(rec map[string]any) bool {
-	if t, ok := stringField(rec["type"]); ok {
+func isSpanRecord(rec *otelRecord) bool {
+	if t, ok := rawString(rec.Type); ok {
 		return t == "span"
 	}
-	if _, ok := stringField(rec["name"]); !ok {
+	if _, ok := rawString(rec.Name); !ok {
 		return false
 	}
-	if _, ok := stringField(rec["spanId"]); ok {
+	if _, ok := rawString(rec.SpanID); ok {
 		return true
 	}
-	if _, ok := stringField(rec["traceId"]); ok {
+	if _, ok := rawString(rec.TraceID); ok {
 		return true
 	}
-	_, hasStart := rec["startTime"]
-	_, hasEnd := rec["endTime"]
-	_, hasDur := rec["duration"]
-	_, hasKind := rec["kind"]
-	return hasStart || hasEnd || hasDur || hasKind
+	// Presence checks: a present-but-null field still counts, matching the
+	// previous generic-map decode.
+	return len(rec.StartTime) > 0 || len(rec.EndTime) > 0 || len(rec.Duration) > 0 || len(rec.Kind) > 0
 }
 
-func isChatSpan(rec, attrs map[string]any) bool {
+func isChatSpan(rec *otelRecord, attrs map[string]json.RawMessage) bool {
 	if !isSpanRecord(rec) {
 		return false
 	}
 	if attrString(attrs, "gen_ai.operation.name") == "chat" {
 		return true
 	}
-	if name, ok := stringField(rec["name"]); ok && strings.HasPrefix(name, "chat ") {
+	if name, ok := rawString(rec.Name); ok && strings.HasPrefix(name, "chat ") {
 		return true
 	}
 	return false
 }
 
-func isAgentSummarySpan(rec, attrs map[string]any) bool {
+func isAgentSummarySpan(rec *otelRecord, attrs map[string]json.RawMessage) bool {
 	if !isSpanRecord(rec) {
 		return false
 	}
 	if attrString(attrs, "gen_ai.operation.name") == "invoke_agent" {
 		return true
 	}
-	if name, ok := stringField(rec["name"]); ok && strings.HasPrefix(name, "invoke_agent ") {
+	if name, ok := rawString(rec.Name); ok && strings.HasPrefix(name, "invoke_agent ") {
 		return true
 	}
 	return false
 }
 
-func isInferenceLog(rec, attrs map[string]any) bool {
+func isInferenceLog(rec *otelRecord, attrs map[string]json.RawMessage) bool {
 	if isSpanRecord(rec) {
 		return false
 	}
@@ -559,7 +637,7 @@ func isInferenceLog(rec, attrs map[string]any) bool {
 	return false
 }
 
-func isAgentTurnLog(rec, attrs map[string]any) bool {
+func isAgentTurnLog(rec *otelRecord, attrs map[string]json.RawMessage) bool {
 	if isSpanRecord(rec) {
 		return false
 	}
@@ -574,45 +652,41 @@ func isAgentTurnLog(rec, attrs map[string]any) bool {
 
 // --- field extraction helpers ---
 
-func traceIDFromRecord(rec map[string]any) (string, bool) {
-	if v, ok := stringField(rec["traceId"]); ok {
+func traceIDFromRecord(rec *otelRecord) (string, bool) {
+	if v, ok := rawString(rec.TraceID); ok {
 		return v, true
 	}
-	return nestedString(rec, "spanContext", "traceId")
+	if rec.SpanContext != nil {
+		return rawString(rec.SpanContext.TraceID)
+	}
+	return "", false
 }
 
-func spanIDFromRecord(rec map[string]any) (string, bool) {
-	if v, ok := stringField(rec["spanId"]); ok {
+func spanIDFromRecord(rec *otelRecord) (string, bool) {
+	if v, ok := rawString(rec.SpanID); ok {
 		return v, true
 	}
-	return nestedString(rec, "spanContext", "spanId")
+	if rec.SpanContext != nil {
+		return rawString(rec.SpanContext.SpanID)
+	}
+	return "", false
 }
 
-func nestedString(rec map[string]any, object, key string) (string, bool) {
-	obj, ok := objAttr(rec, object)
-	if !ok {
+func recordBody(rec *otelRecord) (string, bool) {
+	if v, ok := rawString(rec.Body); ok {
+		return v, true
+	}
+	return rawString(rec.BodyAlt)
+}
+
+// rawString decodes a raw JSON value as a trimmed non-empty string, else
+// ok=false.
+func rawString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
 		return "", false
 	}
-	return stringField(obj[key])
-}
-
-func recordBody(rec map[string]any) (string, bool) {
-	if v, ok := stringField(rec["body"]); ok {
-		return v, true
-	}
-	return stringField(rec["_body"])
-}
-
-// objAttr returns rec[key] as a JSON object when it is one.
-func objAttr(rec map[string]any, key string) (map[string]any, bool) {
-	m, ok := rec[key].(map[string]any)
-	return m, ok
-}
-
-// stringField returns a trimmed non-empty string value, else ok=false.
-func stringField(v any) (string, bool) {
-	s, ok := v.(string)
-	if !ok {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
 		return "", false
 	}
 	s = strings.TrimSpace(s)
@@ -662,30 +736,47 @@ func numberValue(v any) (int64, bool) {
 	}
 }
 
-func attrString(attrs map[string]any, key string) string {
-	s, _ := stringField(attrs[key])
+// numberValueRaw decodes a raw JSON value (number or numeric string) through
+// the same range rules as numberValue.
+func numberValueRaw(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var num json.Number
+	if err := json.Unmarshal(raw, &num); err == nil {
+		return numberValue(num)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return numberValue(s)
+	}
+	return 0, false
+}
+
+func attrString(attrs map[string]json.RawMessage, key string) string {
+	s, _ := rawString(attrs[key])
 	return s
 }
 
 // attrNumber returns the attribute's integer value, defaulting to 0.
-func attrNumber(attrs map[string]any, key string) int64 {
-	if v, ok := numberValue(attrs[key]); ok {
+func attrNumber(attrs map[string]json.RawMessage, key string) int64 {
+	if v, ok := numberValueRaw(attrs[key]); ok {
 		return v
 	}
 	return 0
 }
 
 // attrNumberFirst returns the first key whose value parses to > 0, else 0.
-func attrNumberFirst(attrs map[string]any, keys ...string) int64 {
+func attrNumberFirst(attrs map[string]json.RawMessage, keys ...string) int64 {
 	for _, k := range keys {
-		if v, ok := numberValue(attrs[k]); ok && v > 0 {
+		if v, ok := numberValueRaw(attrs[k]); ok && v > 0 {
 			return v
 		}
 	}
 	return 0
 }
 
-func firstNonEmptyAttr(attrs map[string]any, keys []string) string {
+func firstNonEmptyAttr(attrs map[string]json.RawMessage, keys []string) string {
 	for _, k := range keys {
 		if s := attrString(attrs, k); s != "" {
 			return s
@@ -695,7 +786,7 @@ func firstNonEmptyAttr(attrs map[string]any, keys []string) string {
 }
 
 // bestSessionAttr returns the highest-priority present session attribute.
-func bestSessionAttr(attrs map[string]any) (string, int, bool) {
+func bestSessionAttr(attrs map[string]json.RawMessage) (string, int, bool) {
 	best := ""
 	bestPrio := -1
 	for _, sa := range sessionAttrs {
@@ -712,34 +803,37 @@ func bestSessionAttr(attrs map[string]any) (string, int, bool) {
 
 // --- timestamp heuristics (mirrors ccusage parser.rs) ---
 
-func timestampFromRecord(rec map[string]any) (time.Time, bool) {
-	for _, key := range []string{"endTime", "startTime", "hrTime", "_hrTime", "time"} {
-		if t, ok := timestampFromParts(rec[key]); ok {
+func timestampFromRecord(rec *otelRecord) (time.Time, bool) {
+	for _, raw := range []json.RawMessage{rec.EndTime, rec.StartTime, rec.HrTime, rec.HrTimeAlt, rec.Time} {
+		if t, ok := timestampFromParts(raw); ok {
 			return t, true
 		}
 	}
-	for _, key := range []string{"timestamp", "observedTimestamp"} {
-		if t, ok := timestampFromScalar(rec[key]); ok {
+	for _, raw := range []json.RawMessage{rec.Timestamp, rec.ObservedTS} {
+		if t, ok := timestampFromScalar(raw); ok {
 			return t, true
 		}
 	}
-	if t, ok := timestampFromUnixNanos(rec["timeUnixNano"]); ok {
+	if t, ok := timestampFromUnixNanos(rec.TimeUnixNano); ok {
 		return t, true
 	}
 	return time.Time{}, false
 }
 
 // timestampFromParts reads an OTEL hrTime [seconds, nanos] pair -> ms.
-func timestampFromParts(v any) (time.Time, bool) {
-	arr, ok := v.([]any)
-	if !ok || len(arr) < 2 {
+func timestampFromParts(raw json.RawMessage) (time.Time, bool) {
+	if len(raw) == 0 {
 		return time.Time{}, false
 	}
-	sec, ok := numberValue(arr[0])
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil || len(arr) < 2 {
+		return time.Time{}, false
+	}
+	sec, ok := numberValueRaw(arr[0])
 	if !ok {
 		return time.Time{}, false
 	}
-	nanos, ok := numberValue(arr[1])
+	nanos, ok := numberValueRaw(arr[1])
 	if !ok {
 		return time.Time{}, false
 	}
@@ -749,8 +843,8 @@ func timestampFromParts(v any) (time.Time, bool) {
 
 // timestampFromScalar interprets a single numeric timestamp whose unit is
 // inferred from magnitude (ns/us/ms/s), matching ccusage.
-func timestampFromScalar(v any) (time.Time, bool) {
-	raw, ok := numberValue(v)
+func timestampFromScalar(rawJSON json.RawMessage) (time.Time, bool) {
+	raw, ok := numberValueRaw(rawJSON)
 	if !ok {
 		return time.Time{}, false
 	}
@@ -768,23 +862,17 @@ func timestampFromScalar(v any) (time.Time, bool) {
 	return time.UnixMilli(millis).UTC(), true
 }
 
-func timestampFromUnixNanos(v any) (time.Time, bool) {
-	raw, ok := numberValue(v)
+func timestampFromUnixNanos(rawJSON json.RawMessage) (time.Time, bool) {
+	raw, ok := numberValueRaw(rawJSON)
 	if !ok || raw <= 0 {
 		return time.Time{}, false
 	}
 	return time.UnixMilli(raw / 1_000_000).UTC(), true
 }
 
-func fileMTime(path string) time.Time {
-	if fi, err := os.Stat(path); err == nil {
-		return fi.ModTime().UTC()
-	}
-	return time.Now().UTC()
-}
-
-// rawAttrs serialises the attributes object for audit; best-effort.
-func rawAttrs(attrs map[string]any) string {
+// rawAttrs serialises the attributes object for audit; best-effort. Values
+// keep their original encoding (they are raw JSON), keys are sorted.
+func rawAttrs(attrs map[string]json.RawMessage) string {
 	b, err := json.Marshal(attrs)
 	if err != nil {
 		return ""

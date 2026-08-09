@@ -9,6 +9,7 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
@@ -25,6 +26,10 @@ import (
 
 // usageMarker fast-skips lines that cannot carry usage data.
 const usageMarker = `"usage":{`
+
+// usageMarkerBytes lets the scanner loop probe with bytes.Contains instead of
+// copying every line to a string first.
+var usageMarkerBytes = []byte(usageMarker)
 
 // syntheticModel is dropped per the parsing spec.
 const syntheticModel = "<synthetic>"
@@ -131,14 +136,39 @@ func normaliseRoot(p string) string {
 	return clean
 }
 
+// fileStamp is one manifest entry: the size+mtime of a transcript file at the
+// last completed read.
+type fileStamp struct {
+	Size    int64 `json:"size"`
+	MTimeNS int64 `json:"mtime"`
+}
+
 // Collect walks <root>/projects/**/*.jsonl, parses every usage line, applies
 // in-cycle dedup, and returns the surviving events. Per-file errors are skipped
 // so one bad transcript never fails the cycle.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
-	projDir := filepath.Join(src.Path, "projects")
-	d := newDeduper()
+	return a.CollectIncremental(ctx, src, nil)
+}
 
-	_ = filepath.WalkDir(projDir, func(path string, de fs.DirEntry, err error) error {
+// CollectIncremental gates the whole root on a per-file size+mtime manifest:
+// when no transcript under projects/ changed, the walk is stats only and no
+// file is opened. Any change re-parses EVERY file — the deduper's sidechain
+// consolidation spans all files of a root in one pass, so per-file tail reads
+// would break cross-file dedup. Correctness of the full re-parse is carried by
+// the persisted dedup keys (INSERT OR IGNORE collapses re-derived events).
+func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
+	projDir := filepath.Join(src.Path, "projects")
+
+	type entry struct {
+		path    string
+		segment string
+	}
+	var (
+		files    []entry
+		manifest = make(map[string]fileStamp)
+		statErr  bool
+	)
+	walkErr := filepath.WalkDir(projDir, func(path string, de fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable subtrees, keep walking
 		}
@@ -148,12 +178,73 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".jsonl") {
 			return nil
 		}
-		segment := projectSegment(projDir, path)
-		parseFile(path, segment, d)
+		fi, err := de.Info()
+		if err != nil {
+			// A file we cannot stat cannot be gated; parse unconditionally and
+			// withhold the checkpoint so the next cycle re-examines it.
+			statErr = true
+		} else {
+			manifest[path] = fileStamp{Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
+		}
+		files = append(files, entry{path: path, segment: projectSegment(projDir, path)})
 		return nil
 	})
+	if walkErr != nil {
+		return adapter.Observation{}, walkErr // only ctx cancellation escapes the walk
+	}
 
-	return adapter.Observation{Events: d.events()}, nil
+	if cp != nil && !statErr && manifestUnchanged(cp.State, manifest) {
+		return adapter.Observation{}, nil // nothing changed: no parse, keep stored checkpoint
+	}
+
+	d := newDeduper()
+	parseErr := false
+	for _, e := range files {
+		if ctx.Err() != nil {
+			return adapter.Observation{Events: d.events()}, ctx.Err()
+		}
+		if err := parseFile(e.path, e.segment, d); err != nil {
+			// A failed or partial parse must not land in the manifest: the gate
+			// would skip the unread content until some file under the root next
+			// changes. Withhold the checkpoint so the next cycle re-reads.
+			parseErr = true
+		}
+	}
+
+	obs := adapter.Observation{Events: d.events()}
+	if statErr || parseErr {
+		return obs, nil
+	}
+	stateJSON, err := json.Marshal(manifest)
+	if err != nil {
+		return obs, nil
+	}
+	obs.Checkpoint = &model.SourceCheckpoint{
+		Tool: model.ToolClaudeCode, SourcePath: src.Path, State: string(stateJSON),
+	}
+	return obs, nil
+}
+
+// manifestUnchanged reports whether the stored manifest JSON matches the
+// current file set exactly (same paths, sizes, mtimes — additions, removals
+// and edits all break equality).
+func manifestUnchanged(stored string, current map[string]fileStamp) bool {
+	if stored == "" {
+		return false
+	}
+	var prev map[string]fileStamp
+	if err := json.Unmarshal([]byte(stored), &prev); err != nil {
+		return false
+	}
+	if len(prev) != len(current) {
+		return false
+	}
+	for path, st := range current {
+		if p, ok := prev[path]; !ok || p != st {
+			return false
+		}
+	}
+	return true
 }
 
 // projectSegment returns the immediate projects/<segment> directory name used
@@ -171,11 +262,13 @@ func projectSegment(projDir, file string) string {
 }
 
 // parseFile reads one JSONL transcript line-by-line, feeding parsed candidates
-// into the deduper. Malformed lines are skipped.
-func parseFile(path, segment string, d *deduper) {
+// into the deduper. Malformed lines are skipped. A non-nil error (open failure
+// or scanner error) means the read did not complete; the caller must not
+// checkpoint the root.
+func parseFile(path, segment string, d *deduper) error {
 	f, err := os.Open(path) // O_RDONLY
 	if err != nil {
-		return
+		return err
 	}
 	defer f.Close()
 
@@ -185,7 +278,7 @@ func parseFile(path, segment string, d *deduper) {
 
 	for sc.Scan() {
 		line := sc.Bytes()
-		if !strings.Contains(string(line), usageMarker) {
+		if !bytes.Contains(line, usageMarkerBytes) {
 			continue
 		}
 		cand, ok := parseLine(line, path, segment, sessionFromName)
@@ -193,38 +286,59 @@ func parseFile(path, segment string, d *deduper) {
 			d.add(cand)
 		}
 	}
+	return sc.Err()
+}
+
+// nullable wraps an optional JSON scalar, distinguishing an absent key (zero
+// value), an explicit JSON null (Null), and a decoded value — all recorded
+// during the single typed decode pass, replacing the former generic re-parse
+// of every line just to find guarded nulls. A wrong-typed value fails the
+// enclosing Unmarshal, matching the previous pointer-field behaviour.
+type nullable[T any] struct {
+	Present bool
+	Null    bool
+	Value   T
+}
+
+func (n *nullable[T]) UnmarshalJSON(b []byte) error {
+	n.Present = true
+	if string(b) == "null" {
+		n.Null = true
+		return nil
+	}
+	return json.Unmarshal(b, &n.Value)
 }
 
 // rawLine models both serde-untagged shapes: Direct fields at the top level and
-// the AgentProgress wrapper under data. Pointer fields distinguish JSON null
-// (present, set) from absent (nil).
+// the AgentProgress wrapper under data. Guarded keys use nullable so a JSON
+// null is detected in the same pass.
 type rawLine struct {
-	Timestamp         *string  `json:"timestamp"`
-	CWD               *string  `json:"cwd"`
-	SessionID         *string  `json:"sessionId"`
-	RequestID         *string  `json:"requestId"`
-	IsSidechain       *bool    `json:"isSidechain"`
-	IsAPIErrorMessage *bool    `json:"isApiErrorMessage"`
-	Version           *string  `json:"version"`
-	Message           *message `json:"message"`
+	Timestamp         *string           `json:"timestamp"`
+	CWD               nullable[string]  `json:"cwd"`
+	SessionID         nullable[string]  `json:"sessionId"`
+	RequestID         nullable[string]  `json:"requestId"`
+	IsSidechain       *bool             `json:"isSidechain"`
+	IsAPIErrorMessage nullable[bool]    `json:"isApiErrorMessage"`
+	Version           nullable[string]  `json:"version"`
+	CostUSD           nullable[float64] `json:"costUSD"`
+	Message           *message          `json:"message"`
 	Data              *struct {
 		Message *message `json:"message"`
 	} `json:"data"`
 }
 
 type message struct {
-	ID    *string `json:"id"`
-	Model *string `json:"model"`
-	Usage *usage  `json:"usage"`
+	ID    nullable[string] `json:"id"`
+	Model nullable[string] `json:"model"`
+	Usage *usage           `json:"usage"`
 }
 
 type usage struct {
-	InputTokens         *int64  `json:"input_tokens"`
-	OutputTokens        *int64  `json:"output_tokens"`
-	CacheCreationTokens *int64  `json:"cache_creation_input_tokens"`
-	CacheReadTokens     *int64  `json:"cache_read_input_tokens"`
-	Speed               *string `json:"speed"`
-	CostUSD             *float64
+	InputTokens         *int64           `json:"input_tokens"`
+	OutputTokens        *int64           `json:"output_tokens"`
+	CacheCreationTokens nullable[int64]  `json:"cache_creation_input_tokens"`
+	CacheReadTokens     nullable[int64]  `json:"cache_read_input_tokens"`
+	Speed               nullable[string] `json:"speed"`
 }
 
 // candidate is a parsed usage record awaiting dedup.
@@ -257,41 +371,35 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 	}
 	u := msg.Usage
 
-	// Reject lines where any guarded key is explicitly JSON null. costUSD is
-	// guarded as a top-level field; decode it separately to detect null.
-	if hasNullGuardedKey(line) {
+	// Reject lines where any guarded key is explicitly JSON null, recorded by
+	// the nullable fields during the same decode pass.
+	if hasGuardedNull(&rl, msg) {
 		return candidate{}, false
 	}
-	// id / model / sessionId / requestId / isApiErrorMessage null guards via
-	// the decoded structure (a present-but-null pointer is nil; absence is also
-	// nil, so we additionally consult the raw-null scan above for those keys).
 
 	// Model: drop <synthetic>; append -fast for fast speed; empty rejects.
-	modelID := ""
-	if msg.Model != nil {
-		modelID = strings.TrimSpace(*msg.Model)
-	}
+	modelID := strings.TrimSpace(msg.Model.Value)
 	if modelID == "" || modelID == syntheticModel {
 		return candidate{}, false
 	}
-	if u.Speed != nil && *u.Speed == "fast" {
+	if u.Speed.Value == "fast" {
 		modelID += "-fast"
 	}
 
 	in := deref(u.InputTokens)
 	out := deref(u.OutputTokens)
-	cacheC := deref(u.CacheCreationTokens)
-	cacheR := deref(u.CacheReadTokens)
+	cacheC := nonNegative(u.CacheCreationTokens.Value)
+	cacheR := nonNegative(u.CacheReadTokens.Value)
 	total := in + out + cacheC + cacheR // cache additive; no reasoning
 
 	project := segment
-	if rl.CWD != nil && strings.TrimSpace(*rl.CWD) != "" {
-		project = *rl.CWD
+	if strings.TrimSpace(rl.CWD.Value) != "" {
+		project = rl.CWD.Value
 	}
 
 	session := sessionFromName
-	if rl.SessionID != nil && strings.TrimSpace(*rl.SessionID) != "" {
-		session = *rl.SessionID
+	if strings.TrimSpace(rl.SessionID.Value) != "" {
+		session = rl.SessionID.Value
 	}
 
 	var eventTime time.Time
@@ -301,14 +409,8 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		}
 	}
 
-	messageID := ""
-	if msg.ID != nil {
-		messageID = *msg.ID
-	}
-	requestID := ""
-	if rl.RequestID != nil {
-		requestID = *rl.RequestID
-	}
+	messageID := msg.ID.Value
+	requestID := rl.RequestID.Value
 	isSidechain := rl.IsSidechain != nil && *rl.IsSidechain
 
 	dedupKey := persistedKey(messageID, path, line)
@@ -338,55 +440,27 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		messageID:   messageID,
 		requestID:   requestID,
 		isSidechain: isSidechain,
-		hasSpeed:    u.Speed != nil,
-		cost:        cost(line),
+		hasSpeed:    u.Speed.Present,
+		cost:        rl.CostUSD.Value,
 		total:       total,
 	}, true
 }
 
-// guardedNullKeys are the keys whose explicit JSON null causes the line to be
-// skipped per the parsing spec.
-var guardedNullKeys = []string{
-	"id", "cwd", "model", "speed", "costUSD", "version",
-	"sessionId", "requestId", "isApiErrorMessage",
-	"cache_read_input_tokens", "cache_creation_input_tokens",
-}
-
-// hasNullGuardedKey reports whether the raw line sets any guarded key to JSON
-// null. It walks the decoded generic structure so nested occurrences (e.g. keys
-// inside message / usage / data) are also caught.
-func hasNullGuardedKey(line []byte) bool {
-	var v any
-	if err := json.Unmarshal(line, &v); err != nil {
-		return false
+// hasGuardedNull reports whether any guarded key — id, cwd, model, speed,
+// costUSD, version, sessionId, requestId, isApiErrorMessage and the cache
+// token counts — is explicitly JSON null at its spec position (top level,
+// message, usage). Such lines are skipped per the parsing spec. msg and
+// msg.Usage are non-nil by the time this runs.
+func hasGuardedNull(rl *rawLine, msg *message) bool {
+	if rl.CWD.Null || rl.SessionID.Null || rl.RequestID.Null ||
+		rl.IsAPIErrorMessage.Null || rl.Version.Null || rl.CostUSD.Null {
+		return true
 	}
-	guard := make(map[string]struct{}, len(guardedNullKeys))
-	for _, k := range guardedNullKeys {
-		guard[k] = struct{}{}
+	if msg.ID.Null || msg.Model.Null {
+		return true
 	}
-	return walkForNull(v, guard)
-}
-
-// walkForNull recursively reports whether any guarded key maps to a nil value.
-func walkForNull(v any, guard map[string]struct{}) bool {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, child := range t {
-			if _, ok := guard[k]; ok && child == nil {
-				return true
-			}
-			if walkForNull(child, guard) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range t {
-			if walkForNull(child, guard) {
-				return true
-			}
-		}
-	}
-	return false
+	u := msg.Usage
+	return u.Speed.Null || u.CacheCreationTokens.Null || u.CacheReadTokens.Null
 }
 
 // persistedKey returns the stable cross-poll dedup key. With a message id it is
@@ -410,24 +484,16 @@ func rawUsage(line []byte) string {
 	return s
 }
 
-// cost decodes the optional top-level costUSD for tie-breaking. Missing/null
-// yields 0.
-func cost(line []byte) float64 {
-	var probe struct {
-		CostUSD *float64 `json:"costUSD"`
-	}
-	if err := json.Unmarshal(line, &probe); err == nil && probe.CostUSD != nil {
-		return *probe.CostUSD
-	}
-	return 0
-}
-
 func deref(p *int64) int64 {
 	if p == nil {
 		return 0
 	}
-	if *p < 0 {
+	return nonNegative(*p)
+}
+
+func nonNegative(v int64) int64 {
+	if v < 0 {
 		return 0
 	}
-	return *p
+	return v
 }

@@ -2,7 +2,9 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +65,46 @@ func BenchmarkRunCycle(b *testing.B) {
 	for b.Loop() {
 		if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 			b.Fatalf("cycle: %v", err)
+		}
+	}
+}
+
+// BenchmarkRunCycleUnchangedSources measures a steady-state cycle over REAL
+// adapters, real fixture files and a real SQLite store when nothing changed
+// since the last cycle — the checkpoint gates must reduce every source to a
+// stat (or one empty watermark query), with zero parsing and zero inserts.
+// The codex history is padded to hundreds of records so any regression back
+// to per-cycle re-parsing is visible immediately in ns/op and allocs/op.
+func BenchmarkRunCycleUnchangedSources(b *testing.B) {
+	fx := setupIncrementalFixture(b)
+	ctx := context.Background()
+
+	// Pad the codex backlog: pre-checkpoint code re-parsed all of this every
+	// cycle; incremental code must never touch it again.
+	var pad strings.Builder
+	total := int64(1750)
+	for i := 0; i < 300; i++ {
+		total += 10
+		fmt.Fprintf(&pad,
+			`{"type":"event_msg","timestamp":"2026-05-29T11:%02d:%02dZ","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}}`+"\n",
+			i/60, i%60, total, total)
+	}
+	appendLines(b, fx.codexSession, pad.String())
+
+	// Warm-up cycle inserts everything and writes the checkpoints.
+	if s, err := RunCycle(ctx, fx.reg, fx.st, fx.dc); err != nil || len(s.Errors) > 0 {
+		b.Fatalf("warm-up cycle: err=%v errors=%v", err, s.Errors)
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		s, err := RunCycle(ctx, fx.reg, fx.st, fx.dc)
+		if err != nil {
+			b.Fatalf("cycle: %v", err)
+		}
+		if s.EventsSeen != 0 || s.Snapshots != 0 || s.EventsInserted != 0 {
+			b.Fatalf("steady-state cycle did work: seen=%d snapshots=%d inserted=%d",
+				s.EventsSeen, s.Snapshots, s.EventsInserted)
 		}
 	}
 }

@@ -24,7 +24,25 @@ type migration struct {
 // SchemaVersion, in ascending version order with no gaps. Fresh databases
 // never run these; they are created directly at SchemaVersion from schema.sql,
 // which must always describe the latest schema in full.
-var migrations []migration
+//
+// Version ledger:
+//
+//	v2 — source_checkpoints table (incremental collection, issue #5)
+//	v3 — reserved: cost/provider columns on usage_events (issue #9)
+var migrations = []migration{
+	{version: 2, statements: []string{
+		`CREATE TABLE IF NOT EXISTS source_checkpoints (
+		  tool        TEXT    NOT NULL,
+		  source_path TEXT    NOT NULL,
+		  size_bytes  INTEGER NOT NULL DEFAULT 0,
+		  mtime_ns    INTEGER NOT NULL DEFAULT 0,
+		  read_offset INTEGER NOT NULL DEFAULT 0,
+		  watermark   INTEGER NOT NULL DEFAULT 0,
+		  state       TEXT,
+		  PRIMARY KEY (tool, source_path)
+		)`,
+	}},
+}
 
 // ensureSchema reads the recorded schema version before touching anything and
 // brings the database to SchemaVersion.
@@ -94,12 +112,36 @@ func applyMigrations(ctx context.Context, db *sql.DB, from, to int, steps []migr
 // applyMigration runs one step in its own transaction with the version stamp
 // as the last statement, so an interrupted migration never advances the
 // recorded version past what actually committed.
+//
+// The version is re-checked INSIDE the transaction, after a write statement
+// has escalated it to a write lock: two processes upgrading concurrently
+// would otherwise both read the old version outside any lock and both run the
+// same step (harmless for CREATE IF NOT EXISTS, corrupting for a future
+// ALTER ... ADD COLUMN). The loser of the lock race re-reads the advanced
+// version and skips.
 func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin migration v%d: %w", m.version, err)
 	}
 	defer tx.Rollback()
+
+	// No-op UPDATE: its only purpose is to take the write lock BEFORE the
+	// version re-read, so the read cannot see a stale pre-upgrade snapshot.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE schema_meta SET value=value WHERE key='schema_version'`); err != nil {
+		return fmt.Errorf("store: lock for migration v%d: %w", m.version, err)
+	}
+	cur, err := readSchemaVersionQ(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("store: re-read schema version for v%d: %w", m.version, err)
+	}
+	if cur >= m.version {
+		return nil // another process already ran this step; deferred Rollback releases the lock
+	}
+	if cur != m.version-1 {
+		return fmt.Errorf("store: migration v%d expected database at v%d, found v%d", m.version, m.version-1, cur)
+	}
 
 	for _, stmt := range m.statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -131,11 +173,21 @@ func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	return n > 0, nil
 }
 
+// rowQuerier is the QueryRowContext subset shared by *sql.DB and *sql.Tx, so
+// the version read can also run inside a migration's transaction.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // readSchemaVersion returns the recorded schema version, or 0 when the row is
 // absent. The schema_meta table must already exist.
 func readSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	return readSchemaVersionQ(ctx, db)
+}
+
+func readSchemaVersionQ(ctx context.Context, q rowQuerier) (int, error) {
 	var v string
-	err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&v)
+	err := q.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&v)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}

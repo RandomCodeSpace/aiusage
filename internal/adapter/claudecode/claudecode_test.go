@@ -193,3 +193,113 @@ func TestDiscoverResolvesSymlinkedRoot(t *testing.T) {
 		t.Errorf("Path = %q, want resolved %q", srcs[0].Path, resolved)
 	}
 }
+
+// benchLine is a representative assistant usage line for the parse hot path.
+var benchLine = []byte(`{"type":"assistant","timestamp":"2026-05-10T13:14:19.329Z","cwd":"/home/dev/projects/foo","sessionId":"sess-1","requestId":"req-1","isSidechain":false,"version":"2.0.1","costUSD":0.42,"message":{"id":"msg-1","model":"claude-opus-4-7","usage":{"input_tokens":1200,"output_tokens":350,"cache_creation_input_tokens":210,"cache_read_input_tokens":10500}}}`)
+
+func BenchmarkParseLine(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, ok := parseLine(benchLine, "/p/f.jsonl", "seg", "sess"); !ok {
+			b.Fatal("parse failed")
+		}
+	}
+}
+
+// TestIncrementalManifestGate: an unchanged projects tree is skipped without
+// parsing; any file change re-parses the whole root (the deduper spans all
+// files) and refreshes the manifest checkpoint.
+func TestIncrementalManifestGate(t *testing.T) {
+	root := t.TempDir()
+	trans := filepath.Join(root, "projects", "proj", "sess.jsonl")
+	if err := os.MkdirAll(filepath.Dir(trans), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	line1 := `{"timestamp":"2026-05-29T10:00:00Z","sessionId":"s","requestId":"r1","message":{"id":"m1","model":"claude-opus","usage":{"input_tokens":400,"output_tokens":600}}}` + "\n"
+	if err := os.WriteFile(trans, []byte(line1), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolClaudeCode, Class: model.EventLevel, Path: root}
+
+	obs1, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs1.Events) != 1 || obs1.Checkpoint == nil {
+		t.Fatalf("full read: err=%v events=%d cp=%v", err, len(obs1.Events), obs1.Checkpoint)
+	}
+
+	obs2, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs2.Events) != 0 || obs2.Checkpoint != nil {
+		t.Fatalf("unchanged skip: err=%v events=%d cp=%+v", err, len(obs2.Events), obs2.Checkpoint)
+	}
+
+	// Append: the whole root re-parses (both lines emitted; the store dedups).
+	f, err := os.OpenFile(trans, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	line2 := `{"timestamp":"2026-05-29T10:01:00Z","sessionId":"s","requestId":"r2","message":{"id":"m2","model":"claude-opus","usage":{"input_tokens":10,"output_tokens":20}}}` + "\n"
+	if _, err := f.WriteString(line2); err != nil {
+		t.Fatalf("write append: %v", err)
+	}
+	f.Close()
+
+	obs3, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs3.Events) != 2 || obs3.Checkpoint == nil {
+		t.Fatalf("changed reparse: err=%v events=%d cp=%v", err, len(obs3.Events), obs3.Checkpoint)
+	}
+
+	// A NEW file also breaks the gate (additions must not be missed).
+	trans2 := filepath.Join(root, "projects", "proj2", "other.jsonl")
+	if err := os.MkdirAll(filepath.Dir(trans2), 0o755); err != nil {
+		t.Fatalf("mkdir2: %v", err)
+	}
+	if err := os.WriteFile(trans2, []byte(line1), 0o644); err != nil {
+		t.Fatalf("write2: %v", err)
+	}
+	obs4, err := a.CollectIncremental(context.Background(), src, obs3.Checkpoint)
+	if err != nil || len(obs4.Events) == 0 {
+		t.Fatalf("new file not detected: err=%v events=%d", err, len(obs4.Events))
+	}
+}
+
+// TestFailedParseWithholdsCheckpoint guards the checkpoint contract: when one
+// transcript cannot be read, the manifest must not land, or the gate would
+// skip that file's content until anything under the root next changes.
+func TestFailedParseWithholdsCheckpoint(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based open failure does not apply to root")
+	}
+	root := t.TempDir()
+	good := `{"timestamp":"2026-05-29T10:00:00Z","sessionId":"s","requestId":"r1","message":{"id":"m1","model":"claude-opus","usage":{"input_tokens":400,"output_tokens":600}}}`
+	bad := `{"timestamp":"2026-05-29T10:01:00Z","sessionId":"s2","requestId":"r2","message":{"id":"m2","model":"claude-opus","usage":{"input_tokens":10,"output_tokens":20}}}`
+	writeFixture(t, root, "proj", "good", []string{good})
+	writeFixture(t, root, "proj", "bad", []string{bad})
+	badPath := filepath.Join(root, "projects", "proj", "bad.jsonl")
+	if err := os.Chmod(badPath, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	a := Adapter{}
+	src := adapter.Source{Tool: model.ToolClaudeCode, Class: model.EventLevel, Path: root}
+
+	obs, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil {
+		t.Fatalf("collect: %v", err) // per-file errors stay non-fatal
+	}
+	if len(obs.Events) != 1 || obs.Events[0].MessageID != "m1" {
+		t.Fatalf("want only the readable file's event, got %d", len(obs.Events))
+	}
+	if obs.Checkpoint != nil {
+		t.Fatalf("checkpoint must be withheld on a failed parse, got %+v", obs.Checkpoint)
+	}
+
+	// Once readable again, the quiescent root must still be collected in full.
+	if err := os.Chmod(badPath, 0o644); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	obs2, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil || len(obs2.Events) != 2 || obs2.Checkpoint == nil {
+		t.Fatalf("recovery read: err=%v events=%d cp=%v", err, len(obs2.Events), obs2.Checkpoint)
+	}
+}

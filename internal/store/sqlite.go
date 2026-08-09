@@ -25,7 +25,7 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // SQLite is the concrete append-only store backed by modernc.org/sqlite.
 type SQLite struct {
@@ -51,7 +51,9 @@ func Open(path string) (*SQLite, error) {
 
 	// modernc driver name is "sqlite". Pragmas applied via the DSN run on every
 	// pooled connection; the schema is managed once by ensureSchema below.
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+	// synchronous=NORMAL is the WAL-recommended durability level (the default
+	// FULL fsyncs every commit; NORMAL only at checkpoints).
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
@@ -206,7 +208,9 @@ var applySnapshotFault func() error
 // ApplySnapshot atomically appends the delta events and records the new
 // accumulator state in one transaction — see Store.ApplySnapshot for the
 // contract, including the skipped state write on a fully-collided insert.
-func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot) (int, error) {
+// The checkpoint upsert shares the state write's condition: a collided delta
+// stays re-derivable only while neither baseline nor checkpoint advances.
+func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("store: begin tx: %w", err)
@@ -231,11 +235,84 @@ func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, s
 		if err := upsertState(ctx, tx, state); err != nil {
 			return 0, err
 		}
+		if cp != nil {
+			if err := upsertCheckpoint(ctx, tx, *cp); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: commit: %w", err)
 	}
 	return inserted, nil
+}
+
+// ApplyEvents appends events and upserts the source checkpoint in one
+// transaction — see Store.ApplyEvents. Per-row skips (poison rows) still
+// commit alongside the checkpoint: they are permanent CHECK violations a
+// re-read cannot fix, so holding the checkpoint back would only re-parse
+// them forever.
+func (s *SQLite) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
+	if len(events) == 0 && cp == nil {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	inserted, skipErr, err := insertEventsTx(ctx, tx, events)
+	if err != nil {
+		return inserted, err
+	}
+	if cp != nil {
+		if err := upsertCheckpoint(ctx, tx, *cp); err != nil {
+			return inserted, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return inserted, fmt.Errorf("store: commit: %w", err)
+	}
+	return inserted, skipErr
+}
+
+// Checkpoint returns the stored incremental state for (tool, sourcePath), or
+// nil when none has been recorded.
+func (s *SQLite) Checkpoint(ctx context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT tool, source_path, size_bytes, mtime_ns, read_offset, watermark, COALESCE(state,'')
+		FROM source_checkpoints WHERE tool=? AND source_path=?`, tool, sourcePath)
+
+	var out model.SourceCheckpoint
+	err := row.Scan(&out.Tool, &out.SourcePath, &out.Size, &out.MTimeNS, &out.Offset, &out.Watermark, &out.State)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: checkpoint %s/%s: %w", tool, sourcePath, err)
+	}
+	return &out, nil
+}
+
+func upsertCheckpoint(ctx context.Context, db execer, cp model.SourceCheckpoint) error {
+	if cp.Tool == "" || cp.SourcePath == "" {
+		return fmt.Errorf("store: checkpoint missing tool/source path (%q/%q)", cp.Tool, cp.SourcePath)
+	}
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO source_checkpoints (
+			tool, source_path, size_bytes, mtime_ns, read_offset, watermark, state
+		) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(tool, source_path) DO UPDATE SET
+			size_bytes=excluded.size_bytes, mtime_ns=excluded.mtime_ns,
+			read_offset=excluded.read_offset, watermark=excluded.watermark,
+			state=excluded.state`,
+		cp.Tool, cp.SourcePath, cp.Size, cp.MTimeNS, cp.Offset, cp.Watermark, nullString(cp.State),
+	)
+	if err != nil {
+		return fmt.Errorf("store: upsert checkpoint %s/%s: %w", cp.Tool, cp.SourcePath, err)
+	}
+	return nil
 }
 
 // observedUnix returns the observed timestamp in UTC seconds, falling back to
@@ -341,6 +418,7 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		sb.WriteString(", ")
 	}
 	sb.WriteString(`COUNT(*) AS events,
+		COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END),
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
 		COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0)
@@ -362,12 +440,12 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 	sum := &Summary{GroupBy: append([]string{}, f.GroupBy...)}
 	for rows.Next() {
 		keyVals := make([]string, len(f.GroupBy))
-		dest := make([]any, 0, len(f.GroupBy)+7)
+		dest := make([]any, 0, len(f.GroupBy)+8)
 		for i := range keyVals {
 			dest = append(dest, &keyVals[i])
 		}
 		var b Bucket
-		dest = append(dest, &b.Events, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.Reasoning, &b.Total)
+		dest = append(dest, &b.Events, &b.Sessions, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.Reasoning, &b.Total)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan summary row: %w", err)
 		}
@@ -384,29 +462,45 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		return nil, fmt.Errorf("store: summary rows: %w", err)
 	}
 
-	// Grand total is a separate aggregate so it reflects the full filtered set
-	// regardless of grouping.
-	tot, err := s.grandTotal(ctx, where, args)
-	if err != nil {
-		return nil, err
+	// Grand total: derived from the single pass instead of re-running the full
+	// aggregate. Ungrouped, the one result row IS the total; grouped, the
+	// summable fields add across buckets and only the distinct session count
+	// (which does not add across buckets) needs its own narrow query.
+	if len(f.GroupBy) == 0 {
+		if len(sum.Buckets) == 1 {
+			sum.Totals = sum.Buckets[0]
+		}
+		return sum, nil
 	}
-	sum.Totals = tot
+	for _, b := range sum.Buckets {
+		sum.Totals.Events += b.Events
+		sum.Totals.Input += b.Input
+		sum.Totals.Output += b.Output
+		sum.Totals.CacheCreation += b.CacheCreation
+		sum.Totals.CacheRead += b.CacheRead
+		sum.Totals.Reasoning += b.Reasoning
+		sum.Totals.Total += b.Total
+	}
+	if len(sum.Buckets) > 0 {
+		n, err := s.distinctSessions(ctx, where, args)
+		if err != nil {
+			return nil, err
+		}
+		sum.Totals.Sessions = n
+	}
 	return sum, nil
 }
 
-// grandTotal computes the ungrouped totals over the filtered set.
-func (s *SQLite) grandTotal(ctx context.Context, where string, args []any) (Bucket, error) {
+// distinctSessions counts distinct non-empty session ids over the filtered set.
+func (s *SQLite) distinctSessions(ctx context.Context, where string, args []any) (int64, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*),
-			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-			COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
-			COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0)
+		SELECT COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END)
 		FROM usage_events`+where, args...)
-	var b Bucket
-	if err := row.Scan(&b.Events, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.Reasoning, &b.Total); err != nil {
-		return Bucket{}, fmt.Errorf("store: grand total: %w", err)
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: distinct sessions: %w", err)
 	}
-	return b, nil
+	return n, nil
 }
 
 // ListEvents returns raw events matching Filter, ordered by event_time.
@@ -485,35 +579,39 @@ func (s *SQLite) SourceStats(ctx context.Context) ([]SourceStat, error) {
 		if lastObs.Valid {
 			st.LastObserved = time.Unix(lastObs.Int64, 0).UTC()
 		}
-		models, err := s.distinctModels(ctx, st.Tool)
-		if err != nil {
-			return nil, err
-		}
-		st.Models = models
 		out = append(out, st)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: source stat rows: %w", err)
 	}
+
+	models, err := s.modelsByTool(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Models = models[out[i].Tool]
+	}
 	return out, nil
 }
 
-// distinctModels returns the sorted distinct non-empty model ids for a tool.
-func (s *SQLite) distinctModels(ctx context.Context, tool string) ([]string, error) {
+// modelsByTool returns the sorted distinct non-empty model ids per tool in one
+// query, replacing the previous per-tool round trip.
+func (s *SQLite) modelsByTool(ctx context.Context) (map[string][]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT model FROM usage_events
-		WHERE tool=? AND model <> '' ORDER BY model`, tool)
+		SELECT DISTINCT tool, model FROM usage_events
+		WHERE model <> '' ORDER BY tool, model`)
 	if err != nil {
-		return nil, fmt.Errorf("store: distinct models %s: %w", tool, err)
+		return nil, fmt.Errorf("store: distinct models: %w", err)
 	}
 	defer rows.Close()
-	var out []string
+	out := make(map[string][]string)
 	for rows.Next() {
-		var m string
-		if err := rows.Scan(&m); err != nil {
+		var tool, m string
+		if err := rows.Scan(&tool, &m); err != nil {
 			return nil, fmt.Errorf("store: scan model: %w", err)
 		}
-		out = append(out, m)
+		out[tool] = append(out[tool], m)
 	}
 	return out, rows.Err()
 }

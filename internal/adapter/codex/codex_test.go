@@ -399,3 +399,101 @@ func TestAsIntOutOfRangeRejected(t *testing.T) {
 		t.Errorf(`asInt(" 42 ") = %d,%v; want 42,true`, v, ok)
 	}
 }
+
+// TestMalformedMidFileDoesNotAbort: a malformed line in the MIDDLE of a file
+// must not drop the valid lines after it (the old whole-file json.Decoder
+// stopped at the first bad line).
+func TestMalformedMidFileDoesNotAbort(t *testing.T) {
+	home := t.TempDir()
+	sess := filepath.Join(codexHome(home), "sessions", "mid.jsonl")
+	writeSession(t, sess, []string{
+		`{"type":"event_msg","timestamp":"2026-05-29T10:00:00Z","payload":{"type":"token_count","model":"gpt-5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}}`,
+		`{ this is not valid json but mentions token_count`,
+		`{"type":"event_msg","timestamp":"2026-05-29T10:01:00Z","payload":{"type":"token_count","model":"gpt-5","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}`,
+	})
+
+	evs := collectAll(t, adapter.DiscoverConfig{Home: home})
+	if len(evs) != 2 {
+		t.Fatalf("expected 2 events around the malformed line, got %d", len(evs))
+	}
+	if evs[0].TotalTokens != 150 || evs[1].TotalTokens != 15 {
+		t.Errorf("totals = %d,%d want 150,15", evs[0].TotalTokens, evs[1].TotalTokens)
+	}
+}
+
+// TestIncrementalSkipTailAndShrink drives the checkpoint contract directly:
+// unchanged size+mtime skips the file; growth tail-reads with the persisted
+// cumulative baseline (the whole-file invariant); a shrink resets to a full
+// re-read whose re-derived events keep their original dedup keys.
+func TestIncrementalSkipTailAndShrink(t *testing.T) {
+	home := t.TempDir()
+	sess := filepath.Join(codexHome(home), "sessions", "inc.jsonl")
+	writeSession(t, sess, []string{
+		`{"type":"turn_context","payload":{"model":"gpt-5-codex"}}`,
+		`{"type":"event_msg","timestamp":"2026-05-29T10:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}`,
+	})
+
+	a := Adapter{}
+	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{Home: home})
+	if err != nil || len(srcs) != 1 {
+		t.Fatalf("discover: err=%v n=%d", err, len(srcs))
+	}
+	src := srcs[0]
+
+	obs1, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil {
+		t.Fatalf("full read: %v", err)
+	}
+	if len(obs1.Events) != 1 || obs1.Events[0].TotalTokens != 1100 {
+		t.Fatalf("full read events = %+v", obs1.Events)
+	}
+	if obs1.Checkpoint == nil || obs1.Checkpoint.Offset == 0 {
+		t.Fatalf("full read returned no usable checkpoint: %+v", obs1.Checkpoint)
+	}
+
+	// Unchanged: no events, no new checkpoint.
+	obs2, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil || len(obs2.Events) != 0 || obs2.Checkpoint != nil {
+		t.Fatalf("unchanged skip: err=%v events=%d cp=%+v", err, len(obs2.Events), obs2.Checkpoint)
+	}
+
+	// Append a larger cumulative record: the tail read must apply the
+	// persisted baseline and emit the 400 delta, not 1500 in full.
+	f, err := os.OpenFile(sess, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := f.WriteString(`{"type":"event_msg","timestamp":"2026-05-29T10:05:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1300,"output_tokens":200,"total_tokens":1500}}}}` + "\n"); err != nil {
+		t.Fatalf("write append: %v", err)
+	}
+	f.Close()
+
+	obs3, err := a.CollectIncremental(context.Background(), src, obs1.Checkpoint)
+	if err != nil {
+		t.Fatalf("tail read: %v", err)
+	}
+	if len(obs3.Events) != 1 {
+		t.Fatalf("tail read events = %d want 1", len(obs3.Events))
+	}
+	if got := obs3.Events[0].TotalTokens; got != 400 {
+		t.Fatalf("tail delta total = %d want 400 (persisted baseline, not full 1500)", got)
+	}
+	if obs3.Events[0].Model != "gpt-5-codex" {
+		t.Fatalf("tail read lost the persisted model carry-forward: %q", obs3.Events[0].Model)
+	}
+
+	// Shrink the file back to its first record: full re-read from zero. The
+	// re-derived event must reuse the original dedup key (no recount).
+	writeSession(t, sess, []string{
+		`{"type":"turn_context","payload":{"model":"gpt-5-codex"}}`,
+		`{"type":"event_msg","timestamp":"2026-05-29T10:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}`,
+	})
+	obs4, err := a.CollectIncremental(context.Background(), src, obs3.Checkpoint)
+	if err != nil {
+		t.Fatalf("post-shrink read: %v", err)
+	}
+	if len(obs4.Events) != 1 || obs4.Events[0].DedupKey != obs1.Events[0].DedupKey {
+		t.Fatalf("post-shrink events = %+v want the original single event key %q",
+			obs4.Events, obs1.Events[0].DedupKey)
+	}
+}

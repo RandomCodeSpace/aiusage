@@ -106,3 +106,20 @@ type AggregateSnapshot struct {
 	SourcePath string
 	Raw        string
 }
+
+// SourceCheckpoint is mutable per-source incremental-collection state, keyed by
+// (Tool, SourcePath). It lets an adapter skip or tail-read a source whose
+// content is unchanged or append-only since the last cycle. It is NOT history:
+// losing a checkpoint only costs a full re-read, never data (event dedup keys
+// and aggregate_state make re-reads idempotent). The dangerous direction is a
+// checkpoint that outruns its data — which is why the store persists it in the
+// same transaction as the events it accounts for.
+type SourceCheckpoint struct {
+	Tool       string
+	SourcePath string
+	Size       int64  // file size in bytes at the last completed read
+	MTimeNS    int64  // file mtime (unix nanoseconds) at the last completed read
+	Offset     int64  // byte offset consumed (append-only JSONL tail reads)
+	Watermark  int64  // max rowid consumed (database sources)
+	State      string // adapter-specific JSON (baselines, manifests, gates)
+}

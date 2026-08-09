@@ -70,16 +70,24 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 			errsBefore := len(stats.Errors)
 			progressed := false
 
-			obs, err := ad.Collect(ctx, src)
+			obs, err := collectSource(ctx, ad, st, src, &stats)
 			if err != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("collect %s %s: %v", ad.ID(), src.Path, err))
 				// Best-effort: a bad source must not abort the cycle. Still
 				// process whatever observations were returned.
 			}
 
-			// InsertEvents commits per-row: a non-nil error may accompany a
+			// The checkpoint rides the events transaction unless snapshots
+			// exist — then it rides the last snapshot's transaction instead,
+			// so it can only land after every cell of the source applied.
+			evCp := obs.Checkpoint
+			if len(obs.Snapshots) > 0 {
+				evCp = nil
+			}
+
+			// ApplyEvents commits per-row: a non-nil error may accompany a
 			// partial insert (skipped poison rows), so n counts regardless.
-			n, sErr := storeEvents(ctx, st, obs.Events, observedAt)
+			n, sErr := storeEvents(ctx, st, obs.Events, observedAt, evCp)
 			stats.EventsSeen += len(obs.Events)
 			stats.EventsInserted += n
 			if sErr != nil {
@@ -89,12 +97,25 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				progressed = true
 			}
 
-			for _, s := range obs.Snapshots {
+			// clean tracks whether every write of this source so far applied
+			// fully. The checkpoint may only land on the final snapshot when
+			// clean: a failed or collided cell must stay re-derivable, and an
+			// advanced checkpoint would gate its re-read off.
+			clean := sErr == nil
+			for i, s := range obs.Snapshots {
 				stats.Snapshots++
-				n, sErr := storeSnapshot(ctx, st, s, observedAt)
+				var cp *model.SourceCheckpoint
+				if clean && i == len(obs.Snapshots)-1 {
+					cp = obs.Checkpoint
+				}
+				n, advanced, sErr := storeSnapshot(ctx, st, s, observedAt, cp)
 				if sErr != nil {
 					stats.Errors = append(stats.Errors, fmt.Sprintf("snapshot %s %s: %v", s.Tool, s.Key, sErr))
+					clean = false
 					continue
+				}
+				if !advanced {
+					clean = false
 				}
 				stats.EventsInserted += n
 				progressed = true
@@ -109,10 +130,27 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 	return stats, nil
 }
 
+// collectSource reads one source, going through the incremental path when the
+// adapter supports it. A checkpoint load failure is non-fatal: collection
+// falls back to a full read, which is always correct.
+func collectSource(ctx context.Context, ad adapter.Adapter, st store.Store, src adapter.Source, stats *CycleStats) (adapter.Observation, error) {
+	inc, ok := ad.(adapter.Incremental)
+	if !ok {
+		return ad.Collect(ctx, src)
+	}
+	cp, err := st.Checkpoint(ctx, src.Tool, src.Path)
+	if err != nil {
+		stats.Errors = append(stats.Errors, fmt.Sprintf("checkpoint %s %s: %v", ad.ID(), src.Path, err))
+		cp = nil
+	}
+	return inc.CollectIncremental(ctx, src, cp)
+}
+
 // storeEvents stamps ObservedTime on event-level records that lack one, then
-// appends them idempotently. Returns the number of new dedup keys inserted.
-func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent, observedAt time.Time) (int, error) {
-	if len(events) == 0 {
+// appends them idempotently together with the source checkpoint (one
+// transaction). Returns the number of new dedup keys inserted.
+func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent, observedAt time.Time, cp *model.SourceCheckpoint) (int, error) {
+	if len(events) == 0 && cp == nil {
 		return 0, nil
 	}
 	stamped := make([]model.UsageEvent, len(events))
@@ -122,7 +160,7 @@ func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent,
 		}
 		stamped[i] = e
 	}
-	return st.InsertEvents(ctx, stamped)
+	return st.ApplyEvents(ctx, stamped, cp)
 }
 
 // storeSnapshot materialises the positive monotonic-with-reset delta for one
@@ -131,11 +169,25 @@ func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent,
 // same delta next cycle under a fresh dedup key, double counting it forever.
 // A dedup collision (two cycles at the same observed instant) is handled by
 // ApplySnapshot, which keeps the old baseline so the delta is re-derivable.
-// Returns the number of new dedup keys inserted (0 or 1).
-func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapshot, observedAt time.Time) (int, error) {
+// Returns the number of new dedup keys inserted (0 or 1) and whether the
+// state actually advanced (false on a collision — the caller must then hold
+// the source checkpoint back so the delta stays re-derivable).
+func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapshot, observedAt time.Time, cp *model.SourceCheckpoint) (int, bool, error) {
 	last, err := st.LastState(ctx, s.Tool, s.Key)
 	if err != nil {
-		return 0, fmt.Errorf("last state: %w", err)
+		return 0, false, fmt.Errorf("last state: %w", err)
+	}
+
+	// Zero-delta fast path: the stored baseline already matches the observed
+	// counters, so there is nothing to append and no state row worth
+	// rewriting — only a pending source checkpoint still needs to land.
+	if last != nil && snapshotUnchanged(*last, s) {
+		if cp != nil {
+			if _, err := st.ApplyEvents(ctx, nil, cp); err != nil {
+				return 0, false, fmt.Errorf("checkpoint: %w", err)
+			}
+		}
+		return 0, true, nil
 	}
 
 	d := snapshotDelta(last, s)
@@ -148,11 +200,30 @@ func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapsho
 	// State advances even without a positive delta, so subsequent polls diff
 	// against the latest counters.
 	s.ObservedTime = observedAt
-	n, err := st.ApplySnapshot(ctx, events, s)
+	n, err := st.ApplySnapshot(ctx, events, s, cp)
 	if err != nil {
-		return 0, fmt.Errorf("apply snapshot: %w", err)
+		return 0, false, fmt.Errorf("apply snapshot: %w", err)
 	}
-	return n, nil
+	advanced := len(events) == 0 || n > 0
+	return n, advanced, nil
+}
+
+// snapshotUnchanged reports whether cur carries exactly the counters and
+// attributes already stored for the cell. ObservedTime is deliberately
+// excluded: nothing diffs against it, so its advance alone does not warrant a
+// row rewrite every cycle.
+func snapshotUnchanged(last, cur model.AggregateSnapshot) bool {
+	return last.InputTokens == cur.InputTokens &&
+		last.OutputTokens == cur.OutputTokens &&
+		last.CacheCreationTokens == cur.CacheCreationTokens &&
+		last.CacheReadTokens == cur.CacheReadTokens &&
+		last.ReasoningTokens == cur.ReasoningTokens &&
+		last.TotalTokens == cur.TotalTokens &&
+		last.Model == cur.Model &&
+		last.SessionID == cur.SessionID &&
+		last.Project == cur.Project &&
+		last.SourcePath == cur.SourcePath &&
+		last.Raw == cur.Raw
 }
 
 // delta carries the per-field positive change for one aggregate cell.

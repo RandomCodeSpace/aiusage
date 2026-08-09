@@ -22,10 +22,12 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	return p
 }
 
-// TestDiscoverNoTokenFiles is the headline case: an Antigravity dir holding
-// only content-only blobs (no token fields) yields zero sources and no error —
-// the current real (unauthenticated) state.
-func TestDiscoverNoTokenFiles(t *testing.T) {
+// TestTokenFreeFilesYieldNoSnapshots is the headline case: an Antigravity dir
+// holding only content-only blobs (no token fields — the current real
+// unauthenticated state) produces zero snapshots. Discover no longer pre-parses
+// files for usage (that parsed every file twice per cycle); Collect's all-zero
+// filter rejects the non-usage records instead.
+func TestTokenFreeFilesYieldNoSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	// A conversation-style blob with no token usage anywhere.
 	writeFile(t, dir, "conversation.json", `{"id":"c1","messages":[{"role":"user","content":"hi"}]}`)
@@ -38,8 +40,18 @@ func TestDiscoverNoTokenFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if len(srcs) != 0 {
-		t.Fatalf("want 0 sources for token-free Antigravity dir, got %d: %+v", len(srcs), srcs)
+	if len(srcs) != 2 {
+		t.Fatalf("want 2 sources (no usage pre-scan), got %d: %+v", len(srcs), srcs)
+	}
+	for _, src := range srcs {
+		obs, err := a.Collect(context.Background(), src)
+		if err != nil {
+			t.Fatalf("collect %s: %v", src.Path, err)
+		}
+		if len(obs.Snapshots) != 0 || len(obs.Events) != 0 {
+			t.Fatalf("token-free %s produced %d snapshots / %d events, want 0",
+				src.Path, len(obs.Snapshots), len(obs.Events))
+		}
 	}
 }
 

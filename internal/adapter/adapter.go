@@ -28,6 +28,12 @@ type Source struct {
 type Observation struct {
 	Events    []model.UsageEvent
 	Snapshots []model.AggregateSnapshot
+	// Checkpoint, when non-nil, is the source's new incremental state and MUST
+	// only be set once the read completed (a partial read that advances the
+	// checkpoint would skip the unread remainder forever). The collector
+	// persists it in the same transaction as this observation's data; nil
+	// leaves any stored checkpoint untouched.
+	Checkpoint *model.SourceCheckpoint
 }
 
 // DiscoverConfig carries discovery roots and per-tool path overrides.
@@ -62,6 +68,16 @@ type Adapter interface {
 	Discover(ctx context.Context, cfg DiscoverConfig) ([]Source, error)
 	// Collect reads a single source and returns its observations. Read-only.
 	Collect(ctx context.Context, src Source) (Observation, error)
+}
+
+// Incremental is an optional Adapter capability: given the checkpoint stored
+// after the previous cycle, the adapter may skip unchanged data and read only
+// what is new, returning the updated checkpoint on the Observation. A nil
+// checkpoint (first cycle, or checkpoint lost) MUST behave exactly like
+// Collect — a full read. Correctness never depends on the checkpoint; it is
+// purely a work-avoidance gate.
+type Incremental interface {
+	CollectIncremental(ctx context.Context, src Source, cp *model.SourceCheckpoint) (Observation, error)
 }
 
 // Registry holds the set of available adapters.

@@ -31,19 +31,21 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeStore struct {
-	mu      sync.Mutex
-	dedup   map[string]struct{}
-	events  []model.UsageEvent
-	state   map[string]model.AggregateSnapshot // key: tool|key
-	upserts int                                // standalone UpsertState calls (snapshot path must not use it)
+	mu          sync.Mutex
+	dedup       map[string]struct{}
+	events      []model.UsageEvent
+	state       map[string]model.AggregateSnapshot // key: tool|key
+	checkpoints map[string]model.SourceCheckpoint  // key: tool|sourcePath
+	upserts     int                                // standalone UpsertState calls (snapshot path must not use it)
 }
 
 var _ store.Store = (*fakeStore)(nil)
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		dedup: map[string]struct{}{},
-		state: map[string]model.AggregateSnapshot{},
+		dedup:       map[string]struct{}{},
+		state:       map[string]model.AggregateSnapshot{},
+		checkpoints: map[string]model.SourceCheckpoint{},
 	}
 }
 
@@ -87,9 +89,10 @@ func (s *fakeStore) UpsertState(_ context.Context, st model.AggregateSnapshot) e
 	return nil
 }
 
-// ApplySnapshot mirrors the SQLite contract: events + state land together, and
-// a fully-collided insert leaves the baseline untouched.
-func (s *fakeStore) ApplySnapshot(_ context.Context, events []model.UsageEvent, st model.AggregateSnapshot) (int, error) {
+// ApplySnapshot mirrors the SQLite contract: events + state (+ checkpoint)
+// land together, and a fully-collided insert leaves baseline and checkpoint
+// untouched.
+func (s *fakeStore) ApplySnapshot(_ context.Context, events []model.UsageEvent, st model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	inserted, err := s.insertLocked(events)
@@ -98,8 +101,35 @@ func (s *fakeStore) ApplySnapshot(_ context.Context, events []model.UsageEvent, 
 	}
 	if len(events) == 0 || inserted > 0 {
 		s.state[st.Tool+"|"+st.Key] = st
+		if cp != nil {
+			s.checkpoints[cp.Tool+"|"+cp.SourcePath] = *cp
+		}
 	}
 	return inserted, nil
+}
+
+// ApplyEvents mirrors the SQLite contract: events and checkpoint land together.
+func (s *fakeStore) ApplyEvents(_ context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inserted, err := s.insertLocked(events)
+	if err != nil {
+		return inserted, err
+	}
+	if cp != nil {
+		s.checkpoints[cp.Tool+"|"+cp.SourcePath] = *cp
+	}
+	return inserted, nil
+}
+
+func (s *fakeStore) Checkpoint(_ context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.checkpoints[tool+"|"+sourcePath]; ok {
+		cp := v
+		return &cp, nil
+	}
+	return nil, nil
 }
 
 // Summarize sums total_tokens over events whose EventTime is in [Since, Until).
@@ -446,12 +476,12 @@ type crashStore struct {
 	fail bool
 }
 
-func (s *crashStore) ApplySnapshot(ctx context.Context, events []model.UsageEvent, st model.AggregateSnapshot) (int, error) {
+func (s *crashStore) ApplySnapshot(ctx context.Context, events []model.UsageEvent, st model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
 	if s.fail {
 		s.fail = false
 		return 0, errors.New("injected crash")
 	}
-	return s.fakeStore.ApplySnapshot(ctx, events, st)
+	return s.fakeStore.ApplySnapshot(ctx, events, st, cp)
 }
 
 // TestSnapshotCrashWindowNoDoubleCount drives the collector through a failed
@@ -500,6 +530,111 @@ func TestSnapshotCrashWindowNoDoubleCount(t *testing.T) {
 	}
 	if st.upserts != 0 {
 		t.Fatalf("snapshot path called UpsertState %d times; state must only advance inside ApplySnapshot", st.upserts)
+	}
+}
+
+// countingStore wraps fakeStore and counts ApplySnapshot calls, so tests can
+// prove the zero-delta path skips the write entirely.
+type countingStore struct {
+	*fakeStore
+	applies int
+}
+
+func (s *countingStore) ApplySnapshot(ctx context.Context, events []model.UsageEvent, st model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
+	s.applies++
+	return s.fakeStore.ApplySnapshot(ctx, events, st, cp)
+}
+
+// TestSnapshotZeroDeltaSkipsStateWrite: an unchanged aggregate cell must not
+// rewrite its state row every cycle — the cycle skips ApplySnapshot outright
+// and resumes writing when the counters move again.
+func TestSnapshotZeroDeltaSkipsStateWrite(t *testing.T) {
+	snap := func(total int64) adapter.Observation {
+		return adapter.Observation{Snapshots: []model.AggregateSnapshot{{
+			Tool: model.ToolHermes, Key: "cell", SessionID: "cell",
+			InputTokens: total, TotalTokens: total,
+		}}}
+	}
+	ad := &fakeAdapter{
+		id: model.ToolHermes, class: model.Aggregate,
+		emit: func(call int) adapter.Observation {
+			if call < 2 {
+				return snap(900_000) // cycle 2 repeats cycle 1's counters
+			}
+			return snap(1_000_000)
+		},
+	}
+	reg := adapter.NewRegistry(ad)
+	st := &countingStore{fakeStore: newFakeStore()}
+	ctx := context.Background()
+
+	clock := refDay.Add(6 * time.Hour)
+	restore := setNow(func() time.Time { return clock })
+	defer restore()
+
+	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	if st.applies != 1 {
+		t.Fatalf("cycle 1 ApplySnapshot calls = %d, want 1", st.applies)
+	}
+	stored := st.state[model.ToolHermes+"|cell"]
+
+	clock = clock.Add(time.Minute)
+	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if st.applies != 1 {
+		t.Fatalf("zero-delta cycle called ApplySnapshot (calls = %d, want still 1)", st.applies)
+	}
+	if got := st.state[model.ToolHermes+"|cell"]; got != stored {
+		t.Fatalf("zero-delta cycle rewrote state: %+v -> %+v", stored, got)
+	}
+	if got := windowTotal(t, st.fakeStore, time.Time{}, time.Time{}); got != 900_000 {
+		t.Fatalf("after zero-delta cycle total = %d, want 900,000", got)
+	}
+
+	// Counters move again: the write path resumes and the delta materialises.
+	clock = clock.Add(time.Minute)
+	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+		t.Fatalf("cycle 3: %v", err)
+	}
+	if st.applies != 2 {
+		t.Fatalf("cycle 3 ApplySnapshot calls = %d, want 2", st.applies)
+	}
+	if got := windowTotal(t, st.fakeStore, time.Time{}, time.Time{}); got != 1_000_000 {
+		t.Fatalf("after growth total = %d, want 1,000,000", got)
+	}
+}
+
+// TestSnapshotZeroDeltaStillLandsCheckpoint: skipping the state rewrite must
+// not also drop a pending source checkpoint, or the source would be re-read
+// every cycle forever.
+func TestSnapshotZeroDeltaStillLandsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeStore()
+	cell := model.AggregateSnapshot{
+		Tool: model.ToolHermes, Key: "cell", SessionID: "cell",
+		InputTokens: 10, TotalTokens: 10,
+	}
+	if _, err := st.ApplySnapshot(ctx, nil, cell, nil); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	cp := &model.SourceCheckpoint{Tool: model.ToolHermes, SourcePath: "src", State: "gate"}
+	n, advanced, err := storeSnapshot(ctx, st, cell, refDay.Add(6*time.Hour), cp)
+	if err != nil || n != 0 || !advanced {
+		t.Fatalf("storeSnapshot n=%d advanced=%v err=%v, want 0,true,nil", n, advanced, err)
+	}
+	got, err := st.Checkpoint(ctx, model.ToolHermes, "src")
+	if err != nil || got == nil || got.State != "gate" {
+		t.Fatalf("checkpoint did not land on zero-delta cycle: %+v (err=%v)", got, err)
+	}
+	if len(st.events) != 0 {
+		t.Fatalf("zero-delta cycle stored %d events, want 0", len(st.events))
+	}
+	if !st.state[model.ToolHermes+"|cell"].ObservedTime.IsZero() {
+		t.Fatalf("zero-delta cycle rewrote the state row")
 	}
 }
 
