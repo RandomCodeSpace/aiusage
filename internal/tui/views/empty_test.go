@@ -91,8 +91,6 @@ func TestDetailCardQueryFailedTreatment(t *testing.T) {
 	c.Stat = lipgloss.NewStyle()
 	c.StatLabel = lipgloss.NewStyle()
 	c.Number = lipgloss.NewStyle()
-	c.Panel = lipgloss.NewStyle()
-	c.Focused = lipgloss.NewStyle()
 	c.AccentColor = c.NowColor
 	c.Humanize = func(int64) string { return "1" }
 	c.PadLeft = func(s string, _ int) string { return s }

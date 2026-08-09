@@ -69,11 +69,17 @@ func CompSpecs(input, output, cache color.Color) []CompSpec {
 	}
 }
 
-// CompBar renders a horizontal bar split into the four component segments,
+// CompBar renders a horizontal bar split into the component segments,
 // proportional to each value against max and colored per series. Any non-zero
 // series gets at least one cell so it stays visible even when another dominates;
 // the remainder is a faint track. Segment length encodes the bucket's total
 // relative to max, segment colors encode its composition.
+//
+// The bar's CAP is drawn with the eighth-block ramp (surface.go): the last
+// segment's fractional cell renders as ▏..▉ instead of being rounded to a whole
+// cell, so two bars that differ by a fifth of a cell no longer render
+// identically. That is the de-pixelation win — it costs one glyph and applies to
+// every bar in the dashboard.
 func (c Ctx) CompBar(comps Components, max int64, width int) string {
 	if width <= 0 {
 		return ""
@@ -81,16 +87,25 @@ func (c Ctx) CompBar(comps Components, max int64, width int) string {
 	if max <= 0 {
 		return c.Faint.Render(strings.Repeat("░", width))
 	}
-	var b strings.Builder
+	// Segment boundaries are integers (a stacked bar cannot share a cell between
+	// two colors), but the bar's own end keeps its fraction.
+	type seg struct {
+		style lipgloss.Style
+		cells int
+	}
+	segs := make([]seg, 0, len(c.Comp))
 	used := 0
+	var exact float64
 	for _, s := range c.Comp {
 		v := s.Pick(comps)
 		if v <= 0 {
 			continue
 		}
-		cells := int(float64(v) / float64(max) * float64(width))
-		if cells == 0 {
+		exact = float64(v) / float64(max) * float64(width)
+		cells := int(exact)
+		if cells == 0 && used < width {
 			cells = 1
+			exact = 1
 		}
 		if used+cells > width {
 			cells = width - used
@@ -98,13 +113,37 @@ func (c Ctx) CompBar(comps Components, max int64, width int) string {
 		if cells <= 0 {
 			break
 		}
-		b.WriteString(s.Style().Render(strings.Repeat("█", cells)))
+		segs = append(segs, seg{style: c.compStyle(s), cells: cells})
 		used += cells
+	}
+
+	var b strings.Builder
+	for i, s := range segs {
+		n := s.cells
+		cap := ""
+		if i == len(segs)-1 && used < width {
+			// Only the final segment may carry a partial cap: an interior cap would
+			// leave a gap the next color has to start after.
+			_, cap = eighthCells(exact-float64(int(exact)), 1)
+		}
+		b.WriteString(s.style.Render(strings.Repeat("█", n) + cap))
+		if cap != "" {
+			used++
+		}
 	}
 	if used < width {
 		b.WriteString(c.Faint.Render(strings.Repeat("░", width-used)))
 	}
 	return b.String()
+}
+
+// compStyle is CompSpec.Style() kept on the context's current elevation, so a
+// series segment inside a painted block does not punch a hole in it.
+func (c Ctx) compStyle(s CompSpec) lipgloss.Style {
+	if c.BG == nil {
+		return s.Style()
+	}
+	return s.Style().Background(c.BG)
 }
 
 // CompLegend renders a one-line legend of the four series (glyph + label) in
@@ -113,7 +152,7 @@ func (c Ctx) CompBar(comps Components, max int64, width int) string {
 func (c Ctx) CompLegend() string {
 	parts := make([]string, 0, len(c.Comp))
 	for _, s := range c.Comp {
-		parts = append(parts, s.Style().Render(s.Glyph+" "+s.Short))
+		parts = append(parts, c.compStyle(s).Render(s.Glyph+" "+s.Short))
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(parts, c.pad(1))
 }

@@ -67,17 +67,17 @@ func (m *Model) reloadWith(cacheOnlyDetail bool) {
 // to the scrubbed bucket via syncScrub (called after the base load).
 func (m *Model) loadOverview() {
 	now := m.qnow()
-	tot, err := m.data.Totals(now, m.rng, m.crumbs)
+	tot, err := m.data.Totals(now, m.span(), m.crumbs)
 	if err != nil {
 		m.err = err
 		return
 	}
-	byTool, err := m.data.GroupBy(now, m.rng, m.crumbs, "tool", SortTotal)
+	byTool, err := m.data.GroupBy(now, m.span(), m.crumbs, "tool", SortTotal)
 	if err != nil {
 		m.err = err
 		return
 	}
-	tl, dim, err := m.data.Timeline(now, m.rng, m.crumbs)
+	tl, dim, err := m.data.Timeline(now, m.span(), m.crumbs)
 	if err != nil {
 		m.err = err
 		return
@@ -89,7 +89,7 @@ func (m *Model) loadOverview() {
 	// Prewarm every scrub position in ONE [dim, tool] grouped query: the
 	// per-bucket by-tool compositions land in m.scrubComp, so a scrub sweep is
 	// fully local — no windowed per-bucket queries, warm or cold.
-	comp, err := m.data.GroupByDims(now, m.rng, m.crumbs, []string{dim, "tool"})
+	comp, err := m.data.GroupByDims(now, m.span(), m.crumbs, []string{dim, "tool"})
 	if err != nil {
 		m.err = err
 		return
@@ -102,7 +102,7 @@ func (m *Model) loadOverview() {
 		ByTool:      filterBuckets(byTool.Buckets, "tool", m.filter),
 		Timeline:    tl.Buckets,
 		TimelineDim: dim,
-		RangeLbl:    m.rng.Label(),
+		RangeLbl:    m.spanLabel(),
 		ActivePane:  views.PaneOverviewHero,
 		Cursor:      m.scrubIndex,
 		Pinned:      m.scrubPinned,
@@ -115,15 +115,15 @@ func (m *Model) loadOverview() {
 // loadByToolBase builds the by-tool bars (no detail leg — reloadWith picks the
 // querying or cache-only detail twin).
 func (m *Model) loadByToolBase() {
-	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, "tool", m.sort)
+	s, err := m.data.GroupBy(m.qnow(), m.span(), m.crumbs, "tool", m.sort)
 	if err != nil {
 		m.err = err
 		return
 	}
 	rows := filterBuckets(s.Buckets, "tool", m.filter)
 	m.byTool.Rows = rows
-	m.byTool.Grand = grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows)
-	m.byTool.RangeLbl = m.rng.Label()
+	m.byTool.Grand = grandOf(m.data, m.qnow(), m.span(), m.crumbs, rows)
+	m.byTool.RangeLbl = m.spanLabel()
 	m.byTool.ActivePane = views.PaneByXBars
 	m.byTool.CopilotAbsent = copilotAbsent(rows)
 	if m.byTool.Selected >= len(rows) {
@@ -145,7 +145,7 @@ func (m *Model) loadByToolDetail() {
 	}
 	m.byTool.SelSessions = b.Sessions
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: b.Keys["tool"]})
-	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
+	trend, _, err := m.data.Timeline(m.qnow(), m.span(), crumbs)
 	if err != nil {
 		// Honest per-pane failure: the detail renders "query failed", never an
 		// ambiguous blank (or a silently held stale trend).
@@ -170,7 +170,7 @@ func (m *Model) syncByToolDetail() {
 	}
 	m.byTool.SelSessions = b.Sessions
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "tool", Value: b.Keys["tool"]})
-	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
+	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.span(), crumbs); ok {
 		m.byTool.SelTrend = trend.Buckets
 		m.byTool.SelTrendErr = false
 	} else {
@@ -181,15 +181,15 @@ func (m *Model) syncByToolDetail() {
 // loadByModelBase builds the by-model bars colored by owning tool (no detail
 // leg — reloadWith picks the querying or cache-only detail twin).
 func (m *Model) loadByModelBase() {
-	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, "model", m.sort)
+	s, err := m.data.GroupBy(m.qnow(), m.span(), m.crumbs, "model", m.sort)
 	if err != nil {
 		m.err = err
 		return
 	}
 	rows := filterBuckets(s.Buckets, "model", m.filter)
 	m.byModel.Rows = rows
-	m.byModel.Grand = grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows)
-	m.byModel.RangeLbl = m.rng.Label()
+	m.byModel.Grand = grandOf(m.data, m.qnow(), m.span(), m.crumbs, rows)
+	m.byModel.RangeLbl = m.spanLabel()
 	m.byModel.ActivePane = views.PaneByXBars
 	m.byModel.ModelTool = m.modelOwners()
 	if m.byModel.Selected >= len(rows) {
@@ -208,7 +208,7 @@ func (m *Model) loadByModelDetail() {
 	}
 	mdl := b.Keys["model"]
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: mdl})
-	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
+	trend, _, err := m.data.Timeline(m.qnow(), m.span(), crumbs)
 	if err != nil {
 		m.byModel.SelTrend = nil
 		m.byModel.SelTrendErr = true
@@ -228,7 +228,7 @@ func (m *Model) syncByModelDetail() {
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: "model", Value: b.Keys["model"]})
-	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
+	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.span(), crumbs); ok {
 		m.byModel.SelTrend = trend.Buckets
 		m.byModel.SelTrendErr = false
 	} else {
@@ -243,13 +243,13 @@ func (m *Model) loadBrowseBase() {
 	if !ok {
 		dim = drillDims[len(drillDims)-1]
 	}
-	s, err := m.data.GroupBy(m.qnow(), m.rng, m.crumbs, dim, m.sort)
+	s, err := m.data.GroupBy(m.qnow(), m.span(), m.crumbs, dim, m.sort)
 	if err != nil {
 		m.err = err
 		return
 	}
 	rows := filterBuckets(s.Buckets, dim, m.filter)
-	m.browse.SetData(m.vctx, dim, rows, grandOf(m.data, m.qnow(), m.rng, m.crumbs, rows))
+	m.browse.SetData(m.vctx, dim, rows, grandOf(m.data, m.qnow(), m.span(), m.crumbs, rows))
 	m.layout()
 }
 
@@ -268,7 +268,7 @@ func (m *Model) loadBrowsePreview() {
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: dim, Value: val})
-	trend, _, err := m.data.Timeline(m.qnow(), m.rng, crumbs)
+	trend, _, err := m.data.Timeline(m.qnow(), m.span(), crumbs)
 	if err != nil {
 		m.browse.SetPreview(nil)
 		m.browse.SetPreviewErr(true)
@@ -293,7 +293,7 @@ func (m *Model) syncBrowsePreview() {
 		return
 	}
 	crumbs := append(cloneCrumbs(m.crumbs), Crumb{Dim: dim, Value: val})
-	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.rng, crumbs); ok {
+	if trend, _, ok := m.data.TimelineCached(m.qnow(), m.span(), crumbs); ok {
 		m.browse.SetPreview(trend.Buckets)
 		m.browse.SetPreviewErr(false)
 	} else {
@@ -328,9 +328,9 @@ func (m *Model) syncScrub() {
 		m.overview.Pinned = false
 		m.overview.ScrubLabel = ""
 		now := m.qnow()
-		tot, okT := m.data.TotalsCached(now, m.rng, m.crumbs)
+		tot, okT := m.data.TotalsCached(now, m.span(), m.crumbs)
 		prev, okP := m.prevTotalsCached()
-		byTool, okB := m.data.GroupByCached(now, m.rng, m.crumbs, "tool", SortTotal)
+		byTool, okB := m.data.GroupByCached(now, m.span(), m.crumbs, "tool", SortTotal)
 		if !okT || !okP || !okB {
 			m.detailWanted = true
 			return
@@ -380,12 +380,21 @@ func (m *Model) clampScrub() {
 // granularity so their cache keys stay stable: 7d/30d compare against the prior
 // N local calendar days (AddDate keeps local midnights across DST); today
 // compares against the same-length tail of yesterday, with "now" rounded down
-// to the hour so the key moves once per hour, not per second.
+// to the hour so the key moves once per hour, not per second. A STEPPED window
+// is already a whole closed calendar span, so its comparison period is simply
+// the span before it — including for today, where the partial-day tail logic
+// would understate a full past day.
 func (m *Model) prevWindow() (since, until time.Time, ok bool) {
 	now := m.qnow()
-	cur, _ := m.rng.Window(now)
+	sp := m.span()
+	cur, _ := sp.Window(now)
 	if cur.IsZero() {
 		return time.Time{}, time.Time{}, false
+	}
+	if sp.Step < 0 {
+		prev := Span{R: sp.R, Step: sp.Step - 1}
+		ps, pu := prev.Window(now)
+		return ps, pu, true
 	}
 	switch m.rng {
 	case Range7d:
@@ -461,7 +470,7 @@ func (m *Model) topToolAt(idx int) string {
 // stable-sorted first-bucket pick.
 func (m *Model) modelOwners() map[string]string {
 	out := map[string]string{}
-	s, err := m.data.GroupByDims(m.qnow(), m.rng, m.crumbs, []string{"model", "tool"})
+	s, err := m.data.GroupByDims(m.qnow(), m.span(), m.crumbs, []string{"model", "tool"})
 	if err != nil {
 		return out
 	}
@@ -494,12 +503,12 @@ func bucketTotalsFromBucket(b store.Bucket) store.Bucket {
 // grand-total bucket and the sum of the visible rows. Taking the max keeps
 // share ≤ 100% even when filtering hides rows or a provider's grand total
 // double-counts differently from the per-group totals.
-func grandOf(d *Data, now time.Time, r Range, crumbs []Crumb, rows []store.Bucket) int64 {
+func grandOf(d *Data, now time.Time, sp Span, crumbs []Crumb, rows []store.Bucket) int64 {
 	var sum int64
 	for _, b := range rows {
 		sum += b.Total
 	}
-	tot, err := d.Totals(now, r, crumbs)
+	tot, err := d.Totals(now, sp, crumbs)
 	if err != nil {
 		return sum
 	}
@@ -518,7 +527,7 @@ func cloneCrumbs(c []Crumb) []Crumb {
 }
 
 // copilotAbsent reports whether copilot has zero recorded usage among the rows
-// (triggers the OTEL note). Returns false if copilot has any total.
+// (triggers the absent-source note). Returns false if copilot has any total.
 func copilotAbsent(rows []store.Bucket) bool {
 	for _, b := range rows {
 		if b.Keys["tool"] == model.ToolCopilot && b.Total > 0 {

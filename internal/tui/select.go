@@ -80,21 +80,36 @@ func (m *Model) moveSelectionFromKey(msg tea.Msg) {
 	}
 }
 
+// selectionDim is the grouping key the current bar view selects on.
+func (m Model) selectionDim() string {
+	if m.view == ViewByModel {
+		return "model"
+	}
+	return "tool"
+}
+
 // selectBar selects the bar matching a clicked name on By-Tool / By-Model. The
 // Overview tool bars are read-only (no selection), so a name that isn't found is
 // simply a no-op.
 func (m *Model) selectBar(name string) {
-	rows := m.selectionRows()
-	for i, b := range rows {
-		dim := "tool"
-		if m.view == ViewByModel {
-			dim = "model"
-		}
+	dim := m.selectionDim()
+	for i, b := range m.selectionRows() {
 		if b.Keys[dim] == name {
 			m.setSelection(i)
 			return
 		}
 	}
+}
+
+// barSelected reports whether name is the bar the current view ALREADY has
+// selected — the test behind "a second press on the selected row drills".
+func (m Model) barSelected(name string) bool {
+	rows := m.selectionRows()
+	i := m.currentSelection()
+	if i < 0 || i >= len(rows) {
+		return false
+	}
+	return rows[i].Keys[m.selectionDim()] == name
 }
 
 // selectedByToolBucket returns the selected tool bucket.

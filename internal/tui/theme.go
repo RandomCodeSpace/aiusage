@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"image/color"
+
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
 
@@ -12,19 +14,22 @@ import (
 // dark terminals while keeping WCAG-AA contrast on both floors.
 //
 // Direction: a graphite "trading desk" dashboard. Exactly one cold-cyan
-// interaction accent (also the focus ring), a warm amber "now"/scrub readout,
+// interaction accent (the focus bar and the active chip), a warm amber
+// "now"/scrub readout,
 // and the per-component (input/output/cache) token series colored from the
 // ANSI palette in buildCtx and rendered in every chart, bar and split.
 type Theme struct {
-	// Core palette.
-	Bg          compat.AdaptiveColor
-	Surface     compat.AdaptiveColor
-	SurfaceHi   compat.AdaptiveColor // focused pane / hovered tile floor (+1 elevation)
-	Border      compat.AdaptiveColor
-	BorderFocus compat.AdaptiveColor // cyan focus ring ("you are here")
-	Text        compat.AdaptiveColor
-	Muted       compat.AdaptiveColor
-	Faint       compat.AdaptiveColor // gridlines, ghosted/dimmed series, disabled
+	// Core palette. Bg/Surface/SurfaceHi/SurfaceTop are the 4-step elevation
+	// ladder (views.ElevGround..views.ElevChip); Elev() hands them to the views
+	// as an indexable ladder so no view ever names a color.
+	Bg         compat.AdaptiveColor
+	Surface    compat.AdaptiveColor
+	SurfaceHi  compat.AdaptiveColor // focused pane / selected row floor (L2)
+	SurfaceTop compat.AdaptiveColor // chips, active tab, table header band (L3)
+	Border     compat.AdaptiveColor // the outer app frame — the ONE border
+	Text       compat.AdaptiveColor
+	Muted      compat.AdaptiveColor
+	Faint      compat.AdaptiveColor // gridlines, rules, ghosted series, disabled
 
 	// Semantic palette.
 	Accent compat.AdaptiveColor // the ONE interaction accent (cold cyan)
@@ -40,17 +45,15 @@ type Theme struct {
 
 	// Reusable styles.
 	Title       lipgloss.Style
+	Wordmark    lipgloss.Style
 	Subtle      lipgloss.Style
 	Crumb       lipgloss.Style
 	CrumbActive lipgloss.Style
-	Panel       lipgloss.Style
 	PanelTitle  lipgloss.Style
 	Stat        lipgloss.Style
 	StatLabel   lipgloss.Style
 	HeaderBar   lipgloss.Style
 	FooterBar   lipgloss.Style
-	TabActive   lipgloss.Style
-	TabInactive lipgloss.Style
 	Number      lipgloss.Style
 }
 
@@ -63,14 +66,14 @@ func adaptive(light, dark string) compat.AdaptiveColor {
 // NewTheme builds the default theme.
 func NewTheme() Theme {
 	t := Theme{
-		Bg:          adaptive("#FBFCFE", "#0B0E14"),
-		Surface:     adaptive("#F1F4F9", "#11161F"),
-		SurfaceHi:   adaptive("#E7ECF4", "#161D29"),
-		Border:      adaptive("#D2DAE6", "#232B38"),
-		BorderFocus: adaptive("#0E8C97", "#3DD6E0"),
-		Text:        adaptive("#10151D", "#E8EEF6"),
-		Muted:       adaptive("#5A6B82", "#7C8DA6"),
-		Faint:       adaptive("#9AA3AE", "#4A535F"),
+		Bg:         adaptive("#FBFCFE", "#0B0E14"),
+		Surface:    adaptive("#F1F4F9", "#11161F"),
+		SurfaceHi:  adaptive("#E7ECF4", "#161D29"),
+		SurfaceTop: adaptive("#DCE4F0", "#1E2735"),
+		Border:     adaptive("#D2DAE6", "#232B38"),
+		Text:       adaptive("#10151D", "#E8EEF6"),
+		Muted:      adaptive("#5A6B82", "#7C8DA6"),
+		Faint:      adaptive("#9AA3AE", "#4A535F"),
 
 		Accent: adaptive("#0E8C97", "#3DD6E0"),
 		Now:    adaptive("#B5780A", "#F2B441"),
@@ -81,63 +84,71 @@ func NewTheme() Theme {
 	}
 
 	t.Title = lipgloss.NewStyle().Bold(true).Foreground(t.Text)
+	t.Wordmark = lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
 	t.Subtle = lipgloss.NewStyle().Foreground(t.Muted)
 	t.Crumb = lipgloss.NewStyle().Foreground(t.Muted)
 	t.CrumbActive = lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
 
-	t.Panel = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Border).
-		Padding(0, 1)
-	t.PanelTitle = lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	// An unfocused pane title is muted: the accent is the interaction color and
+	// belongs to exactly one surface at a time (the focused pane's bar + title).
+	t.PanelTitle = lipgloss.NewStyle().Bold(true).Foreground(t.Muted)
 
 	t.Stat = lipgloss.NewStyle().Bold(true).Foreground(t.Text)
 	t.StatLabel = lipgloss.NewStyle().Foreground(t.Muted)
 
-	t.HeaderBar = lipgloss.NewStyle().Foreground(t.Text).Padding(0, 1)
-	t.FooterBar = lipgloss.NewStyle().Foreground(t.Muted).Padding(0, 1)
-
-	t.TabActive = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(t.Bg).
-		Background(t.Accent).
-		Padding(0, 1)
-	t.TabInactive = lipgloss.NewStyle().Foreground(t.Muted).Padding(0, 1)
+	// The chrome bars are painted blocks too: header/breadcrumb/footer sit one
+	// step above the app ground so the body's cards read as floating on them.
+	t.HeaderBar = lipgloss.NewStyle().Foreground(t.Text).Background(t.SurfaceHi).Padding(0, 1)
+	t.FooterBar = lipgloss.NewStyle().Foreground(t.Muted).Background(t.SurfaceHi).Padding(0, 1)
 
 	t.Number = lipgloss.NewStyle().Foreground(t.Text)
 
 	return t
 }
 
-// Idle returns the resting panel style: rounded hairline border in Border, no
-// elevated fill.
+// Elev is the 4-step elevation ladder handed to the views, indexed by
+// views.ElevGround..views.ElevChip.
+func (t Theme) Elev() [4]color.Color {
+	return [4]color.Color{t.Bg, t.Surface, t.SurfaceHi, t.SurfaceTop}
+}
+
+// blockPad is the uniform card padding. It is deliberately the exact cell cost
+// the rounded border + Padding(0,1) used to carry (4 columns, 2 rows) so every
+// width/height budget in the views survives the borders being removed —
+// lipgloss v2 Width/Height are border- AND padding-inclusive.
+const (
+	blockPadY = 1
+	blockPadX = 2
+)
+
+// Idle returns the resting panel style: a painted card at elevation L1, no
+// border. Borders retreat to the outer app frame (issue #22); depth is carried
+// by the ladder and structure by the titled rule.
 func (t Theme) Idle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Border).
-		Padding(0, 1)
+	return lipgloss.NewStyle().Background(t.Surface).Padding(blockPadY, blockPadX)
 }
 
-// Focused returns the active-pane panel style. The selected pane is made
-// unmistakable through THREE redundant channels (so it reads on any terminal,
-// including monochrome): a THICK border glyph set (vs the idle rounded hairline
-// — geometrically distinct), a bright cyan border foreground, and a one-step
-// elevated fill. Both rounded and thick borders are 1 cell wide, so swapping
-// does not disturb any pane's width math. Exactly one pane wears this at a time.
+// Focused returns the active-pane panel style: the same card lifted one step to
+// L2. The pane's monochrome-safe focus channel is the width-invariant focus bar
+// on its titled rule, not this fill — paint is invisible with SGR stripped, so
+// the bar is what actually says "you are here". Exactly one pane wears both at
+// a time.
 func (t Theme) Focused() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.ThickBorder()).
-		BorderForeground(t.BorderFocus).
-		Background(t.SurfaceHi).
-		Padding(0, 1)
+	return lipgloss.NewStyle().Background(t.SurfaceHi).Padding(blockPadY, blockPadX)
 }
 
-// Errored returns a panel style with a red border for per-pane error states.
+// Errored returns the per-pane error card: a resting card whose content carries
+// the warn color (the ✕ glyph + word is the mono channel).
 func (t Theme) Errored() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Warn).
-		Padding(0, 1)
+	return lipgloss.NewStyle().Background(t.Surface).Padding(blockPadY, blockPadX)
+}
+
+// AppFrame is the ink of the ONE border the design language allows: the outer
+// app frame. It styles the frame's glyphs, which render.go lays out by hand —
+// a bordered lipgloss style re-flows the whole frame and costs a third of the
+// render budget. Everything inside the frame is painted, never boxed.
+func (t Theme) AppFrame() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.Border).Background(t.Bg)
 }
 
 // toolAccents maps each known tool to a distinct accent color so per-tool bars

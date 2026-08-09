@@ -70,21 +70,20 @@ func (f Freshness) String() string {
 func (m Model) freshnessChip() string {
 	switch m.fresh {
 	case FreshLive:
-		return lipgloss.NewStyle().Foreground(m.th.Positive).Render("● live")
+		return m.headerChip("● live", m.th.Positive)
 	case FreshCutIn:
-		return lipgloss.NewStyle().Foreground(m.th.Now).Render("◐ sync")
+		return m.headerChip("◐ sync", m.th.Now)
 	case FreshStale:
 		chip := "◔ stale"
 		if !m.lastLoadAt.IsZero() {
 			chip += " " + ageShort(m.data.now().Sub(m.lastLoadAt))
 		}
-		out := lipgloss.NewStyle().Foreground(m.th.Warn).Render(chip)
 		if m.err != nil {
-			out += " " + m.th.Subtle.Render(Truncate(m.err.Error(), 18))
+			chip += " " + Truncate(m.err.Error(), 18)
 		}
-		return out
+		return m.headerChip(chip, m.th.Warn)
 	default:
-		return m.th.Subtle.Render("○ cold")
+		return m.headerChip("○ cold", m.th.Muted)
 	}
 }
 
@@ -170,12 +169,13 @@ func (m Model) bannerRows() int {
 func (m Model) renderStallBanner() string {
 	txt := "⚠ no ingest for " + ageShort(m.ingestLag()) +
 		" — collector stalled or idle (writes expected ~every " + ageShort(m.collectEvery) + ")"
-	w := m.width - 2
+	w := m.frameW() - 2
 	if w < 3 {
 		w = 3
 	}
-	bar := lipgloss.NewStyle().Foreground(m.th.Warn).Bold(true).Padding(0, 1).Render(Truncate(txt, w))
-	return lipgloss.NewStyle().MaxWidth(m.width).Render(bar)
+	bar := lipgloss.NewStyle().Foreground(m.th.Warn).Background(m.th.SurfaceHi).
+		Bold(true).Padding(0, 1).Render(Truncate(txt, w))
+	return lipgloss.NewStyle().MaxWidth(m.frameW()).Render(bar)
 }
 
 // renderErrorPanel is the full-body error card, rendered ONLY while cold — with
@@ -188,10 +188,10 @@ func (m Model) renderErrorPanel(lay views.Layout) string {
 		w = 8
 	}
 	card := m.th.Errored().Render(lipgloss.JoinVertical(lipgloss.Center,
-		lipgloss.NewStyle().Foreground(m.th.Warn).Render("✕ query failed"),
-		m.th.Subtle.Render(Truncate(m.err.Error(), w-6)),
+		lipgloss.NewStyle().Foreground(m.th.Warn).Background(m.th.Surface).Render("✕ query failed"),
+		m.th.Subtle.Background(m.th.Surface).Render(Truncate(m.err.Error(), w-6)),
 		"",
-		m.th.Subtle.Render("press r to retry"),
+		m.th.Subtle.Background(m.th.Surface).Render("press r to retry"),
 	))
 	return lipgloss.Place(w, lay.BodyH, lipgloss.Center, lipgloss.Center, card)
 }

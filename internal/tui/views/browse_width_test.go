@@ -36,8 +36,6 @@ func TestBrowseTableFitsPanel(t *testing.T) {
 		Humanize: func(v int64) string { return "0" },
 		PadLeft:  func(s string, w int) string { return s },
 		Truncate: func(s string, w int) string { return s },
-		Panel:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
-		Focused:  lipgloss.NewStyle().Border(lipgloss.ThickBorder()).Padding(0, 1),
 	}
 	rows := []store.Bucket{
 		{Keys: map[string]string{"model": "claude-haiku-4-5-20251001"}, Events: 3, Input: 1, Output: 1, CacheRead: 1, Total: 3},
@@ -60,6 +58,45 @@ func TestBrowseTableFitsPanel(t *testing.T) {
 		if got := browseTableMaxLine(b); got > content {
 			t.Errorf("w=%d: table renders %d cells wide but panel text area is only %d — trailing column will wrap",
 				w, got, content)
+		}
+	}
+}
+
+// TestBrowseDrillSlotIsWidthInvariant: the per-row drill slot costs the same
+// cell whether the row descends or not, so the columns hold as the reader drills
+// — the same contract the focus bar carries. Toggling drillable with the data
+// and geometry held constant is the only way to measure the slot alone: drilling
+// for real also changes the grouping dimension (and with it the tool glyph).
+func TestBrowseDrillSlotIsWidthInvariant(t *testing.T) {
+	c := byEntityTestCtx()
+	rows := []store.Bucket{
+		{Keys: map[string]string{"tool": "claude-code"}, Events: 3, Input: 1, Output: 1, CacheRead: 1, Total: 3},
+		{Keys: map[string]string{"tool": "codex"}, Events: 1, Input: 1, Output: 1, Total: 2},
+	}
+	cell := lipgloss.NewStyle().PaddingRight(1)
+	for _, w := range []int{80, 120, 160} {
+		b := NewBrowse(c)
+		b.ApplyStyles(cell, cell, cell)
+		b.SetData(c, "tool", rows, 5)
+		b.SetLayout(ComputeLayout(w, 40))
+
+		b.SetDrillable(true)
+		drillView := b.View()
+		on := lineWidths(drillView)
+		b.SetDrillable(false)
+		off := lineWidths(b.View())
+
+		if !strings.Contains(ansiBrowseTest.ReplaceAllString(drillView, ""), Chevron) {
+			t.Fatalf("w=%d: a drillable Browse renders no chevron at all", w)
+		}
+		if len(on) != len(off) {
+			t.Fatalf("w=%d: the drill slot changed the row count %d → %d", w, len(on), len(off))
+		}
+		for i := range on {
+			if on[i] != off[i] {
+				t.Fatalf("w=%d: line %d is %d cells with the chevron and %d without — the drill slot reflows",
+					w, i, on[i], off[i])
+			}
 		}
 	}
 }

@@ -194,8 +194,10 @@ func kpiSparkline(c Ctx, d OverviewData, s CompSpec, w int) string {
 // share % or unit. KPI tiles are not interactive (the trend is the only
 // interactive surface on Overview).
 func kpiTile(c Ctx, s kpiSpec, w int) string {
-	// The border (2) plus Padding(0,1) (2) leave w-4 usable content columns.
-	// Build every row to exactly cw cells so nothing wraps inside the box.
+	// The card's uniform padding leaves w-4 usable content columns (the same
+	// budget the rounded border used to cost). Build every row to exactly cw
+	// cells so nothing wraps inside the card.
+	c = c.On(ElevCard)
 	cw := w - 4
 	if cw < 6 {
 		cw = 6
@@ -218,11 +220,11 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 			gap = 0
 		}
 	}
-	numberRow := c.Stat.Render(num) + strings.Repeat(" ", gap) + deltaStyle.Render(deltaTxt)
+	numberRow := c.Stat.Render(num) + c.pad(gap) + deltaStyle.Render(deltaTxt)
 
 	footRow := c.StatLabel.Render(c.Truncate(s.foot, cw))
 	if s.shareTot > 0 {
-		footRow = s.style.Render(c.Percent(s.shareVal, s.shareTot)) + " " +
+		footRow = c.fg(s.style.GetForeground()).Render(c.Percent(s.shareVal, s.shareTot)) + c.pad(1) +
 			c.StatLabel.Render(c.Truncate(s.foot, cw-5))
 	}
 
@@ -232,7 +234,9 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 	}
 	body += "\n" + footRow
 
-	return c.Panel.Width(w).Render(c.PanelTitle.Render(s.label) + "\n" + body)
+	// A KPI tile is read-only, so its titled rule never carries a focus bar; the
+	// rule still draws the card's extent now that the box is gone.
+	return c.Block(ElevCard).Width(w).Render(c.titleRule(s.label, cw, false) + "\n" + body)
 }
 
 // deltaChipStyle maps a delta direction to its chip style per the Delta
@@ -252,14 +256,16 @@ func deltaChipStyle(c Ctx, dir int) lipgloss.Style {
 // sidePanel renders the read-only by-tool composition bars over a four-component
 // split gauge.
 func sidePanel(c Ctx, d OverviewData, w, h int, focus bool) string {
-	// Fill the box to the hero's height so the right column matches the trend
+	// Fill the card to the hero's height so the right column matches the trend
 	// panel instead of floating short above empty terminal.
-	style := c.panelStyle(focus).Width(w).Height(maxInt(h, 3))
+	elev := paneElev(focus)
+	c = c.On(elev)
+	style := c.Block(elev).Width(w).Height(maxInt(h, 3))
 	inner := w - 4
 	if inner < 4 {
 		inner = 4
 	}
-	title := c.titleChip("BY TOOL · "+d.RangeLbl, focus)
+	title := c.titleRule("BY TOOL · "+d.RangeLbl, inner, focus)
 	body := toolRows(c, d.ByTool, inner)
 	gauge := splitGauge(c, d.Totals, inner)
 	content := title + "\n" + body + "\n" + gauge
@@ -293,8 +299,8 @@ func toolRows(c Ctx, buckets []store.Bucket, inner int) string {
 		bar := c.CompBar(Split(b), max, barW)
 		name := c.tool(tool).Render(c.PadRight(tool, nameW))
 		num := c.Number.Render(c.PadLeft(c.Humanize(b.Total), numW))
-		glyphStyled := lipgloss.NewStyle().Foreground(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))
-		rows = append(rows, glyphStyled+" "+name+" "+bar+" "+num)
+		glyphStyled := c.fg(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))
+		rows = append(rows, glyphStyled+c.pad(1)+name+c.pad(1)+bar+c.pad(1)+num)
 	}
 	return strings.Join(rows, "\n")
 }
@@ -311,20 +317,24 @@ func splitGauge(c Ctx, t store.Bucket, inner int) string {
 	gauge := c.CompBar(comp, sum, w)
 	parts := make([]string, 0, len(c.Comp))
 	for _, s := range c.Comp {
-		parts = append(parts, s.Style().Render(s.Short+" "+c.Percent(s.Pick(comp), sum)))
+		parts = append(parts, c.compStyle(s).Render(s.Glyph+" "+s.Short+" "+c.Percent(s.Pick(comp), sum)))
 	}
-	legend := c.Truncate(strings.Join(parts, "  "), inner)
-	return c.StatLabel.Render("SPLIT") + "\n" + gauge + "\n" + legend
+	legend := c.fitParts(parts, c.pad(2), inner)
+	return c.Rule(c.titleChip("SPLIT", false), inner) + "\n" + gauge + "\n" + legend
 }
 
 // compactToolStrip renders the by-tool data as a single horizontal strip for
 // narrow widths (the side panel is dropped below the hero).
 func compactToolStrip(c Ctx, d OverviewData, width int) string {
+	c = c.On(ElevCard)
+	card := c.Block(ElevCard).Width(width)
+	inner := width - 4
+	title := c.titleRule("BY TOOL", inner, false)
 	if len(d.ByTool) == 0 {
-		return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + EmptyState(c, EmptyNoRows, width-4))
+		return card.Render(title + "\n" + EmptyState(c, EmptyNoRows, inner))
 	}
 	if zeroTotals(d.ByTool) {
-		return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + EmptyState(c, EmptyZeroTokens, width-4))
+		return card.Render(title + "\n" + EmptyState(c, EmptyZeroTokens, inner))
 	}
 	var parts []string
 	limit := len(d.ByTool)
@@ -333,8 +343,8 @@ func compactToolStrip(c Ctx, d OverviewData, width int) string {
 	}
 	for _, b := range d.ByTool[:limit] {
 		tool := b.Keys["tool"]
-		parts = append(parts, lipgloss.NewStyle().Foreground(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))+" "+
-			c.tool(tool).Render(tool)+" "+c.Number.Render(c.Humanize(b.Total)))
+		parts = append(parts, c.fg(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))+c.pad(1)+
+			c.tool(tool).Render(tool)+c.pad(1)+c.Number.Render(c.Humanize(b.Total)))
 	}
-	return c.Panel.Width(width).Render(c.PanelTitle.Render("BY TOOL") + "\n" + c.Truncate(strings.Join(parts, "   "), width-4))
+	return card.Render(title + "\n" + c.fitParts(parts, c.pad(3), inner))
 }

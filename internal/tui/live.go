@@ -215,12 +215,12 @@ func (m Model) renderLoading() string {
 	if m.width == 0 || m.height == 0 {
 		return "loading usage…"
 	}
-	wordmark := m.th.PanelTitle.Render("◧ aiusage")
+	wordmark := m.th.Wordmark.Render("◧ aiusage")
 	line := m.spin.View() + " " + m.th.Stat.Render("loading usage…")
 	path := ""
 	if m.dbPath != "" {
-		path = m.th.Subtle.Render(Truncate(m.dbPath, m.width-4))
+		path = m.th.Subtle.Render(Truncate(m.dbPath, m.frameW()-4))
 	}
 	block := lipgloss.JoinVertical(lipgloss.Center, wordmark, "", line, path)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)
+	return lipgloss.Place(m.frameW(), m.frameH(), lipgloss.Center, lipgloss.Center, block)
 }

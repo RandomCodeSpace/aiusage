@@ -11,6 +11,8 @@
 package views
 
 import (
+	"image/color"
+
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
 	zone "github.com/lrstanley/bubblezone/v2"
@@ -24,15 +26,22 @@ import (
 // the per-component (input/output/cache) token model; ToolAccent/ToolGlyph
 // yield per-tool channels.
 type Ctx struct {
-	// Styles.
-	Panel      lipgloss.Style
-	Focused    lipgloss.Style // active-pane style (cyan ring + elevated fill)
+	// Styles. Panels themselves are built from the elevation ladder
+	// (Ctx.Block), not from a pre-made panel style — there is no box any more.
 	PanelTitle lipgloss.Style
 	Stat       lipgloss.Style
 	StatLabel  lipgloss.Style
 	Subtle     lipgloss.Style
 	Number     lipgloss.Style
 	Faint      lipgloss.Style // gridlines / ghosted series / disabled
+
+	// Elev is the 4-step background elevation ladder (see surface.go). Views
+	// never name a hex color: they name a step. Elev entries may be nil in the
+	// partial contexts headless tests build, in which case nothing is painted.
+	Elev [elevCount]color.Color
+	// BG is the elevation the context is currently rendering on, set by On(). It
+	// is what keeps ad-hoc colored runs and separators from tearing the block.
+	BG color.Color
 
 	// Adaptive colors for chart adapters and segment coloring.
 	NowColor    compat.AdaptiveColor
@@ -63,14 +72,14 @@ type Ctx struct {
 }
 
 // now returns the warm amber readout style.
-func (c Ctx) now() lipgloss.Style { return lipgloss.NewStyle().Foreground(c.NowColor) }
+func (c Ctx) now() lipgloss.Style { return c.fg(c.NowColor) }
 
 // good returns the falling-spend / healthy style.
-func (c Ctx) good() lipgloss.Style { return lipgloss.NewStyle().Foreground(c.GoodColor) }
+func (c Ctx) good() lipgloss.Style { return c.fg(c.GoodColor) }
 
 // tool returns a bold per-tool accent style.
 func (c Ctx) tool(name string) lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(c.ToolAccent(name)).Bold(true)
+	return c.fg(c.ToolAccent(name)).Bold(true)
 }
 
 // mark wraps s in a zone if a manager is present; otherwise returns s as-is so
@@ -82,26 +91,31 @@ func (c Ctx) mark(id, s string) string {
 	return c.Zone.Mark(id, s)
 }
 
-// panelStyle returns the focused or idle panel style based on the flag.
-func (c Ctx) panelStyle(focused bool) lipgloss.Style {
+// paneElev is the elevation a pane's floor sits at: raised while it holds
+// focus, the resting card step otherwise.
+func paneElev(focused bool) Elevation {
 	if focused {
-		return c.Focused
+		return ElevRaised
 	}
-	return c.Panel
+	return ElevCard
 }
 
-// titleChip renders a panel title, appending a non-color focus marker (a cyan
-// chevron) when the pane is focused. Color is never the only channel: the
-// chevron glyph itself signals focus even in monochrome terminals, complementing
-// the cyan ring + elevated fill.
+// titleChip renders a panel title WITHOUT its rule: the width-invariant focus
+// slot plus the name. Focus is the bar, not a border and not a color — the bar
+// is the one channel that survives a monochrome terminal, and it costs the same
+// two cells whether the pane is focused or not, so nothing reflows.
 func (c Ctx) titleChip(label string, focused bool) string {
 	if focused {
-		// Focused: the whole title goes bright cyan + bold and gains a chevron,
-		// reinforcing the thick border ring on the active pane.
-		return lipgloss.NewStyle().Foreground(c.AccentColor).Bold(true).Render(label) +
-			" " + lipgloss.NewStyle().Foreground(c.AccentColor).Render("◂")
+		return c.FocusMark(true) + c.pad(1) + c.fg(c.AccentColor).Bold(true).Render(label)
 	}
-	return c.PanelTitle.Render(label)
+	return c.FocusMark(false) + c.pad(1) + c.PanelTitle.Render(label)
+}
+
+// titleRule is titleChip plus the hairline out to w: the titled rule that
+// replaced the bordered box caption. Panes that append chips to their title
+// (the hero) compose the head themselves and call Rule directly.
+func (c Ctx) titleRule(label string, w int, focused bool) string {
+	return c.Rule(c.titleChip(label, focused), w)
 }
 
 // SeriesFor extracts one metric across buckets (in order) as a []float64 for

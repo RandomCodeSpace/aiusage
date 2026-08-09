@@ -40,15 +40,8 @@ type Options struct {
 // caller does not pass one (tests, direct embedding).
 const defaultCollectInterval = 5 * time.Minute
 
-// Run launches the TUI over the given store. It blocks until the user quits.
-// Alt-screen and cell-motion mouse mode (nav rail, tabs, rows, bars and KPI
-// tiles clickable; wheel scrolls/scrubs) are declared on the tea.View in View().
-func Run(st store.Store, opt Options) error {
-	m := NewModel(st, opt)
-	p := tea.NewProgram(m)
-	_, err := p.Run()
-	return err
-}
+// Run lives in exit.go, where the terminal-teardown contract it depends on is
+// documented alongside it.
 
 // Model is the root Bubble Tea model.
 type Model struct {
@@ -62,8 +55,12 @@ type Model struct {
 	statePath     string // ui-state.json path ("" disables persistence)
 	reducedMotion bool
 
-	view      View
-	rng       Range
+	view View
+	rng  Range
+	// step is how many whole calendar spans the shown window sits behind the
+	// live one ([ / ], issue #19). 0 is the present; it never goes positive.
+	// Deliberately NOT persisted: a relaunch always lands on the live window.
+	step      int
 	sort      Sort
 	crumbs    []Crumb
 	filter    string
@@ -125,6 +122,13 @@ type Model struct {
 	lastClickZone string
 	lastClickAt   time.Time
 
+	// Drag-to-scrub state (mouse.go): dragging marks a held left button that is
+	// over the hero chart, dragX the column it was last seen at. Cell-motion
+	// reporting only sends motion while a button is down, so these are touched
+	// exclusively during a drag.
+	dragging bool
+	dragX    int
+
 	width  int
 	height int
 	lay    views.Layout // responsive frame, recomputed on every WindowSizeMsg
@@ -160,9 +164,13 @@ func NewModel(src DataSource, opt Options) Model {
 	// 1-cell gutter so values never abut (the column budget in browse.go reserves
 	// for it). The Selected style wraps the WHOLE row, so it must NOT add padding
 	// — doing so would push the cursor row one column wider than the others and
-	// make it wrap. The accent left-marker is baked into the row content instead.
+	// make it wrap. The width-invariant focus bar is prefixed per row in
+	// Browse.markedRows, which is what carries the cursor in monochrome.
+	//
+	// Elevation: the header band sits at L3 (chip), body cells on the pane's own
+	// floor, the cursor row one step up at L2.
 	b.ApplyStyles(
-		lipgloss.NewStyle().Bold(true).Foreground(th.Muted).PaddingRight(1),
+		lipgloss.NewStyle().Bold(true).Foreground(th.Muted).Background(th.SurfaceTop).PaddingRight(1),
 		lipgloss.NewStyle().Foreground(th.Text).PaddingRight(1),
 		lipgloss.NewStyle().Bold(true).Foreground(th.Text).Background(th.SurfaceHi),
 	)
@@ -191,7 +199,7 @@ func NewModel(src DataSource, opt Options) Model {
 		collectEvery = defaultCollectInterval
 	}
 
-	return Model{
+	mdl := Model{
 		data:          NewData(src),
 		keys:          DefaultKeyMap(),
 		th:            th,
@@ -211,6 +219,27 @@ func NewModel(src DataSource, opt Options) Model {
 		mon:           sysmon.New(wd),
 		heroMemo:      views.NewHeroMemo(),
 	}
+	mdl.syncStepKeys()
+	return mdl
+}
+
+// span is the window every query keys off: the active range plus its step
+// offset (0 = the live window).
+func (m Model) span() Span { return Span{R: m.rng, Step: m.step} }
+
+// spanLabel names the window currently shown (see Span.Label). It is what the
+// header pill and the panel titles carry, so a stepped view says which window
+// it is instead of reading as "now".
+func (m Model) spanLabel() string { return m.span().Label(m.qnow()) }
+
+// syncStepKeys keeps the [ / ] bindings honest: they are advertised only where
+// they can act — never on the open-ended "all" range, and ] only while the
+// window sits behind the present. key.Matches and the help renderer both skip
+// disabled bindings, so the footer and overlay never list a dead key.
+func (m *Model) syncStepKeys() {
+	steppable := m.rng.Steppable()
+	m.keys.StepBack.SetEnabled(steppable)
+	m.keys.StepFwd.SetEnabled(steppable && m.step < 0)
 }
 
 // heroMode maps the pivot toggle to the view-layer hero mode. It is injected at
@@ -238,14 +267,15 @@ func detectReducedMotion() bool {
 // shared zone manager.
 func buildCtx(th Theme, zm *zone.Manager) views.Ctx {
 	return views.Ctx{
-		Panel:      th.Idle(),
-		Focused:    th.Focused(),
 		PanelTitle: th.PanelTitle,
 		Stat:       th.Stat,
 		StatLabel:  th.StatLabel,
 		Subtle:     th.Subtle,
 		Number:     th.Number,
 		Faint:      lipgloss.NewStyle().Foreground(th.Faint),
+		// The 4-step elevation ladder (views.ElevGround..ElevChip). Views name a
+		// step, never a color, so the whole app moves together.
+		Elev: th.Elev(),
 
 		NowColor:    th.Now,
 		AccentColor: th.Accent,
@@ -339,6 +369,12 @@ func (m Model) drillIntoBrowse(dim, val string) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// browseDrillable reports whether a Browse row still descends: the deepest
+// drill dimension has nothing under it. It is the single source of truth for
+// both the guard in drillBrowse and the per-row chevron affordance, so the
+// affordance can never advertise a descent that does not happen.
+func (m Model) browseDrillable() bool { return len(m.crumbs) < len(drillDims)-1 }
+
 // drillBrowse descends the Browse drill stack. At the deepest level there is no
 // further descent (drilling stops at Sessions).
 func (m Model) drillBrowse() (tea.Model, tea.Cmd) {
@@ -347,7 +383,7 @@ func (m Model) drillBrowse() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	if len(m.crumbs) >= len(drillDims)-1 {
+	if !m.browseDrillable() {
 		return m, nil
 	}
 	m.crumbs = append(m.crumbs, Crumb{Dim: dim, Value: val})
@@ -392,14 +428,30 @@ func (m *Model) popCrumbsTo(depth int) tea.Cmd {
 // body). All breakpoint policy lives in views.ComputeLayout — this just applies
 // it. bodyLayout() carries the effective body height (after any help reserve).
 func (m *Model) layout() {
-	m.lay = views.ComputeLayout(m.width, m.height)
+	m.lay = views.ComputeLayout(m.frameW(), m.frameH())
 	bl := m.bodyLayout()
 	m.browse.SetLayout(bl)
 	// Bound the help footer so its one-line short help ellipsis-truncates instead
 	// of overflowing the frame (FooterBar adds Padding(0,1) = 2 columns).
-	if m.width > 2 {
-		m.help.SetWidth(m.width - 2)
+	if w := m.frameW() - 2; w > 0 {
+		m.help.SetWidth(w)
 	}
+}
+
+// frameW / frameH are the interior of the outer app frame — the ONE border the
+// design language allows (issue #22). Every budget inside the app is measured
+// against these, never against the raw terminal size, so the border can never
+// push a row or a column off screen.
+func (m Model) frameW() int { return frameSpan(m.width) }
+func (m Model) frameH() int { return frameSpan(m.height) }
+
+// frameSpan subtracts the app frame's two cells from a terminal dimension,
+// never returning less than one cell.
+func frameSpan(n int) int {
+	if n-2*views.AppFrame < 1 {
+		return 1
+	}
+	return n - 2*views.AppFrame
 }
 
 // helpReserve is the row budget the expanded help overlay claims from the body.

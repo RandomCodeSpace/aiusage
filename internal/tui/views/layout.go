@@ -39,10 +39,25 @@ const (
 // Layout breakpoint constants, in terminal cells. These are the ONLY layout
 // magic numbers in the TUI.
 const (
-	// MinUsableW / MinUsableH are the absolute floor; below either the UI cannot
-	// render usefully and a resize card is shown instead.
+	// AppFrame is the per-side cell cost of the outer app frame — the ONE border
+	// the design language allows (issue #22). ComputeLayout is handed the frame's
+	// INTERIOR, so a usable terminal is MinUsableW+2*AppFrame by
+	// MinUsableH+2*AppFrame.
+	AppFrame = 1
+
+	// MinUsableW / MinUsableH are the absolute floor for the app frame's
+	// interior; below either the UI cannot render usefully and a resize card is
+	// shown instead (on the raw terminal — the frame is not worth two rows when
+	// the message is "there is no room").
 	MinUsableW = 40
 	MinUsableH = 10
+
+	// MinTermW / MinTermH are the same floor expressed as TERMINAL size, frame
+	// included. What a reader resizes is the terminal, so this — not the interior
+	// — is the number the resize card must print, or following the instruction
+	// exactly still lands below the floor.
+	MinTermW = MinUsableW + 2*AppFrame
+	MinTermH = MinUsableH + 2*AppFrame
 
 	// minMainW / minSideW are the smallest widths at which the primary column and
 	// the side panel are worth rendering. sideGutter is the column between them.

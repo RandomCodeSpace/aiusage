@@ -86,13 +86,16 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("p"),
 			key.WithHelp("p", "pivot"),
 		),
+		// Window stepping moves whole calendar spans; the bindings are enabled
+		// only where they can act (Model.syncStepKeys), so help never lists a key
+		// that would do nothing — ] disappears at the live edge.
 		StepBack: key.NewBinding(
 			key.WithKeys("["),
-			key.WithHelp("[", "window ←"),
+			key.WithHelp("[", "prev window"),
 		),
 		StepFwd: key.NewBinding(
 			key.WithKeys("]"),
-			key.WithHelp("]", "window →"),
+			key.WithHelp("]", "next window"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),

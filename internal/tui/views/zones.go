@@ -10,14 +10,20 @@ const (
 	zoneHero      = "hero"      // hero / timeline chart body
 	zoneBars      = "bars"      // by-tool / by-model bars pane
 	zoneTable     = "table"     // browse table pane
-	zonePreview   = "preview"   // browse preview pane
+	zonePreview   = "preview"   // browse preview / by-entity detail pane
 	zoneRangePill = "rangepill" // header range pill
 	zoneHelp      = "help"      // header help toggle
 	zoneFreshness = "freshness" // header freshness chip (click = force refresh)
+	zoneSort      = "sort"      // breadcrumb-bar sort chip (click = cycle sort)
+	zoneFilter    = "filter"    // footer filter chip (click = focus the input)
 )
 
 // Exported zone-ID builders/constants so package tui can resolve clicks without
 // duplicating the string literals.
+
+// ZoneHero is the hero / timeline chart body. It is the wheel's scrub target:
+// a notch over the chart steps the crosshair.
+const ZoneHero = zoneHero
 
 // ZoneBars is the by-tool/by-model bars pane.
 const ZoneBars = zoneBars
@@ -37,6 +43,14 @@ const ZoneHelp = zoneHelp
 // ZoneFreshness is the header freshness chip. The indicator is where you act:
 // a left-press on it forces a refresh.
 const ZoneFreshness = zoneFreshness
+
+// ZoneSort is the breadcrumb bar's sort chip: it renders as an action chip, so
+// pressing it acts — it cycles the sort order, exactly as the `s` key does.
+const ZoneSort = zoneSort
+
+// ZoneFilter is the footer's active-filter chip: pressing it reopens the filter
+// input with the current term, exactly as `/` does.
+const ZoneFilter = zoneFilter
 
 // RailZone returns the click-zone id for a nav-rail entry (a view index).
 func RailZone(viewIdx int) string { return "rail:" + strconv.Itoa(viewIdx) }

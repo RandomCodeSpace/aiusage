@@ -190,20 +190,17 @@ func trendStrip(c Ctx, buckets []store.Bucket, w, h int) string {
 				vals[i] = float64(s.Pick(Split(b)))
 			}
 			label := s.Glyph + " " + padRightLocal(s.Short, 6) + " "
-			rows = append(rows, s.Style().Render(label)+newColumnSparkline(vals, sw, 1, s.Style()))
+			st := c.compStyle(s)
+			rows = append(rows, st.Render(label)+newColumnSparkline(vals, sw, 1, st))
 		}
 		return strings.Join(rows, "\n")
 	}
 	last := Split(buckets[len(buckets)-1])
 	parts := make([]string, 0, len(c.Comp))
 	for _, s := range c.Comp {
-		parts = append(parts, s.Style().Render(s.Glyph+" "+s.Short+" "+humanizeOr(c, s.Pick(last))))
+		parts = append(parts, c.compStyle(s).Render(s.Glyph+" "+s.Short+" "+humanizeOr(c, s.Pick(last))))
 	}
-	line := strings.Join(parts, c.Subtle.Render(" · "))
-	if c.Truncate != nil {
-		line = c.Truncate(line, w)
-	}
-	return line
+	return c.fitParts(parts, c.Subtle.Render(" · "), w)
 }
 
 // logT maps a token count to its log-axis position: log10(1+v). The +1 keeps

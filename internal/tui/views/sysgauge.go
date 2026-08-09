@@ -92,23 +92,30 @@ func sysGaugeCell(c Ctx, g SysGauge, cellW int) string {
 		bar = c.Faint.Render(strings.Repeat("░", barInner))
 		pct = c.Faint.Render("  …")
 	} else {
-		filled := int(g.Frac*float64(barInner) + 0.5)
-		if filled > barInner {
-			filled = barInner
-		}
+		// Eighth-block cap: a gauge at 38% of a 6-cell bar is 2.28 cells, drawn as
+		// two full cells plus a ▎ — not rounded to 2, where 33% and 41% would be
+		// the same picture.
+		full, cap := eighthCells(g.Frac*float64(barInner), barInner)
 		col := gaugeColor(c, g.Frac)
-		bar = lipgloss.NewStyle().Foreground(col).Render(strings.Repeat("█", filled)) +
-			c.Faint.Render(strings.Repeat("░", barInner-filled))
-		pct = lipgloss.NewStyle().Foreground(col).Render(padLeftLocal(strconv.Itoa(int(g.Frac*100+0.5))+"%", 4))
+		track := barInner - full
+		if cap != "" {
+			track--
+		}
+		if track < 0 {
+			track = 0
+		}
+		bar = c.fg(col).Render(strings.Repeat("█", full)+cap) +
+			c.Faint.Render(strings.Repeat("░", track))
+		pct = c.fg(col).Render(padLeftLocal(strconv.Itoa(int(g.Frac*100+0.5))+"%", 4))
 	}
 
-	cell := c.StatLabel.Render(label) + " " +
-		c.Faint.Render("▕") + bar + c.Faint.Render("▏") + " " + pct +
+	cell := c.StatLabel.Render(label) + c.pad(1) +
+		c.Faint.Render("▕") + bar + c.Faint.Render("▏") + c.pad(1) + pct +
 		c.Subtle.Render(readout)
 
 	// Pad/clamp to exactly cellW so the row never drifts or wraps.
 	if w := lipgloss.Width(cell); w < cellW {
-		cell += strings.Repeat(" ", cellW-w)
+		cell += c.pad(cellW - w)
 	}
 	return lipgloss.NewStyle().MaxWidth(cellW).Render(cell)
 }

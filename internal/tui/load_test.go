@@ -76,11 +76,11 @@ func TestScrubCompositionBracketsLocalDay(t *testing.T) {
 		want[day] = append(want[day], f.tool)
 	}
 
-	tl, dim, err := m.data.Timeline(m.qnow(), RangeAll, nil)
+	tl, dim, err := m.data.Timeline(m.qnow(), Span{R: RangeAll}, nil)
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
-	comp, err := m.data.GroupByDims(m.qnow(), RangeAll, nil, []string{dim, "tool"})
+	comp, err := m.data.GroupByDims(m.qnow(), Span{R: RangeAll}, nil, []string{dim, "tool"})
 	if err != nil {
 		t.Fatalf("GroupByDims: %v", err)
 	}

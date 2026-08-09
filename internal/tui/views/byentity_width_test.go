@@ -49,8 +49,6 @@ func byEntityTestCtx() Ctx {
 		BorderColor: ac("#232B38"),
 		GoodColor:   ac("#56D364"),
 		WarnColor:   ac("#E5534B"),
-		Panel:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
-		Focused:     lipgloss.NewStyle().Border(lipgloss.ThickBorder()).Padding(0, 1),
 		PanelTitle:  lipgloss.NewStyle(),
 		Stat:        lipgloss.NewStyle(),
 		StatLabel:   lipgloss.NewStyle(),

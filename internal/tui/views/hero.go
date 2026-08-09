@@ -66,12 +66,17 @@ const (
 // the panel's inner width — so a long title can never wrap and silently eat a
 // row from the chart's budget.
 func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
-	style := c.panelStyle(focus).Width(w)
+	// The hero's card stays on the ground step: its body is an ntcharts canvas,
+	// rendered one cell at a time with per-cell styles, so a panel background
+	// cannot reach the cells between the braille without a per-cell repaint pass
+	// on every scrub. Charts live on the ground plane by design (surface.go);
+	// focus is carried by the titled rule's focus bar, which needs no paint.
+	style := c.Block(ElevGround).Width(w)
 	inner := w - 4
 	if inner < 4 {
 		inner = 4
 	}
-	chartH := h - 3 // title + border
+	chartH := h - 3 // title rule + card padding
 	if chartH < 1 {
 		chartH = 1
 	}
@@ -98,7 +103,10 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 	if d.Pinned {
 		scrubIdx = d.Cursor
 	}
-	return style.Render(title + "\n" + heroBodyMemo(c, d, lay, inner, chartH, scrubIdx))
+	// The rule runs out from whatever chips the title ended up carrying, so the
+	// pane's extent is drawn even in the header-less degraded bands.
+	return style.Render(c.Rule(title, inner) + "\n" +
+		heroBodyMemo(c, d, lay, inner, chartH, scrubIdx))
 }
 
 // heroFrameKind is which built body a (mode, layout, geometry) triple resolves
@@ -273,12 +281,12 @@ func gapRuns(times []time.Time, dim string) [][]int {
 func paneHeader(c Ctx, specs []CompSpec, name string, step int64, w int) string {
 	var glyphs strings.Builder
 	for _, s := range specs {
-		glyphs.WriteString(s.Style().Render(s.Glyph))
+		glyphs.WriteString(c.compStyle(s).Render(s.Glyph))
 	}
-	head := glyphs.String() + " " + c.StatLabel.Render(name)
+	head := glyphs.String() + c.pad(1) + c.StatLabel.Render(name)
 	scale := c.Subtle.Render("SCALE " + detentHuman(c, step) + "/div")
 	if lipgloss.Width(head)+3+lipgloss.Width(scale) <= w {
-		return head + "   " + scale
+		return c.RuleBetween(head, scale, w)
 	}
 	return head
 }
@@ -354,10 +362,10 @@ func leverageLabelWidth(step int64, graphH int) int {
 // leverageHeader is the pivot's pane header: the line's glyph, what it plots,
 // and the declared scale.
 func leverageHeader(c Ctx, step int64, w int) string {
-	head := leverageLineStyle(c).Render("⠒") + " " + c.StatLabel.Render("leverage")
+	head := leverageLineStyle(c).Render("⠒") + c.pad(1) + c.StatLabel.Render("leverage")
 	scale := c.Subtle.Render("SCALE " + leverageRatioLabel(step) + "/div")
 	if lipgloss.Width(head)+3+lipgloss.Width(scale) <= w {
-		return head + "   " + scale
+		return c.RuleBetween(head, scale, w)
 	}
 	return head
 }

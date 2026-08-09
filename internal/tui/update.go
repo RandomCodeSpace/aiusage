@@ -117,6 +117,11 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Range):
 		return m.cycleRange()
 
+	case key.Matches(msg, m.keys.StepBack):
+		return m.stepWindow(-1)
+	case key.Matches(msg, m.keys.StepFwd):
+		return m.stepWindow(+1)
+
 	case key.Matches(msg, m.keys.Pivot):
 		// Pure presentation: the pivot re-reads the timeline already applied, so
 		// it never dispatches a load. Only Overview owns a hero.
@@ -251,13 +256,46 @@ func (m *Model) scrubBy(dir int) {
 }
 
 // cycleRange advances the range, resetting scrub + drill path, persists the new
-// range so it is restored on the next launch, and dispatches an async load.
+// range so it is restored on the next launch, and dispatches an async load. The
+// window steps back to the present: a "7d" step offset means nothing once the
+// span changes width.
 func (m Model) cycleRange() (Model, tea.Cmd) {
 	m.rng = m.rng.Next()
+	m.step = 0
 	m.crumbs = nil
 	m.scrubIndex = 0
 	m.scrubPinned = false
+	m.syncStepKeys()
 	m.persistUI()
+	cmd := m.startLoad()
+	return m, cmd
+}
+
+// stepWindow shifts the reporting window by dir whole calendar spans — one day
+// for the day range, one week for 7d, thirty days for 30d — reusing the range's
+// local-midnight quantization (issue #4, 1a) so a stepped window lands on the
+// same bucket boundaries, and therefore the same kind of stable cache key, as
+// the live one. It rides the ordinary async load path: nothing queries here.
+//
+// Stepping stops at the present — the window never moves past the live one —
+// and the open-ended "all" range has no span to step. The drill path survives
+// (the same filters over a different window); the scrub pin does not, since the
+// timeline underneath it is replaced.
+func (m Model) stepWindow(dir int) (Model, tea.Cmd) {
+	if !m.rng.Steppable() {
+		return m, nil
+	}
+	next := m.step + dir
+	if next > 0 {
+		next = 0
+	}
+	if next == m.step {
+		return m, nil
+	}
+	m.step = next
+	m.scrubIndex = 0
+	m.scrubPinned = false
+	m.syncStepKeys()
 	cmd := m.startLoad()
 	return m, cmd
 }

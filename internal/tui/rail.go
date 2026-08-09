@@ -12,19 +12,25 @@ import (
 // a compact icon row on phone widths. (The former left-hand rail was removed —
 // nav is always a top strip.) Both forms mark each entry as a click zone.
 
-// renderTabStrip draws the top tab strip (the primary navigation). The active
-// view is highlighted; each tab is a click zone.
+// renderTabStrip draws the top tab strip (the primary navigation) as a row of
+// chips. Each chip carries a width-invariant marker slot: the active tab wears
+// the focus bar, the others a blank cell of the same width — so the strip never
+// reflows as the selection moves, and WHICH tab is active survives a monochrome
+// terminal, where the accent paint does not. Each tab is a click zone.
 func (m Model) renderTabStrip() string {
 	var tabs []string
 	for _, meta := range viewList {
 		// Full label (e.g. "◧ Overview") — the wide strip has room, so no cryptic
 		// abbreviations. minTabStripW (64) leaves margin for all four.
-		label := meta.glyph + " " + meta.label
-		s := m.th.TabInactive
-		if meta.v == m.view {
-			s = m.th.TabActive
+		body := meta.glyph + " " + meta.label
+		active := meta.v == m.view
+		tone := views.ChipCard
+		fg := m.th.Muted
+		if active {
+			tone = views.ChipAccent
 		}
-		tabs = append(tabs, m.zoneMark(views.RailZone(int(meta.v)), s.Render(label)))
+		chip := m.vctx.Chip(tone, fg, true, active, body)
+		tabs = append(tabs, m.zoneMark(views.RailZone(int(meta.v)), chip))
 	}
 	return strings.Join(tabs, " ")
 }
@@ -44,7 +50,10 @@ func (m Model) renderMiniNav() string {
 	row := strings.Join(icons, " ")
 	for _, meta := range viewList {
 		if meta.v == m.view {
-			row += "  " + lipgloss.NewStyle().Foreground(m.th.Text).Bold(true).Render(meta.label)
+			// The focus bar names the active view here too: at phone width the
+			// icons alone are ambiguous once color is gone.
+			row += "  " + lipgloss.NewStyle().Foreground(m.th.Accent).Render(views.FocusBar) +
+				" " + lipgloss.NewStyle().Foreground(m.th.Text).Bold(true).Render(meta.glyph+" "+meta.label)
 			break
 		}
 	}

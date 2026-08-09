@@ -88,6 +88,72 @@ func (r Range) Window(now time.Time) (since, until time.Time) {
 	}
 }
 
+// spanDays is the range's width in whole local calendar days — the unit one
+// press of [ / ] moves the window by. Zero means the range has no finite span
+// (all) and therefore cannot be stepped.
+func (r Range) spanDays() int {
+	switch r {
+	case RangeToday:
+		return 1
+	case Range7d:
+		return 7
+	case Range30d:
+		return 30
+	default:
+		return 0
+	}
+}
+
+// Steppable reports whether the range has a finite span the [ / ] keys can
+// shift.
+func (r Range) Steppable() bool { return r.spanDays() > 0 }
+
+// spanLabel names the range's width for a stepped window, where "today" would
+// be a lie.
+func (r Range) spanLabel() string {
+	if r == RangeToday {
+		return "1d"
+	}
+	return r.Label()
+}
+
+// Span is the reporting window the dashboard is showing: a Range plus how many
+// whole calendar spans it sits BEHIND the live window. Step 0 is the live
+// window ("now"), -1 the span before it, and so on; Step is never positive
+// because stepping stops at the present. Every query keys off a Span, so a
+// stepped window is just another (stable, quantized) cache key — no separate
+// query path, no UI-thread work.
+type Span struct {
+	R    Range
+	Step int
+}
+
+// Window resolves the span to a [since, until) pair in local time. The live
+// window keeps the range's own open upper bound; a stepped window is a CLOSED
+// calendar span computed by local-midnight arithmetic off the same quantized
+// origin (issue #4, 1a), so its bucket boundaries — and therefore its cache
+// keys — line up exactly with the live window's.
+func (s Span) Window(now time.Time) (since, until time.Time) {
+	base, open := s.R.Window(now)
+	days := s.R.spanDays()
+	if s.Step >= 0 || days == 0 {
+		return base, open
+	}
+	n := -s.Step
+	return base.AddDate(0, 0, -days*n), base.AddDate(0, 0, -days*(n-1))
+}
+
+// Label names the window: the plain range label while live, and the span width
+// plus the window's first local day once stepped ("7d @ 2026-07-27"), so a
+// stepped view can never be read as "now".
+func (s Span) Label(now time.Time) string {
+	if s.Step >= 0 || !s.R.Steppable() {
+		return s.R.Label()
+	}
+	since, _ := s.Window(now)
+	return s.R.spanLabel() + " @ " + since.Format("2006-01-02")
+}
+
 // Sort is a selectable ordering for Browse rows, cycled with the `s` key.
 type Sort int
 
@@ -236,8 +302,8 @@ func (d *Data) Invalidate() {
 // load generation resolves the same instant, so a flight dispatched just before
 // a day/hour boundary and its apply-side reload just after still derive
 // identical windows — and therefore identical cache keys.
-func (d *Data) filterFor(now time.Time, r Range, crumbs []Crumb, groupBy []string) store.Filter {
-	since, until := r.Window(now)
+func (d *Data) filterFor(now time.Time, sp Span, crumbs []Crumb, groupBy []string) store.Filter {
+	since, until := sp.Window(now)
 	f := store.Filter{Since: since, Until: until, GroupBy: groupBy}
 	for _, c := range crumbs {
 		applyCrumb(&f, c)
@@ -313,8 +379,8 @@ func (d *Data) summarize(f store.Filter) (*store.Summary, error) {
 }
 
 // Totals returns the grand-total bucket for the current range and drill stack.
-func (d *Data) Totals(now time.Time, r Range, crumbs []Crumb) (store.Bucket, error) {
-	s, err := d.summarize(d.filterFor(now, r, crumbs, nil))
+func (d *Data) Totals(now time.Time, sp Span, crumbs []Crumb) (store.Bucket, error) {
+	s, err := d.summarize(d.filterFor(now, sp, crumbs, nil))
 	if err != nil {
 		return store.Bucket{}, err
 	}
@@ -322,8 +388,8 @@ func (d *Data) Totals(now time.Time, r Range, crumbs []Crumb) (store.Bucket, err
 }
 
 // TotalsCached is the cache-only twin of Totals.
-func (d *Data) TotalsCached(now time.Time, r Range, crumbs []Crumb) (store.Bucket, bool) {
-	s, ok := d.cachedSummary(d.filterFor(now, r, crumbs, nil))
+func (d *Data) TotalsCached(now time.Time, sp Span, crumbs []Crumb) (store.Bucket, bool) {
+	s, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, nil))
 	if !ok {
 		return store.Bucket{}, false
 	}
@@ -332,8 +398,8 @@ func (d *Data) TotalsCached(now time.Time, r Range, crumbs []Crumb) (store.Bucke
 
 // GroupBy returns the summary grouped by a single dimension under the current
 // range and drill stack, sorted per the sort mode.
-func (d *Data) GroupBy(now time.Time, r Range, crumbs []Crumb, dim string, srt Sort) (*store.Summary, error) {
-	s, err := d.summarize(d.filterFor(now, r, crumbs, []string{dim}))
+func (d *Data) GroupBy(now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, error) {
+	s, err := d.summarize(d.filterFor(now, sp, crumbs, []string{dim}))
 	if err != nil {
 		return nil, err
 	}
@@ -343,8 +409,8 @@ func (d *Data) GroupBy(now time.Time, r Range, crumbs []Crumb, dim string, srt S
 }
 
 // GroupByCached is the cache-only twin of GroupBy.
-func (d *Data) GroupByCached(now time.Time, r Range, crumbs []Crumb, dim string, srt Sort) (*store.Summary, bool) {
-	s, ok := d.cachedSummary(d.filterFor(now, r, crumbs, []string{dim}))
+func (d *Data) GroupByCached(now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, bool) {
+	s, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, []string{dim}))
 	if !ok {
 		return nil, false
 	}
@@ -356,8 +422,8 @@ func (d *Data) GroupByCached(now time.Time, r Range, crumbs []Crumb, dim string,
 // GroupByDims returns the summary grouped by multiple dimensions under the
 // current range and drill stack, in the store's key order. One grouped query
 // replaces a per-key N+1 (model owners, per-bucket scrub compositions).
-func (d *Data) GroupByDims(now time.Time, r Range, crumbs []Crumb, dims []string) (*store.Summary, error) {
-	s, err := d.summarize(d.filterFor(now, r, crumbs, dims))
+func (d *Data) GroupByDims(now time.Time, sp Span, crumbs []Crumb, dims []string) (*store.Summary, error) {
+	s, err := d.summarize(d.filterFor(now, sp, crumbs, dims))
 	if err != nil {
 		return nil, err
 	}
@@ -390,9 +456,9 @@ func sortTimeline(b []store.Bucket, dim string) {
 
 // Timeline returns per-day (or per-hour for short ranges) buckets across the
 // current range, ascending by time.
-func (d *Data) Timeline(now time.Time, r Range, crumbs []Crumb) (*store.Summary, string, error) {
-	dim := timelineDim(r)
-	s, err := d.summarize(d.filterFor(now, r, crumbs, []string{dim}))
+func (d *Data) Timeline(now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, error) {
+	dim := timelineDim(sp.R)
+	s, err := d.summarize(d.filterFor(now, sp, crumbs, []string{dim}))
 	if err != nil {
 		return nil, dim, err
 	}
@@ -402,9 +468,9 @@ func (d *Data) Timeline(now time.Time, r Range, crumbs []Crumb) (*store.Summary,
 }
 
 // TimelineCached is the cache-only twin of Timeline.
-func (d *Data) TimelineCached(now time.Time, r Range, crumbs []Crumb) (*store.Summary, string, bool) {
-	dim := timelineDim(r)
-	s, ok := d.cachedSummary(d.filterFor(now, r, crumbs, []string{dim}))
+func (d *Data) TimelineCached(now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, bool) {
+	dim := timelineDim(sp.R)
+	s, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, []string{dim}))
 	if !ok {
 		return nil, dim, false
 	}

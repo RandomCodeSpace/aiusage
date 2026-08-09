@@ -198,7 +198,7 @@ func TestInFlightLoadDoesNotRepolluteInvalidatedCache(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = d.Totals(now, RangeAll, nil)
+		_, _ = d.Totals(now, Span{R: RangeAll}, nil)
 	}()
 	for g.calls.Load() == 0 { // wait until the query is in flight
 		time.Sleep(time.Millisecond)
@@ -207,7 +207,7 @@ func TestInFlightLoadDoesNotRepolluteInvalidatedCache(t *testing.T) {
 	close(g.release)
 	<-done
 
-	if _, err := d.Totals(now, RangeAll, nil); err != nil {
+	if _, err := d.Totals(now, Span{R: RangeAll}, nil); err != nil {
 		t.Fatalf("Totals: %v", err)
 	}
 	if got := g.calls.Load(); got != 2 {
@@ -296,15 +296,15 @@ func TestCacheKeysStableWithinDay(t *testing.T) {
 	late := time.Date(2026, 8, 9, 23, 59, 59, 0, time.Local)
 
 	for _, r := range []Range{RangeToday, Range7d, Range30d} {
-		if _, err := d.Totals(early, r, nil); err != nil {
+		if _, err := d.Totals(early, Span{R: r}, nil); err != nil {
 			t.Fatalf("Totals(%s): %v", r.Label(), err)
 		}
-		if _, _, err := d.Timeline(early, r, nil); err != nil {
+		if _, _, err := d.Timeline(early, Span{R: r}, nil); err != nil {
 			t.Fatalf("Timeline(%s): %v", r.Label(), err)
 		}
 		n := queriesDuring(f, func() {
-			_, _ = d.Totals(late, r, nil)
-			_, _, _ = d.Timeline(late, r, nil)
+			_, _ = d.Totals(late, Span{R: r}, nil)
+			_, _, _ = d.Timeline(late, Span{R: r}, nil)
 		})
 		if n != 0 {
 			t.Errorf("%s: same-day clock drift caused %d re-queries, want 0", r.Label(), n)
@@ -312,7 +312,7 @@ func TestCacheKeysStableWithinDay(t *testing.T) {
 	}
 
 	nextDay := late.AddDate(0, 0, 1)
-	n := queriesDuring(f, func() { _, _ = d.Totals(nextDay, Range7d, nil) })
+	n := queriesDuring(f, func() { _, _ = d.Totals(nextDay, Span{R: Range7d}, nil) })
 	if n == 0 {
 		t.Error("crossing midnight did not re-key the 7d window")
 	}
