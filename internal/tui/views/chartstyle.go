@@ -2,6 +2,7 @@ package views
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -237,7 +238,10 @@ func ParseBucketTime(v, dim string) (time.Time, bool) { return parseBucketTime(v
 func BucketTimestamp(b store.Bucket, dim string) string { return bucketLabel(b, dim) }
 
 // parseBucketTime parses a store bucket key into a time.Time using the layout
-// implied by the grouping dimension.
+// implied by the grouping dimension. Store keys are wall-clock strings formatted
+// by SQLite with the 'localtime' modifier (store/query.go groupExpr), so they
+// must be parsed back in time.Local — parsing as UTC shifts every derived
+// [since,until) window by the UTC offset.
 func parseBucketTime(v, dim string) (time.Time, bool) {
 	if v == "" {
 		return time.Time{}, false
@@ -249,24 +253,50 @@ func parseBucketTime(v, dim string) (time.Time, bool) {
 	case "day":
 		layouts = []string{"2006-01-02"}
 	case "week":
-		layouts = []string{"2006-01-02", "2006-W01"}
+		return parseWeekKey(v)
 	case "month":
-		layouts = []string{"2006-01", "2006-01-02"}
+		layouts = []string{"2006-01"}
 	default:
 		layouts = []string{"2006-01-02 15", "2006-01-02", "2006-01"}
 	}
 	for _, l := range layouts {
-		if t, err := time.Parse(l, v); err == nil {
+		if t, err := time.ParseInLocation(l, v, time.Local); err == nil {
 			return t, true
 		}
 	}
 	return time.Time{}, false
 }
 
+// parseWeekKey decodes a store %Y-W%W week key ("2026-W32") into local midnight
+// of the week's first day. Go's time package has no layout verb for %W (week 01
+// starts at the year's first Monday; earlier days are week 00), so the key is
+// parsed by hand.
+func parseWeekKey(v string) (time.Time, bool) {
+	i := strings.Index(v, "-W")
+	if i < 1 {
+		return time.Time{}, false
+	}
+	year, err := strconv.Atoi(v[:i])
+	if err != nil {
+		return time.Time{}, false
+	}
+	week, err := strconv.Atoi(v[i+2:])
+	if err != nil || week < 0 || week > 53 {
+		return time.Time{}, false
+	}
+	jan1 := time.Date(year, time.January, 1, 0, 0, 0, 0, time.Local)
+	if week == 0 {
+		return jan1, true
+	}
+	firstMonday := (8 - int(jan1.Weekday())) % 7
+	return jan1.AddDate(0, 0, firstMonday+(week-1)*7), true
+}
+
 // xLabelFormatter returns the X axis label formatter for the grouping dim.
+// Labels render in local time so the axis matches the localtime bucket keys.
 func xLabelFormatter(dim string) linechart.LabelFormatter {
 	return func(_ int, v float64) string {
-		t := time.Unix(int64(v), 0).UTC()
+		t := time.Unix(int64(v), 0)
 		if dim == "hour" {
 			return t.Format("15:04")
 		}
