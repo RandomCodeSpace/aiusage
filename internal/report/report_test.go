@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func TestHumanize(t *testing.T) {
 func TestWriteSummaryJSONRoundTrips(t *testing.T) {
 	sum := sampleSummary()
 	var buf bytes.Buffer
-	if err := WriteSummaryJSON(&buf, sum); err != nil {
+	if err := WriteSummaryJSON(&buf, sum, nil); err != nil {
 		t.Fatalf("WriteSummaryJSON: %v", err)
 	}
 	if !bytes.Contains(buf.Bytes(), []byte("\n  ")) {
@@ -142,6 +143,151 @@ func TestWriteSummaryJSONRoundTrips(t *testing.T) {
 	if !reflect.DeepEqual(*sum, got) {
 		t.Errorf("summary round-trip mismatch:\nwant %+v\ngot  %+v", *sum, got)
 	}
+}
+
+// TestWriteSummaryJSONMatchesTableCost is the divergence guard: for a range
+// holding rows collected before pricing existed, the JSON must report the same
+// resolved cost the table renders, and must say that the figure is approximate.
+// The stamped sum stays in the payload as the exact floor it is.
+func TestWriteSummaryJSONMatchesTableCost(t *testing.T) {
+	sum := &store.Summary{
+		GroupBy: []string{"tool"},
+		Buckets: []store.Bucket{
+			{Keys: map[string]string{"tool": model.ToolClaudeCode}, Events: 2, CostMicroUSD: 5_000},
+			{Keys: map[string]string{"tool": model.ToolCodex}, Events: 3, CostMicroUSD: 1_000, UnpricedEvents: 1},
+		},
+		Totals: store.Bucket{Events: 5, CostMicroUSD: 6_000, UnpricedEvents: 1},
+	}
+	groups := []store.UnpricedGroup{{
+		Keys:   map[string]string{"tool": model.ToolCodex},
+		Tool:   model.ToolCodex,
+		Model:  "gpt-5",
+		Events: 1,
+		Input:  400,
+	}}
+	costs := ResolveCosts(sum, groups, fixedPricer{})
+
+	var buf bytes.Buffer
+	if err := WriteSummaryJSON(&buf, sum, costs); err != nil {
+		t.Fatalf("WriteSummaryJSON: %v", err)
+	}
+	var got summaryJSON
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// The table's own numbers, read off the same resolved costs.
+	table := RenderTable(sum, Opt{Costs: costs})
+	if !strings.Contains(table, "~$0.0064") {
+		t.Fatalf("table total is not the expected ~$0.0064:\n%s", table)
+	}
+
+	if got.Totals.DisplayCostMicroUSD != costs.Totals.MicroUSD {
+		t.Errorf("json total = %d, table total = %d — the two surfaces disagree",
+			got.Totals.DisplayCostMicroUSD, costs.Totals.MicroUSD)
+	}
+	if !got.Totals.CostApproximate {
+		t.Errorf("json total is display-priced but not flagged approximate: %+v", got.Totals)
+	}
+	if got.Totals.CostMicroUSD != 6_000 {
+		t.Errorf("stamped total = %d, want the untouched 6000 floor", got.Totals.CostMicroUSD)
+	}
+	if got.Buckets[1].DisplayCostMicroUSD != costs.Buckets[1].MicroUSD || !got.Buckets[1].CostApproximate {
+		t.Errorf("json bucket = %+v, want the table's %+v", got.Buckets[1], costs.Buckets[1])
+	}
+	if !got.Buckets[0].CostKnown || got.Buckets[0].CostApproximate {
+		t.Errorf("fully stamped bucket = %+v, want known and exact", got.Buckets[0])
+	}
+}
+
+// TestWriteSummaryJSONUnpricedIsNotZero checks the third state survives the
+// JSON surface: a bucket nothing could price reports CostKnown=false, so a
+// consumer cannot read its 0 as a free request (the table prints "-").
+func TestWriteSummaryJSONUnpricedIsNotZero(t *testing.T) {
+	sum := &store.Summary{
+		GroupBy: []string{"tool"},
+		Buckets: []store.Bucket{
+			{Keys: map[string]string{"tool": model.ToolCopilot}, Events: 4, UnpricedEvents: 4},
+		},
+		Totals: store.Bucket{Events: 4, UnpricedEvents: 4},
+	}
+	groups := []store.UnpricedGroup{{
+		Keys:  map[string]string{"tool": model.ToolCopilot},
+		Tool:  model.ToolCopilot,
+		Model: "mystery-model",
+		Input: 9_999,
+	}}
+	costs := ResolveCosts(sum, groups, fixedPricer{miss: map[string]bool{"mystery-model": true}})
+
+	var buf bytes.Buffer
+	if err := WriteSummaryJSON(&buf, sum, costs); err != nil {
+		t.Fatalf("WriteSummaryJSON: %v", err)
+	}
+	var got summaryJSON
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Totals.CostKnown || got.Totals.DisplayCostMicroUSD != 0 {
+		t.Errorf("totals = %+v, want an explicitly unknown cost", got.Totals)
+	}
+}
+
+// TestWriteSummaryJSONKeysStable pins the payload's key set: the store summary
+// keys existing consumers already read, plus the three cost keys. Removing or
+// renaming any of them breaks a consumer silently.
+func TestWriteSummaryJSONKeysStable(t *testing.T) {
+	wantBucketKeys := []string{
+		"CacheCreation", "CacheRead", "CostApproximate", "CostKnown", "CostMicroUSD",
+		"DisplayCostMicroUSD", "Events", "Input", "Keys", "OrderedKeys", "Output",
+		"Reasoning", "Sessions", "Total", "UnpricedEvents",
+	}
+
+	var buf bytes.Buffer
+	if err := WriteSummaryJSON(&buf, sampleSummary(), nil); err != nil {
+		t.Fatalf("WriteSummaryJSON: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := sortedKeys(doc); !reflect.DeepEqual(got, []string{"Buckets", "GroupBy", "Totals"}) {
+		t.Errorf("top-level keys = %v", got)
+	}
+	var buckets []map[string]json.RawMessage
+	if err := json.Unmarshal(doc["Buckets"], &buckets); err != nil {
+		t.Fatalf("unmarshal buckets: %v", err)
+	}
+	if got := sortedKeys(buckets[0]); !reflect.DeepEqual(got, wantBucketKeys) {
+		t.Errorf("bucket keys changed:\nwant %v\ngot  %v", wantBucketKeys, got)
+	}
+	var totals map[string]json.RawMessage
+	if err := json.Unmarshal(doc["Totals"], &totals); err != nil {
+		t.Fatalf("unmarshal totals: %v", err)
+	}
+	if got := sortedKeys(totals); !reflect.DeepEqual(got, wantBucketKeys) {
+		t.Errorf("totals keys differ from bucket keys:\nwant %v\ngot  %v", wantBucketKeys, got)
+	}
+}
+
+// TestWriteSummaryJSONNilSummary keeps the pre-cost behaviour for an absent
+// summary: a JSON null, not a panic.
+func TestWriteSummaryJSONNilSummary(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteSummaryJSON(&buf, nil, nil); err != nil {
+		t.Fatalf("WriteSummaryJSON(nil): %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "null" {
+		t.Errorf("nil summary = %q, want null", got)
+	}
+}
+
+func sortedKeys(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sampleEvents() []model.UsageEvent {
@@ -203,6 +349,58 @@ func TestWriteEventsJSONNilIsEmptyArray(t *testing.T) {
 	got := strings.TrimSpace(buf.String())
 	if got != "[]" {
 		t.Errorf("expected empty array, got %q", got)
+	}
+}
+
+// TestWriteEventsJSONKeysStable pins the JSON event export's key set, the
+// counterpart of the CSV header pin: consumers read these names, and the v3
+// cost columns landed without a guard. It also fixes how "unpriced" looks in
+// JSON — a null CostMicroUSD, the spelling of the CSV path's empty cell, never
+// a 0 that would read as free.
+func TestWriteEventsJSONKeysStable(t *testing.T) {
+	wantKeys := []string{
+		"CacheCreationTokens", "CacheReadTokens", "CostMicroUSD", "DedupKey",
+		"EventTime", "InputTokens", "Kind", "MessageID", "Model", "ObservedTime",
+		"OutputTokens", "PriceSource", "Project", "Provider", "ReasoningTokens",
+		"RequestID", "ServiceTier", "SessionID", "SourcePath", "Tool",
+		"TotalTokens",
+	}
+
+	evs := sampleEvents()
+	evs[0].SetCost(1234, "embedded-2026-08-09")
+	var buf bytes.Buffer
+	if err := WriteEventsJSON(&buf, evs); err != nil {
+		t.Fatalf("WriteEventsJSON: %v", err)
+	}
+	var got []map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for i, ev := range got {
+		if keys := sortedKeys(ev); !reflect.DeepEqual(keys, wantKeys) {
+			t.Fatalf("event %d key set changed:\nwant %v\ngot  %v", i, wantKeys, keys)
+		}
+	}
+	if string(got[0]["CostMicroUSD"]) != "1234" {
+		t.Errorf("priced event CostMicroUSD = %s, want 1234", got[0]["CostMicroUSD"])
+	}
+	if string(got[1]["CostMicroUSD"]) != "null" {
+		t.Errorf("unpriced event CostMicroUSD = %s, want null (never 0)", got[1]["CostMicroUSD"])
+	}
+
+	// --include-raw adds exactly one key to the same set.
+	buf.Reset()
+	if err := WriteEventsJSONWithRaw(&buf, evs); err != nil {
+		t.Fatalf("WriteEventsJSONWithRaw: %v", err)
+	}
+	got = nil
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal with raw: %v", err)
+	}
+	wantWithRaw := append(append([]string{}, wantKeys...), "Raw")
+	sort.Strings(wantWithRaw)
+	if keys := sortedKeys(got[0]); !reflect.DeepEqual(keys, wantWithRaw) {
+		t.Errorf("--include-raw key set = %v, want the base set plus Raw", keys)
 	}
 }
 

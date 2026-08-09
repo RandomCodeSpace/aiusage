@@ -49,10 +49,12 @@ func renderSummary(c *cobra.Command, filter store.Filter, asJSON bool) error {
 		return fmt.Errorf("summarize: %w", err)
 	}
 
-	if asJSON {
-		return report.WriteSummaryJSON(c.OutOrStdout(), sum)
-	}
+	// The JSON and table surfaces answer the same question: resolve the display
+	// costs once, before choosing how to render them.
 	costs := resolveCosts(ctx, st, cfg, sum, filter)
+	if asJSON {
+		return report.WriteSummaryJSON(c.OutOrStdout(), sum, costs)
+	}
 	fmt.Fprintln(c.OutOrStdout(), report.RenderTable(sum, report.Opt{Color: false, Costs: costs}))
 	if note := costNote(costs); note != "" {
 		fmt.Fprintln(c.OutOrStdout(), note)

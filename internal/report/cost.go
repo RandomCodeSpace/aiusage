@@ -88,15 +88,9 @@ func ResolveCosts(sum *store.Summary, groups []store.UnpricedGroup, p Pricer) *C
 	valued := make([]int64, len(sum.Buckets))
 	for i, b := range sum.Buckets {
 		index[bucketKey(b.Keys, sum.GroupBy)] = i
-		out.Buckets[i] = Cost{
-			MicroUSD: b.CostMicroUSD,
-			Known:    b.Events > b.UnpricedEvents,
-		}
+		out.Buckets[i] = stampedCost(b)
 	}
-	out.Totals = Cost{
-		MicroUSD: sum.Totals.CostMicroUSD,
-		Known:    sum.Totals.Events > sum.Totals.UnpricedEvents,
-	}
+	out.Totals = stampedCost(sum.Totals)
 
 	var totalValued int64
 	if p != nil {
@@ -131,6 +125,17 @@ func ResolveCosts(sum *store.Summary, groups []store.UnpricedGroup, p Pricer) *C
 		out.Totals.Approximate = true
 	}
 	return out
+}
+
+// stampedCost is a bucket's cost before any display-time pricing: the sum
+// stamped at collect, known only while the bucket holds at least one row that
+// carries one. It is the starting point of ResolveCosts and the whole answer
+// when no pricer is available.
+func stampedCost(b store.Bucket) Cost {
+	return Cost{
+		MicroUSD: b.CostMicroUSD,
+		Known:    b.Events > b.UnpricedEvents,
+	}
 }
 
 // priceGroup values one unpriced group at the current table. The cache-write

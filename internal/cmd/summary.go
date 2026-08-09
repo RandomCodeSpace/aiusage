@@ -94,11 +94,14 @@ func runSummary(c *cobra.Command, o summaryOpts) error {
 		return fmt.Errorf("summarize: %w", err)
 	}
 
+	// Both surfaces resolve the same costs: --json carries the display-priced
+	// figure and its approximate flag alongside the stamped sum, so it cannot
+	// quietly report a lower number than the table for the same query.
+	costs := resolveCosts(ctx, st, cfg, sum, filter)
 	if o.json {
-		return report.WriteSummaryJSON(c.OutOrStdout(), sum)
+		return report.WriteSummaryJSON(c.OutOrStdout(), sum, costs)
 	}
 
-	costs := resolveCosts(ctx, st, cfg, sum, filter)
 	out := report.RenderTable(sum, report.Opt{Breakdown: o.breakdown, Color: false, Costs: costs})
 	fmt.Fprintln(c.OutOrStdout(), out)
 	if note := costNote(costs); note != "" {

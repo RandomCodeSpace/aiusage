@@ -47,19 +47,98 @@ var csvHeader = []string{
 	"price_source",
 }
 
-// WriteSummaryJSON writes a summary as indented JSON.
-func WriteSummaryJSON(w io.Writer, sum *store.Summary) error {
+// summaryJSON is the --json payload. It carries the store summary's own fields
+// unchanged (existing consumers keep every key they had) plus the resolved
+// display cost, so --json and the rendered table answer the SAME question about
+// the same query: the stamped-only figure is a floor whenever the range holds
+// rows collected before pricing existed, and a surface that emits it alone with
+// no marker reports a different, quieter number than the table beside it.
+type summaryJSON struct {
+	GroupBy []string
+	Buckets []bucketJSON
+	Totals  bucketJSON
+}
+
+// bucketJSON is one summary bucket plus its resolved cost. The embedded bucket
+// keeps CostMicroUSD as the exact stamped sum and UnpricedEvents as the count
+// behind it; the three added keys say what the table's Cost column says.
+type bucketJSON struct {
+	store.Bucket
+	// DisplayCostMicroUSD is CostMicroUSD plus a valuation, at the CURRENT
+	// price table, of the rows that carry no stamped cost — the number the
+	// table renders.
+	DisplayCostMicroUSD int64
+	// CostApproximate is true when DisplayCostMicroUSD contains any
+	// display-priced row, or when rows no table could value are missing from
+	// it. It is the tilde in the table; a consumer treating the figure as
+	// billed must read it.
+	CostApproximate bool
+	// CostKnown is false when nothing in the bucket could be priced at all, in
+	// which case DisplayCostMicroUSD is 0 because the cost is UNKNOWN, not
+	// because the usage was free. The table renders this as "-".
+	CostKnown bool
+}
+
+// WriteSummaryJSON writes a summary as indented JSON, including the resolved
+// display costs. costs comes from ResolveCosts (the same value the table
+// renders); nil, or one that does not line up with the summary, degrades to the
+// stamped figures — a floor, correctly reported as such by CostApproximate.
+func WriteSummaryJSON(w io.Writer, sum *store.Summary, costs *Costs) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(sum); err != nil {
+	if err := enc.Encode(summaryPayload(sum, costs)); err != nil {
 		return fmt.Errorf("encode summary json: %w", err)
 	}
 	return nil
 }
 
+// summaryPayload folds a summary and its resolved costs into the JSON shape. A
+// nil summary stays a JSON null, as it was before costs existed.
+func summaryPayload(sum *store.Summary, costs *Costs) *summaryJSON {
+	if sum == nil {
+		return nil
+	}
+	out := &summaryJSON{
+		GroupBy: sum.GroupBy,
+		Buckets: make([]bucketJSON, len(sum.Buckets)),
+	}
+	for i, b := range sum.Buckets {
+		out.Buckets[i] = bucketPayload(b, bucketCost(costs, i, b))
+	}
+	totals := stampedCost(sum.Totals)
+	if costs != nil {
+		totals = costs.Totals
+	}
+	out.Totals = bucketPayload(sum.Totals, totals)
+	return out
+}
+
+// bucketCost picks the resolved cost for bucket i, falling back to the stamped
+// figure when the caller supplied none (or a slice that does not line up).
+func bucketCost(costs *Costs, i int, b store.Bucket) Cost {
+	if costs == nil || i < 0 || i >= len(costs.Buckets) {
+		return stampedCost(b)
+	}
+	return costs.Buckets[i]
+}
+
+func bucketPayload(b store.Bucket, c Cost) bucketJSON {
+	return bucketJSON{
+		Bucket:              b,
+		DisplayCostMicroUSD: c.MicroUSD,
+		CostApproximate:     c.Approximate,
+		CostKnown:           c.Known,
+	}
+}
+
 // WriteEventsJSON writes a slice of usage events as indented JSON. Raw is
 // excluded (json:"-"): it can carry transcript content. WriteEventsJSONWithRaw
 // is the explicit opt-in.
+//
+// An unpriced event emits "CostMicroUSD": null — the JSON spelling of the empty
+// cost_micro_usd/cost_usd cells the CSV path writes. Both formats say the same
+// thing in their own vocabulary, and neither substitutes 0, which would claim
+// the request was free. The key set is pinned by a test, like the CSV header.
 func WriteEventsJSON(w io.Writer, evs []model.UsageEvent) error {
 	if evs == nil {
 		evs = []model.UsageEvent{}

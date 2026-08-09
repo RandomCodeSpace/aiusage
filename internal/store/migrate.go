@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // migration is one ordered schema step bringing a database from version-1 to
@@ -55,8 +56,9 @@ var migrations = []migration{
 }
 
 // ensureSchema reads the recorded schema version before touching anything and
-// brings the database to SchemaVersion.
-func ensureSchema(ctx context.Context, db *sql.DB) error {
+// brings the database to SchemaVersion. path names the file in diagnostics
+// only; every statement runs against db.
+func ensureSchema(ctx context.Context, db *sql.DB, path string) error {
 	hasMeta, err := tableExists(ctx, db, "schema_meta")
 	if err != nil {
 		return err
@@ -70,10 +72,20 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 	}
 	switch {
 	case current == 0:
-		// Fresh database, or a create interrupted before the version stamp:
-		// schema.sql is IF NOT EXISTS throughout, so reapplying is safe.
+		// Fresh database, or a create interrupted before the version stamp.
+		// Reapplying schema.sql covers only the first case: every statement in
+		// it is CREATE ... IF NOT EXISTS, so a usage_events left behind by an
+		// older binary keeps whatever columns it was created with — v3 appends
+		// columns, and no CREATE adds them to an existing table. Stamping
+		// SchemaVersion over that would claim a layout the database does not
+		// have, and every insert would then fail on the placeholder count. So
+		// the column set is verified before the stamp, and an incomplete table
+		// is refused with the recovery instead.
 		if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 			return fmt.Errorf("store: apply schema: %w", err)
+		}
+		if err := verifyEventColumns(ctx, db, path); err != nil {
+			return err
 		}
 		// Upsert is safe here: this branch only runs when no version is
 		// recorded, so it can never stamp an existing version backwards.
@@ -169,6 +181,67 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 		return fmt.Errorf("store: commit migration v%d: %w", m.version, err)
 	}
 	return nil
+}
+
+// eventColumns lists every column usage_events carries at SchemaVersion. It
+// mirrors schema.sql and the explicit column list of the insert statement in
+// sqlite.go; extend it in the same change that adds a column to the table.
+var eventColumns = []string{
+	"id", "dedup_key", "tool", "model", "session_id", "project",
+	"event_time_unix", "observed_time_unix",
+	"input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens",
+	"reasoning_tokens", "total_tokens",
+	"request_id", "message_id", "source_path", "kind", "raw",
+	"provider", "service_tier", "cost_micro_usd", "price_source",
+}
+
+// verifyEventColumns refuses to stamp SchemaVersion over a usage_events that
+// predates it. It only ever runs on an UNSTAMPED database (ensureSchema's
+// current == 0 branch): with no recorded version there is nothing that says
+// which migrations the table has seen, so guessing one and running ALTERs on a
+// ledger of unknown provenance is not on offer. The recovery is to remove the
+// half-created file — an interrupted first run has no committed events to lose,
+// which is the only way an unstamped table can exist.
+func verifyEventColumns(ctx context.Context, db *sql.DB, path string) error {
+	have, err := columnSet(ctx, db, "usage_events")
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, c := range eventColumns {
+		if !have[c] {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"store: %s has a usage_events table with no recorded schema version and missing column(s) %s; "+
+			"this is a half-created database from an interrupted first run — delete it (with its -wal/-shm sidecars) and rerun",
+		path, strings.Join(missing, ", "))
+}
+
+// columnSet returns the column names of a table.
+func columnSet(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("store: read columns of %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("store: read columns of %s: %w", table, err)
+		}
+		out[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read columns of %s: %w", table, err)
+	}
+	return out, nil
 }
 
 // tableExists reports whether a table is present, so Open can read the version

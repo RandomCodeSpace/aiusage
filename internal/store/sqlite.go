@@ -59,7 +59,7 @@ func Open(path string) (*SQLite, error) {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 
-	if err := ensureSchema(context.Background(), db); err != nil {
+	if err := ensureSchema(context.Background(), db, path); err != nil {
 		db.Close()
 		return nil, err
 	}

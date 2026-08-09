@@ -354,6 +354,61 @@ func legacyDB(t *testing.T, version int) string {
 	return path
 }
 
+// TestOpenUnstampedLegacyTableRefused covers the half-created database: a
+// usage_events written by an older binary that never reached its version stamp.
+// schema.sql cannot add the v3 columns to a table that already exists, so
+// stamping SchemaVersion over it would advertise a layout the file does not
+// have and every insert would fail on the placeholder count. Open must refuse,
+// name the missing columns, and leave the database unstamped.
+func TestOpenUnstampedLegacyTableRefused(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "usage.db")
+	db := rawDB(t, path)
+	if _, err := db.Exec(legacyDBSchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	st, err := Open(path)
+	if err == nil {
+		st.Close()
+		t.Fatalf("expected refusal opening an unstamped pre-v3 database")
+	}
+	for _, want := range []string{"provider", "service_tier", "cost_micro_usd", "price_source", path} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %s", err, want)
+		}
+	}
+
+	raw := rawDB(t, path)
+	v, err := readSchemaVersion(ctx, raw)
+	if err != nil || v != 0 {
+		t.Fatalf("post-refusal version=%d err=%v want 0,nil (a short table must not be stamped)", v, err)
+	}
+}
+
+// TestOpenFreshStampsCompleteColumnSet is the other half of the guard: a
+// genuinely fresh database passes the column check and is stamped, so the
+// verification cannot degrade into "never create anything".
+func TestOpenFreshStampsCompleteColumnSet(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+	have, err := columnSet(ctx, st.db, "usage_events")
+	if err != nil {
+		t.Fatalf("column set: %v", err)
+	}
+	for _, c := range eventColumns {
+		if !have[c] {
+			t.Errorf("fresh usage_events is missing %s", c)
+		}
+	}
+	if len(have) != len(eventColumns) {
+		t.Errorf("usage_events has %d columns, eventColumns lists %d — keep them in step", len(have), len(eventColumns))
+	}
+}
+
 // TestMigrationSkipsWhenAlreadyApplied covers the concurrent-upgrader race:
 // the version is re-checked inside the migration transaction, so a process
 // that finds the step already stamped (another process won the write lock and

@@ -63,9 +63,10 @@ func TestLadderPrecedence(t *testing.T) {
 	}
 }
 
-// TestPriceNeverReportsSilentZero is the "$0.00 is a lie" guard: rates that
-// value real usage at exactly nothing must report unpriced, so the display
-// layer shows a dash instead of a free lunch.
+// TestPriceNeverReportsSilentZero is the "$0.00 is a lie" guard: real usage no
+// rung on the ladder can value must report unpriced, so the display layer shows
+// a dash instead of a free lunch. ("weird" is in no other table, so the
+// fall-through to the lower rungs finds nothing either.)
 func TestPriceNeverReportsSilentZero(t *testing.T) {
 	e := New(Options{})
 	// Output-only rates against an input-only charge: a real 0 for real tokens.
@@ -81,6 +82,77 @@ func TestPriceNeverReportsSilentZero(t *testing.T) {
 	micro, _, ok = e.Price(Charge{Model: "weird"})
 	if !ok || micro != 0 {
 		t.Fatalf("empty charge: %d,%v want 0,true", micro, ok)
+	}
+}
+
+// TestPartialOverrideKeepsLowerRungRates is the partial-override contract: an
+// override that names only the output rate must not disable pricing (or, worse,
+// value tokens at zero) for the charge shapes it says nothing about. The rates
+// it left out come from the rung it displaced, and the stamp names both.
+func TestPartialOverrideKeepsLowerRungRates(t *testing.T) {
+	const m = "claude-sonnet-4-6"
+	e := New(Options{Overrides: map[string]Rates{m: {Output: 4e-05}}})
+	e.refreshed = &Table{Source: "litellm-2026-08-09", Models: map[string]Rates{
+		m: {Input: 3e-06, Output: 1.5e-05, CacheRead: 3e-07},
+	}}
+
+	// Input-only charge: the override says nothing about input, so the
+	// refreshed rate prices it instead of the whole model going unpriced.
+	micro, source, ok := e.Price(Charge{Model: m, Input: 1_000_000})
+	if !ok || micro != 3_000_000 {
+		t.Fatalf("input-only charge: %d,%q,%v want 3000000 from the lower rung", micro, source, ok)
+	}
+	if source != SourceOverride+"+litellm-2026-08-09" {
+		t.Errorf("source = %q, want the composite stamp", source)
+	}
+
+	// Mixed charge: the user's output rate applies, input still comes from the
+	// table. Valuing input at zero here would have stamped a WRONG number.
+	micro, source, ok = e.Price(Charge{Model: m, Input: 1_000_000, Output: 1_000_000})
+	if !ok || micro != 43_000_000 {
+		t.Fatalf("mixed charge: %d,%q,%v want 43000000 (3 input + 40 output)", micro, source, ok)
+	}
+
+	// A charge the override prices unaided keeps the plain stamp.
+	micro, source, ok = e.Price(Charge{Model: m, Output: 1_000_000})
+	if !ok || micro != 40_000_000 || source != SourceOverride {
+		t.Fatalf("output-only charge: %d,%q,%v want 40000000,override,true", micro, source, ok)
+	}
+}
+
+// TestPartialOverrideWithoutLowerRungStillPrices keeps the merge honest when
+// there is nothing to merge with: an override for a model no table knows still
+// prices what it can, and still refuses to invent a zero for what it cannot.
+func TestPartialOverrideWithoutLowerRungStillPrices(t *testing.T) {
+	e := New(Options{Overrides: map[string]Rates{"private-model": {Output: 4e-05}}})
+
+	micro, source, ok := e.Price(Charge{Model: "private-model", Output: 1_000_000})
+	if !ok || micro != 40_000_000 || source != SourceOverride {
+		t.Fatalf("output charge: %d,%q,%v want 40000000,override,true", micro, source, ok)
+	}
+	if micro, source, ok := e.Price(Charge{Model: "private-model", Input: 1_000_000}); ok || micro != 0 || source != "" {
+		t.Fatalf("input charge with no input rate anywhere: %d,%q,%v want unpriced", micro, source, ok)
+	}
+}
+
+// TestZeroValuationFallsThroughToNextRung applies the unpriceable-row recovery
+// to the other miss shape: a table that knows the model but publishes no rate
+// for the tokens being charged must hand the charge down the ladder instead of
+// declaring it unpriced while a lower rung can still value it.
+func TestZeroValuationFallsThroughToNextRung(t *testing.T) {
+	e := New(Options{})
+	e.refreshed = &Table{Source: "litellm-test", Models: map[string]Rates{
+		"claude-sonnet-4-6": {Output: 1e-05},
+	}}
+
+	micro, source, ok := e.Price(Charge{
+		Model: "claude-sonnet-4-6", Provider: model.ProviderAnthropic, Input: 1_000_000,
+	})
+	if !ok || micro <= 0 {
+		t.Fatalf("input-only charge: %d,%q,%v want the embedded rung's price", micro, source, ok)
+	}
+	if len(source) < len("embedded-") || source[:len("embedded-")] != "embedded-" {
+		t.Errorf("source = %q, want the embedded rung that actually priced it", source)
 	}
 }
 

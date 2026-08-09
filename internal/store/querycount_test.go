@@ -90,7 +90,7 @@ func openCounting(t *testing.T) *SQLite {
 	if err != nil {
 		t.Fatalf("open counting db: %v", err)
 	}
-	if err := ensureSchema(context.Background(), db); err != nil {
+	if err := ensureSchema(context.Background(), db, path); err != nil {
 		db.Close()
 		t.Fatalf("ensure schema: %v", err)
 	}

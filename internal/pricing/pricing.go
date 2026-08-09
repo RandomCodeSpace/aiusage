@@ -3,7 +3,9 @@
 //
 // The ladder, most authoritative first:
 //
-//  1. config overrides — the user's own rates, always win;
+//  1. config overrides — the user's own rates, always win. A PARTIAL override
+//     (say output only) replaces just the rates it names: the rest come from
+//     the rung below, because "override this rate" is not "delete the others";
 //  2. the runtime-refreshed LiteLLM table cached in the data dir;
 //  3. the go:embed'ed filtered LiteLLM snapshot — the guaranteed floor, so a
 //     firewalled install still prices;
@@ -42,6 +44,36 @@ type Rates struct {
 // is a table row without pricing, which must fall through to the next rung
 // rather than value the event at zero.
 func (r Rates) Priceable() bool { return r.Input > 0 || r.Output > 0 }
+
+// fill returns r with every unset (zero) rate taken from base. It is how a
+// PARTIAL config override composes with the rung it displaces: a user who sets
+// only the output rate means "bill output at mine, the rest as published", so
+// the fields they left out keep the table's rates instead of valuing those
+// tokens at nothing.
+func (r Rates) fill(base Rates) Rates {
+	if r.Input == 0 {
+		r.Input = base.Input
+	}
+	if r.Output == 0 {
+		r.Output = base.Output
+	}
+	if r.CacheRead == 0 {
+		r.CacheRead = base.CacheRead
+	}
+	if r.CacheWrite5m == 0 {
+		r.CacheWrite5m = base.CacheWrite5m
+	}
+	if r.CacheWrite1h == 0 {
+		r.CacheWrite1h = base.CacheWrite1h
+	}
+	if r.InputBatch == 0 {
+		r.InputBatch = base.InputBatch
+	}
+	if r.OutputBatch == 0 {
+		r.OutputBatch = base.OutputBatch
+	}
+	return r
+}
 
 // Charge is the token shape being priced: the counts, plus the three facts that
 // change which rate applies (the model/provider identity, the service tier, and
@@ -219,25 +251,58 @@ func providerPrefixes(provider string) []string {
 }
 
 // Price resolves a charge against the ladder and returns the cost in micro-USD
-// plus the price_source that produced it. ok=false means unpriced: no rung knew
-// the model, or the matched rates valued real usage at exactly zero, which is a
-// gap in the table rather than a free request.
+// plus the price_source that produced it. ok=false means unpriced: NO rung
+// could value this charge shape. A rung that knows the model but publishes no
+// rate for the tokens being charged (an output-only row against an input-only
+// charge) is a gap in that table, not a free request, and gets the same
+// recovery an unpriceable row gets — the next rung down is tried. Only when the
+// ladder runs out is the charge reported unpriced, never $0.00.
 func (e *Engine) Price(c Charge) (int64, string, bool) {
 	if e == nil {
 		return 0, "", false
 	}
-	for _, t := range e.tables() {
+	tables := e.tables()
+	for i, t := range tables {
 		r, ok := t.Lookup(c.Provider, c.Model)
 		if !ok {
 			continue
 		}
+		source := t.Source
+		if t == e.overrides {
+			r, source = mergeOverride(r, source, tables[i+1:], c)
+		}
 		micro := r.Cost(c)
 		if micro == 0 && c.Tokens() > 0 {
-			return 0, "", false
+			continue // this rung prices nothing this charge is made of
 		}
-		return micro, t.Source, true
+		return micro, source, true
 	}
 	return 0, "", false
+}
+
+// mergeOverride completes a config override from the first lower rung that
+// knows the same model — the rung the override displaced. Replacing that rung's
+// whole row with a partial override is what used to leave input, cache and
+// batch tokens valued at zero for a model whose output rate was the only one
+// the user wanted changed.
+//
+// The stamp names both tables ("override+litellm-<date>") whenever the lower
+// rung actually moved THIS charge's price, so price_source never credits the
+// override with a number it did not produce on its own; a charge the override
+// prices unaided still stamps a plain "override".
+func mergeOverride(r Rates, source string, lower []*Table, c Charge) (Rates, string) {
+	for _, t := range lower {
+		base, ok := t.Lookup(c.Provider, c.Model)
+		if !ok {
+			continue
+		}
+		merged := r.fill(base)
+		if merged.Cost(c) == r.Cost(c) {
+			return r, source
+		}
+		return merged, source + "+" + t.Source
+	}
+	return r, source
 }
 
 // PriceEvent prices a usage event. It is the collector-facing entry point and
