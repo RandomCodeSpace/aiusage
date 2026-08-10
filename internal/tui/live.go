@@ -101,11 +101,23 @@ func fileMTime(path string) time.Time {
 	if path == "" {
 		return time.Time{}
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
+	// The store runs in WAL mode, so a committed write lands in <db>-wal and
+	// leaves the main file untouched until a checkpoint — which can be many
+	// minutes later, or never while the daemon holds the database open. Statting
+	// the main file alone therefore reports a live collector as silent: the
+	// freshness chip ages and the stall banner fires while cycles are inserting
+	// normally. The write time is the newest of the two.
+	newest := time.Time{}
+	for _, p := range []string{path, path + "-wal"} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if mt := fi.ModTime(); mt.After(newest) {
+			newest = mt
+		}
 	}
-	return fi.ModTime()
+	return newest
 }
 
 // startLoad opens a new load generation and returns its load cmd: it bumps the
