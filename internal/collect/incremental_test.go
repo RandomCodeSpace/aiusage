@@ -12,7 +12,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/gemini"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/model"
@@ -31,7 +30,7 @@ type incrementalFixture struct {
 	copilotOTEL  string
 	opencodeDB   string
 	hermesDB     string
-	geminiTurns  string
+	agyTurns     string
 }
 
 func mkdirAll(t testing.TB, path string) {
@@ -130,16 +129,14 @@ func setupIncrementalFixture(t testing.TB) *incrementalFixture {
 	})
 	t.Setenv("HERMES_HOME", hermesHome)
 
-	// gemini: one cumulative turn -> delta of 60.
-	gemDir := filepath.Join(home, "gem")
-	fx.geminiTurns = filepath.Join(gemDir, "turns.jsonl")
-	writeLines(t, fx.geminiTurns,
-		`{"id":"t1","model":"gemini-pro","sessionId":"gs","timestamp":"2026-05-29T10:00:00Z","tokens":{"input":50,"output":10,"total":60}}`+"\n")
-	t.Setenv("GEMINI_DATA_DIR", gemDir)
-
-	// agy: a content-only blob -> sources but zero usage (checkpoint-only path).
+	// agy: a content-only blob -> sources but zero usage (checkpoint-only path),
+	// plus one cumulative turn -> delta of 60. Both files exercise the shared
+	// gemini-shape parser, which is why the cumulative-turn case lives here.
 	agyDir := filepath.Join(home, "agy")
 	writeLines(t, filepath.Join(agyDir, "conv.json"), `{"id":"c1","messages":[{"role":"user","content":"hi"}]}`)
+	fx.agyTurns = filepath.Join(agyDir, "turns.jsonl")
+	writeLines(t, fx.agyTurns,
+		`{"id":"t1","model":"antigravity","sessionId":"gs","timestamp":"2026-05-29T10:00:00Z","tokens":{"input":50,"output":10,"total":60}}`+"\n")
 
 	fx.dc = adapter.DiscoverConfig{
 		Home: home,
@@ -150,7 +147,7 @@ func setupIncrementalFixture(t testing.TB) *incrementalFixture {
 	}
 	fx.reg = adapter.NewRegistry(
 		claudecode.New(), codex.New(), copilot.New(), opencode.New(),
-		hermes.New(), gemini.New(), agy.New(),
+		hermes.New(), agy.New(),
 	)
 
 	st, err := store.Open(filepath.Join(home, "store", "usage.db"))
@@ -193,7 +190,7 @@ func TestIncrementalCycleExactDelta(t *testing.T) {
 		t.Fatalf("cycle 1 errors: %v", s1.Errors)
 	}
 	// codex 1100+650, claude-code 1000, copilot 150, opencode 30,
-	// hermes 300, gemini 60.
+	// hermes 300, agy 60.
 	const base = 1100 + 650 + 1000 + 150 + 30 + 300 + 60
 	if got := storedTotal(t, fx.st); got != base {
 		t.Fatalf("cycle 1 total=%d want %d", got, base)
@@ -213,8 +210,8 @@ func TestIncrementalCycleExactDelta(t *testing.T) {
 		`UPDATE sessions SET input_tokens=150, output_tokens=250 WHERE id='A'`,
 		`INSERT INTO sessions VALUES ('B','claude-opus','anthropic','2026-05-29T10:07:00Z','',5,5,0,0,0)`,
 	})
-	appendLines(t, fx.geminiTurns,
-		`{"id":"t2","model":"gemini-pro","sessionId":"gs","timestamp":"2026-05-29T10:08:00Z","tokens":{"input":20,"output":5,"total":25}}`+"\n")
+	appendLines(t, fx.agyTurns,
+		`{"id":"t2","model":"antigravity","sessionId":"gs","timestamp":"2026-05-29T10:08:00Z","tokens":{"input":20,"output":5,"total":25}}`+"\n")
 
 	// Cycle 2: exactly the delta, nothing more, nothing missing.
 	s2, err := RunCycle(ctx, fx.reg, fx.st, fx.dc)
@@ -225,13 +222,13 @@ func TestIncrementalCycleExactDelta(t *testing.T) {
 		t.Fatalf("cycle 2 errors: %v", s2.Errors)
 	}
 	// codex 650 (2400-1750, NOT 2400), claude-code 500, copilot 75,
-	// opencode 40, hermes 100 (A) + 10 (B), gemini 25.
+	// opencode 40, hermes 100 (A) + 10 (B), agy 25.
 	const delta = 650 + 500 + 75 + 40 + 100 + 10 + 25
 	if got := storedTotal(t, fx.st); got != base+delta {
 		t.Fatalf("cycle 2 total=%d want %d (base %d + delta %d)", got, base+delta, base, delta)
 	}
 	if s2.EventsInserted != 7 {
-		t.Fatalf("cycle 2 inserted=%d want 7 (codex, cc, copilot, oc, hermes A+B, gemini)", s2.EventsInserted)
+		t.Fatalf("cycle 2 inserted=%d want 7 (codex, cc, copilot, oc, hermes A+B, agy)", s2.EventsInserted)
 	}
 	// The codex tail read must have produced exactly the one delta event.
 	if s2.EventsSeen > 6 {

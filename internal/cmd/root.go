@@ -26,7 +26,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/gemini"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
@@ -286,7 +285,6 @@ func defaultRegistry() *adapter.Registry {
 		copilot.New(),
 		opencode.New(),
 		hermes.New(),
-		gemini.New(),
 		agy.New(),
 	)
 }

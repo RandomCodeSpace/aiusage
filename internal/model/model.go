@@ -19,6 +19,11 @@ const (
 )
 
 // Tool identifiers — the "tool" categorisation dimension (which agent CLI).
+//
+// ToolGemini is retired: Antigravity replaced the Gemini CLI, so no adapter
+// collects it and nothing new is stamped with it. The identifier stays because
+// usage_events is append-only and existing rows still carry it — deleting it
+// would leave that history without a colour, a glyph or a reasoning mode.
 const (
 	ToolClaudeCode = "claude-code"
 	ToolCodex      = "codex"
