@@ -500,3 +500,41 @@ func TestIncrementalSkipTailAndShrink(t *testing.T) {
 			obs4.Events, obs1.Events[0].DedupKey)
 	}
 }
+
+// A walk reports every entry by its own metadata, so a dangling symlink looks
+// exactly like an ordinary session file: not a directory, right extension.
+// Accepting one puts a source in every cycle whose read can only fail with
+// ENOENT — a permanent per-cycle error nobody can clear except by repairing a
+// tree the adapter does not own. A symlink that DOES resolve is still a real
+// session and must survive the filter.
+func TestDiscoverSkipsDanglingSymlinks(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(codexHome(home), "sessions", "2026")
+	writeSession(t, filepath.Join(dir, "real.jsonl"), []string{
+		`{"type":"event_msg","timestamp":"2026-05-29T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}`,
+	})
+	if err := os.Symlink(filepath.Join(dir, "gone.jsonl"), filepath.Join(dir, "dangling.jsonl")); err != nil {
+		t.Fatalf("symlink dangling: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "real.jsonl"), filepath.Join(dir, "linked.jsonl")); err != nil {
+		t.Fatalf("symlink linked: %v", err)
+	}
+
+	srcs, err := New().Discover(context.Background(), adapter.DiscoverConfig{Home: home})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]bool, len(srcs))
+	for _, s := range srcs {
+		got[filepath.Base(s.Path)] = true
+	}
+	if got["dangling.jsonl"] {
+		t.Error("discovery returned a dangling symlink; every collect of it fails with ENOENT")
+	}
+	if !got["real.jsonl"] {
+		t.Error("discovery dropped the real session file")
+	}
+	if !got["linked.jsonl"] {
+		t.Error("discovery dropped a symlink that resolves to a real session file")
+	}
+}

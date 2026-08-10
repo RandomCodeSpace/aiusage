@@ -223,3 +223,39 @@ func TestScanAbortAlsoReportsSkippedCount(t *testing.T) {
 		t.Fatalf("checkpoint advanced past an incomplete read: %+v", obs.Checkpoint)
 	}
 }
+
+// Live case that motivated this: ~/.antigravitycli held a *.json symlink into a
+// ~/.gemini project directory that no longer exists. The walk reports the link
+// by its own metadata — not a directory, usage extension — so discovery kept
+// handing the collector a file that is not there, and the daemon logged an
+// error every cycle for as long as the link survived. A link that resolves is
+// still a real telemetry file and must be kept.
+func TestDiscoverSkipsDanglingSymlinks(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".antigravitycli")
+	writeFile(t, dir, "real.json", `{"id":"c1","messages":[]}`)
+	if err := os.Symlink(filepath.Join(dir, "gone.json"), filepath.Join(dir, "dangling.json")); err != nil {
+		t.Fatalf("symlink dangling: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "real.json"), filepath.Join(dir, "linked.json")); err != nil {
+		t.Fatalf("symlink linked: %v", err)
+	}
+
+	srcs, err := New().Discover(context.Background(), adapter.DiscoverConfig{Home: home})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]bool, len(srcs))
+	for _, s := range srcs {
+		got[filepath.Base(s.Path)] = true
+	}
+	if got["dangling.json"] {
+		t.Error("discovery returned a dangling symlink; every collect of it fails with ENOENT")
+	}
+	if !got["real.json"] {
+		t.Error("discovery dropped the real telemetry file")
+	}
+	if !got["linked.json"] {
+		t.Error("discovery dropped a symlink that resolves to a real telemetry file")
+	}
+}

@@ -376,3 +376,51 @@ func TestFailedParseWithholdsCheckpoint(t *testing.T) {
 		t.Fatalf("recovery read: err=%v events=%d cp=%v", err, len(obs2.Events), obs2.Checkpoint)
 	}
 }
+
+// A dangling *.jsonl symlink under projects/ walks in looking like an ordinary
+// transcript, and the parse of it then fails with ENOENT. That failure is read
+// as "this cycle did not see everything", so the checkpoint is withheld — and
+// with no manifest stored, the size+mtime gate never engages again: every cycle
+// re-parses every transcript under the root, forever, over a link nothing will
+// repair. Skipping the unresolvable entry keeps the gate alive.
+func TestCollectIgnoresDanglingSymlinkAndKeepsTheGate(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "home-dev-projects-foo", "sess-1", []string{
+		`{"type":"assistant","timestamp":"2026-05-10T13:14:19.329Z","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":50}}}`,
+	})
+	projDir := filepath.Join(root, "projects", "home-dev-projects-foo")
+	if err := os.Symlink(filepath.Join(projDir, "gone.jsonl"), filepath.Join(projDir, "dangling.jsonl")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	a := Adapter{}
+	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{
+		Overrides: map[string]string{model.ToolClaudeCode: root},
+	})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(srcs) != 1 {
+		t.Fatalf("want 1 source, got %d", len(srcs))
+	}
+
+	obs, err := a.CollectIncremental(context.Background(), srcs[0], nil)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(obs.Events) != 1 {
+		t.Fatalf("want the one real transcript's event, got %d", len(obs.Events))
+	}
+	if obs.Checkpoint == nil {
+		t.Fatal("checkpoint withheld because of an unresolvable symlink; the incremental gate is now dead for this root")
+	}
+
+	// Nothing changed: the stored manifest must short-circuit the next cycle.
+	again, err := a.CollectIncremental(context.Background(), srcs[0], obs.Checkpoint)
+	if err != nil {
+		t.Fatalf("collect again: %v", err)
+	}
+	if len(again.Events) != 0 {
+		t.Errorf("unchanged root re-parsed %d events; the gate did not hold", len(again.Events))
+	}
+}

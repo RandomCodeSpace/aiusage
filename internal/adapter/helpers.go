@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -29,4 +30,27 @@ func FileStem(path string) string {
 		base = base[:len(base)-len(ext)]
 	}
 	return base
+}
+
+// WalkEntryIsFile reports whether a directory-walk entry is usable as a source
+// file. A walk reports each entry by its OWN metadata, so a dangling symlink
+// arrives looking exactly like an ordinary file: it is not a directory, and it
+// carries whatever extension the discovery filter is looking for. Discovery
+// that trusts that hands the collector a source whose every read fails with
+// ENOENT, which surfaces as a permanent per-cycle error against a tree nobody
+// is going to repair.
+//
+// The common case costs no syscall: a plain file answers from the type bits the
+// walk already carries. Only a symlink is resolved, because only a symlink can
+// lie. Anything that is not ultimately a regular file is rejected, which also
+// keeps a fifo out of a reader that would block on it forever.
+func WalkEntryIsFile(d fs.DirEntry, path string) bool {
+	if d == nil {
+		return false
+	}
+	if d.Type()&fs.ModeSymlink == 0 {
+		return d.Type().IsRegular()
+	}
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
 }

@@ -121,6 +121,9 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 				if de.IsDir() || !strings.HasSuffix(de.Name(), ".jsonl") {
 					return nil
 				}
+				if !adapter.WalkEntryIsFile(de, p) {
+					return nil
+				}
 				add(p)
 				return nil
 			})

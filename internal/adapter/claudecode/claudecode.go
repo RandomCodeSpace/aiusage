@@ -178,6 +178,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".jsonl") {
 			return nil
 		}
+		if !adapter.WalkEntryIsFile(de, path) {
+			return nil
+		}
 		fi, err := de.Info()
 		if err != nil {
 			// A file we cannot stat cannot be gated; parse unconditionally and

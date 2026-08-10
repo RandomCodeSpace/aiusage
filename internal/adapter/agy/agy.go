@@ -110,6 +110,9 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 			if !geminishape.HasUsageExt(path) {
 				return nil
 			}
+			if !adapter.WalkEntryIsFile(d, path) {
+				return nil
+			}
 			if _, dup := seen[path]; dup {
 				return nil
 			}

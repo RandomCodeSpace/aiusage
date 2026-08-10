@@ -115,6 +115,9 @@ func (a Adapter) scanRoot(ctx context.Context, root string, seen map[string]stru
 		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".jsonl") {
 			return nil
 		}
+		if !adapter.WalkEntryIsFile(d, path) {
+			return nil
+		}
 		if _, dup := seen[path]; dup {
 			return nil
 		}
