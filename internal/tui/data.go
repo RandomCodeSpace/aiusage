@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -146,13 +147,37 @@ func (s Span) Window(now time.Time) (since, until time.Time) {
 
 // Label names the window: the plain range label while live, and the span width
 // plus the window's first local day once stepped ("7d @ 2026-07-27"), so a
-// stepped view can never be read as "now".
-func (s Span) Label(now time.Time) string {
+// stepped view can never be read as "now". It is the widest of labelForms.
+func (s Span) Label(now time.Time) string { return s.labelForms(now)[0] }
+
+// labelForms names the window in every form the header may show, widest first.
+// Every form is COMPLETE on its own: a narrow terminal picks a shorter name
+// instead of truncating a longer one, so a dangling fragment like "2026-07",
+// which reads as a date but is not one, can never reach the screen. The list
+// always holds at least one form.
+//
+// The rungs below the full date are:
+//
+//   - month-day ("7d @ 07-27"), offered ONLY while the window starts in the
+//     current year, where the dropped year cannot be misread;
+//   - the step offset ("7d-2" = two whole 7d windows before the live one),
+//     which is the floor: it is exact at any width because the step count and
+//     the span width resolve the window against the same clock the live one
+//     uses, and it costs the same handful of cells whatever the date is.
+//
+// A live window has one form, its range label, and never names a day.
+func (s Span) labelForms(now time.Time) []string {
 	if s.Step >= 0 || !s.R.Steppable() {
-		return s.R.Label()
+		return []string{s.R.Label()}
 	}
 	since, _ := s.Window(now)
-	return s.R.spanLabel() + " @ " + since.Format("2006-01-02")
+	width := s.R.spanLabel()
+	forms := []string{width + " @ " + since.Format("2006-01-02")}
+	if since.Year() == now.Year() {
+		forms = append(forms, width+" @ "+since.Format("01-02"))
+	}
+	// Step is negative, so Itoa supplies the sign: "7d" + "-2".
+	return append(forms, width+strconv.Itoa(s.Step))
 }
 
 // Sort is a selectable ordering for Browse rows, cycled with the `s` key.

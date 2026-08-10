@@ -46,7 +46,6 @@ func byEntityTestCtx() Ctx {
 		NowColor:    ac("#F2B441"),
 		AccentColor: ac("#3DD6E0"),
 		FaintColor:  ac("#4A535F"),
-		BorderColor: ac("#232B38"),
 		GoodColor:   ac("#56D364"),
 		WarnColor:   ac("#E5534B"),
 		PanelTitle:  lipgloss.NewStyle(),

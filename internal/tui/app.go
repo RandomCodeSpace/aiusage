@@ -259,6 +259,11 @@ func (m Model) span() Span { return Span{R: m.rng, Step: m.step} }
 // it is instead of reading as "now".
 func (m Model) spanLabel() string { return m.span().Label(m.qnow()) }
 
+// spanLabels names the window currently shown in every form the header may
+// choose between, widest first (see Span.labelForms). The header picks by
+// width; nothing else has a reason to see the shorter forms.
+func (m Model) spanLabels() []string { return m.span().labelForms(m.qnow()) }
+
 // syncStepKeys keeps the [ / ] bindings honest: they are advertised only where
 // they can act — never on the open-ended "all" range, and ] only while the
 // window sits behind the present. key.Matches and the help renderer both skip
@@ -310,7 +315,6 @@ func buildCtx(th Theme, zm *zone.Manager, leverageFloor int64) views.Ctx {
 		NowColor:    th.Now,
 		AccentColor: th.Accent,
 		FaintColor:  th.Faint,
-		BorderColor: th.Border,
 		GoodColor:   th.Positive,
 		WarnColor:   th.Warn,
 		// Token-series colors use the ANSI palette so they adapt to the user's

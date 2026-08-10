@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -92,6 +93,182 @@ func TestSpanLabelNamesSteppedWindow(t *testing.T) {
 	for _, c := range cases {
 		if got := c.sp.Label(now); got != c.want {
 			t.Errorf("Span{%s, %d}.Label = %q, want %q", c.sp.R.Label(), c.sp.Step, got, c.want)
+		}
+	}
+}
+
+// TestSpanLabelFormsShrinkWithoutLying: the header may fall back to a shorter
+// window name on a narrow terminal, so EVERY form it can fall back to has to
+// name the same window on its own. The forms are widest first, the widest is
+// what Label returns, and the month-day rung is offered only while the window
+// starts in the current year: a cross-year window drops straight to the step
+// offset instead of printing an ambiguous "11-13".
+func TestSpanLabelFormsShrinkWithoutLying(t *testing.T) {
+	loc := time.FixedZone("IST", 5*3600+1800)
+	now := time.Date(2026, 8, 9, 15, 4, 5, 0, loc)
+
+	cases := []struct {
+		sp   Span
+		want []string
+	}{
+		{Span{R: Range7d}, []string{"7d"}},
+		{Span{R: RangeAll, Step: -3}, []string{"all"}},
+		{Span{R: RangeToday, Step: -1}, []string{"1d @ 2026-08-08", "1d @ 08-08", "1d-1"}},
+		{Span{R: Range7d, Step: -2}, []string{"7d @ 2026-07-20", "7d @ 07-20", "7d-2"}},
+		// Eight 30d windows back lands in 2025: the year is load-bearing, so the
+		// month-day rung is not offered at all.
+		{Span{R: Range30d, Step: -8}, []string{"30d @ 2025-11-13", "30d-8"}},
+	}
+	for _, c := range cases {
+		got := c.sp.labelForms(now)
+		if len(got) != len(c.want) {
+			t.Errorf("Span{%s, %d}.labelForms = %q, want %q", c.sp.R.Label(), c.sp.Step, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("Span{%s, %d}.labelForms[%d] = %q, want %q",
+					c.sp.R.Label(), c.sp.Step, i, got[i], c.want[i])
+			}
+			if i > 0 && len(got[i]) >= len(got[i-1]) {
+				t.Errorf("Span{%s, %d}.labelForms are not narrowing: %q then %q",
+					c.sp.R.Label(), c.sp.Step, got[i-1], got[i])
+			}
+		}
+		if lbl := c.sp.Label(now); lbl != got[0] {
+			t.Errorf("Span{%s, %d}.Label = %q, want the widest form %q",
+				c.sp.R.Label(), c.sp.Step, lbl, got[0])
+		}
+		// Whatever the form, it must resolve back to the window it names.
+		wantSince, wantUntil := c.sp.Window(now)
+		if c.sp.Step >= 0 || !c.sp.R.Steppable() {
+			continue
+		}
+		for _, form := range got {
+			since, until, ok := parseWindowChip(form, now)
+			if !ok {
+				t.Errorf("form %q does not parse back to a window", form)
+				continue
+			}
+			if !since.Equal(wantSince) || !until.Equal(wantUntil) {
+				t.Errorf("form %q names [%v, %v), want [%v, %v)",
+					form, since, until, wantSince, wantUntil)
+			}
+		}
+	}
+}
+
+// rangeChipRe captures the text between the range chip's guillemets. It is
+// line-bounded on purpose: a chip the frame truncated has lost its closing
+// guillemet, and must NOT be completed by a chevron further down the frame.
+var rangeChipRe = regexp.MustCompile(`‹\s*([^›\n]*?)\s*›`)
+
+// rangeChipLabel returns the window name the rendered frame is showing.
+func rangeChipLabel(frame string) (string, bool) {
+	mm := rangeChipRe.FindStringSubmatch(frame)
+	if mm == nil {
+		return "", false
+	}
+	return mm[1], true
+}
+
+// parseWindowChip resolves a rendered window name back to the [since, until)
+// window it claims: the full date, the month-day and the step-offset forms
+// alike. This is what makes the legibility test mean something: a fragment like
+// "7d @ 2026-07" fails here instead of satisfying a substring check, and the
+// arithmetic is the test's own (local midnight, whole calendar spans) rather
+// than a call back into Span.Window.
+func parseWindowChip(label string, now time.Time) (since, until time.Time, ok bool) {
+	days := map[string]int{"1d": 1, "7d": 7, "30d": 30}
+	if head, tail, cut := strings.Cut(label, " @ "); cut {
+		n, known := days[head]
+		if !known {
+			return time.Time{}, time.Time{}, false
+		}
+		if len(tail) == len("01-02") {
+			tail = strconv.Itoa(now.Year()) + "-" + tail
+		}
+		s, err := time.ParseInLocation("2006-01-02", tail, now.Location())
+		if err != nil {
+			return time.Time{}, time.Time{}, false
+		}
+		return s, s.AddDate(0, 0, n), true
+	}
+	head, back, cut := strings.Cut(label, "-")
+	if !cut {
+		return time.Time{}, time.Time{}, false
+	}
+	n, known := days[head]
+	steps, err := strconv.Atoi(back)
+	if !known || err != nil || steps < 1 {
+		return time.Time{}, time.Time{}, false
+	}
+	// The live window's first local day is n-1 days back; each step moves the
+	// whole span again.
+	mid := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	s := mid.AddDate(0, 0, -(n-1)-n*steps)
+	return s, s.AddDate(0, 0, n), true
+}
+
+// TestRangeChipNamesTheWindowAtEveryWidth is the issue #45 legibility gate. The
+// header used to render the ONE longest label and let the frame cut it: at 42
+// columns the chip read "RANGE < 7d @ 2026" and at 60 "RANGE < 7d @ 2026-07",
+// text that looks like a date and is not one. At every width the chip must now
+// carry a COMPLETE name that resolves back to the window on screen.
+func TestRangeChipNamesTheWindowAtEveryWidth(t *testing.T) {
+	f := &fakeData{}
+	m := newPinnedModel(t, f, windowClock)
+	for i := 0; i < 2; i++ {
+		tm, cmd := m.Update(keyMsg("["))
+		m = runPending(t, tm.(Model), cmd)
+	}
+	wantSince, wantUntil := m.span().Window(windowClock)
+
+	for _, w := range []int{42, 60, 80} {
+		m = send(m, tea.WindowSizeMsg{Width: w, Height: 30})
+		frame := ansiWindow.ReplaceAllString(m.View().Content, "")
+		label, ok := rangeChipLabel(frame)
+		if !ok {
+			t.Errorf("w=%d: no complete range chip in the frame; the window label was cut:\n%s",
+				w, frame)
+			continue
+		}
+		since, until, ok := parseWindowChip(label, windowClock)
+		if !ok {
+			t.Errorf("w=%d: range chip %q does not name a window:\n%s", w, label, frame)
+			continue
+		}
+		if !since.Equal(wantSince) || !until.Equal(wantUntil) {
+			t.Errorf("w=%d: range chip %q names [%v, %v), want the shown window [%v, %v)",
+				w, label, since, until, wantSince, wantUntil)
+		}
+		// A complete chip is not enough on its own: the header can pay for it by
+		// letting the frame clip whatever sits to its right, which is how the
+		// help chip used to vanish from 42 through 50 columns. The ladder exists
+		// so the label yields precision instead of costing a neighbour. Nothing
+		// else in the package notices if it stops doing that.
+		if !strings.Contains(frame, "? help") {
+			t.Errorf("w=%d: the help chip was clipped away to fit the range label %q:\n%s",
+				w, label, frame)
+		}
+	}
+
+	// Back at the live edge the chip names the range and never a day, at every
+	// one of those widths.
+	for i := 0; i < 2; i++ {
+		tm, cmd := m.Update(keyMsg("]"))
+		m = runPending(t, tm.(Model), cmd)
+	}
+	for _, w := range []int{42, 60, 80} {
+		m = send(m, tea.WindowSizeMsg{Width: w, Height: 30})
+		frame := ansiWindow.ReplaceAllString(m.View().Content, "")
+		label, ok := rangeChipLabel(frame)
+		if !ok {
+			t.Errorf("w=%d: the live frame carries no complete range chip:\n%s", w, frame)
+			continue
+		}
+		if label != m.rng.Label() {
+			t.Errorf("w=%d: live range chip = %q, want the range label %q", w, label, m.rng.Label())
 		}
 	}
 }

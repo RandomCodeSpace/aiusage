@@ -184,32 +184,45 @@ func (m Model) renderHeader() string {
 	}
 
 	wordmark := m.th.Wordmark.Render("◧ aiusage")
-	left := wordmark
+	subtitle := ""
 	if !m.compact() {
-		left += " " + m.th.Subtle.Render("command center")
+		subtitle = " " + m.th.Subtle.Render("command center")
 	}
 
-	// The range chip carries the WINDOW, not just the range: once [ / ] step it
-	// back the label names the window's first day, so a past window is never read
-	// as the live one. The guillemets are the chip's mono channel — they say the
-	// window is steppable.
-	rangePill := m.zoneMark(views.ZoneRangePill,
-		m.headerChip("RANGE ‹ "+m.spanLabel()+" ›", m.th.Accent))
 	help := m.zoneMark(views.ZoneHelp, m.headerChip("? help", m.th.Muted))
-
-	right := ""
 	// Ingest heartbeat (real collector pulse) + query-freshness chip. The chip
 	// is a click zone: the indicator is where you act (left-press = force
 	// refresh). Never blanks the frame.
-	right += m.heartbeatCell() + " "
-	right += m.zoneMark(views.ZoneFreshness, m.freshnessChip()) + " "
-	right += rangePill
+	lead := m.heartbeatCell() + " " + m.zoneMark(views.ZoneFreshness, m.freshnessChip()) + " "
+	still := ""
 	if m.reducedMotion {
 		// Surface the reduced-motion state; the dashboard renders all charts
 		// instantly with no animation when this is set (NO_COLOR /
 		// AIUSAGE_REDUCED_MOTION), so motion never adds input latency.
-		right += " " + m.headerChip("·still·", m.th.Muted)
+		still = " " + m.headerChip("·still·", m.th.Muted)
 	}
+
+	// Cells left for the range chip once everything mandatory is paid for: the
+	// wordmark, the one-cell gap between the halves, the heartbeat + freshness
+	// lead, the reduced-motion chip and the help chip. The subtitle is NOT in
+	// this budget: it is decoration and yields to the window name (below).
+	budget := iw - lipgloss.Width(wordmark) - 1 -
+		lipgloss.Width(lead) - lipgloss.Width(still) - 1 - lipgloss.Width(help)
+	forms := m.rangeChipForms()
+	rung := m.rangeFit(forms, budget)
+
+	// The subtitle buys itself back only while it costs the range chip nothing:
+	// at 60 columns its 15 cells are the difference between naming the window by
+	// its day and naming it by its step offset, and the window name outranks a
+	// tagline. Comparing the chosen RUNG also keeps the header monotone in
+	// width: widening a terminal never takes something away.
+	left := wordmark
+	if subtitle != "" && m.rangeFit(forms, budget-lipgloss.Width(subtitle)) == rung {
+		left += subtitle
+	}
+
+	rangePill := m.zoneMark(views.ZoneRangePill, m.headerChip(forms[rung], m.th.Accent))
+	right := lead + rangePill + still
 	// The db path is the first thing to drop when space is tight; only show it
 	// when the wordmark + range + help + path comfortably fit.
 	if m.dbPath != "" {
@@ -226,6 +239,38 @@ func (m Model) renderHeader() string {
 	}
 	bar := m.th.HeaderBar.Render(left + strings.Repeat(" ", gap) + right)
 	return lipgloss.NewStyle().MaxWidth(m.frameW()).Render(bar)
+}
+
+// rangeChipForms returns the range chip's candidate bodies, widest first. The
+// chip carries the WINDOW, not just the range: once [ / ] step it back the
+// label names the window itself, so a past window is never read as the live
+// one. What yields as the terminal narrows is, in order, the word RANGE, then
+// the precision of the window name (Span.labelForms), then the spaces inside
+// the guillemets. The guillemets themselves survive to the last rung: they are
+// the chip's mono channel, and they say the window is steppable.
+func (m Model) rangeChipForms() []string {
+	labels := m.spanLabels()
+	forms := make([]string, 0, len(labels)+2)
+	forms = append(forms, "RANGE ‹ "+labels[0]+" ›")
+	for _, l := range labels {
+		forms = append(forms, "‹ "+l+" ›")
+	}
+	return append(forms, "‹"+labels[len(labels)-1]+"›")
+}
+
+// rangeFit picks the widest range-chip form that fits budget cells. Every rung
+// is a complete name for the window, so a narrow header shows a shorter label
+// and never a truncated one. When even the narrowest rung overflows (a stale
+// chip carrying an error can eat the whole header) that rung is used anyway
+// and the frame clamps it: a clipped SHORT form still reads as a past window,
+// which is the property that must not break.
+func (m Model) rangeFit(forms []string, budget int) int {
+	for i, f := range forms {
+		if lipgloss.Width(m.headerChip(f, m.th.Accent)) <= budget {
+			return i
+		}
+	}
+	return len(forms) - 1
 }
 
 // headerChip renders a state/range/action chip on the header bar: one cell of

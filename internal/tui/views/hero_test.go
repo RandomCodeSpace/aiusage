@@ -45,7 +45,7 @@ func heroTestCtx() Ctx {
 		PadLeft:  padLeftLocal,
 		PadRight: padRightLocal,
 		NowColor: ac("3"), AccentColor: ac("6"), FaintColor: ac("8"),
-		GoodColor: ac("2"), WarnColor: ac("1"), BorderColor: ac("8"),
+		GoodColor: ac("2"), WarnColor: ac("1"),
 	}
 }
 

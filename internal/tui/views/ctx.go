@@ -43,11 +43,12 @@ type Ctx struct {
 	// is what keeps ad-hoc colored runs and separators from tearing the block.
 	BG color.Color
 
-	// Adaptive colors for chart adapters and segment coloring.
+	// Adaptive colors for chart adapters and segment coloring. There is no
+	// border color: the ONE border is the outer app frame, which package tui
+	// draws itself (Theme.AppFrame). Nothing inside a view is boxed.
 	NowColor    compat.AdaptiveColor
 	AccentColor compat.AdaptiveColor
 	FaintColor  compat.AdaptiveColor
-	BorderColor compat.AdaptiveColor
 	GoodColor   compat.AdaptiveColor // healthy/low utilisation (resource gauges)
 	WarnColor   compat.AdaptiveColor // high/critical utilisation (resource gauges)
 

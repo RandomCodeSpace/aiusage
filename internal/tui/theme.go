@@ -128,15 +128,6 @@ func (t Theme) Idle() lipgloss.Style {
 	return lipgloss.NewStyle().Background(t.Surface).Padding(blockPadY, blockPadX)
 }
 
-// Focused returns the active-pane panel style: the same card lifted one step to
-// L2. The pane's monochrome-safe focus channel is the width-invariant focus bar
-// on its titled rule, not this fill — paint is invisible with SGR stripped, so
-// the bar is what actually says "you are here". Exactly one pane wears both at
-// a time.
-func (t Theme) Focused() lipgloss.Style {
-	return lipgloss.NewStyle().Background(t.SurfaceHi).Padding(blockPadY, blockPadX)
-}
-
 // Errored returns the per-pane error card: a resting card whose content carries
 // the warn color (the ✕ glyph + word is the mono channel).
 func (t Theme) Errored() lipgloss.Style {
