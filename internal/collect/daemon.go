@@ -24,6 +24,12 @@ type DaemonOptions struct {
 	Logger   *log.Logger   // optional; defaults to log.Default()
 	Pricer   Pricer        // optional; stamps cost on every new event
 	NoRaw    bool          // config privacy.no_raw: store no audit payloads
+	// ExecPath is the daemon's own executable, watched for replacement so an
+	// upgrade takes effect without waiting for someone to run a command. Empty
+	// disables the watch. Resolve it at startup: once the file has been replaced
+	// the running process can no longer name it (Linux reports the original path
+	// with a " (deleted)" suffix).
+	ExecPath string
 }
 
 // minInterval guards against a pathological tight loop if a caller passes a
@@ -97,12 +103,30 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc ad
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// The executable as it was when this daemon started. An upgrade replaces
+	// those bytes, and the tick below notices before it spends another cycle
+	// running superseded code.
+	started, watching := stampExecutable(opt.ExecPath)
+
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Printf("aiusage daemon stopping: %v", ctx.Err())
 			return nil
 		case <-ticker.C:
+			// Checked BEFORE the cycle: the caller execs the new binary, whose
+			// own startup cycle then runs immediately, so the upgrade costs no
+			// collection. Returning here also runs the deferred lock release and
+			// pidfile removal before the exec — briefly leaving no daemon
+			// registered, during which a CLI could spawn one. That is a race
+			// between two processes for the same flock, which the flock settles:
+			// the loser fails fast and exactly one collector survives.
+			if watching {
+				if now, ok := stampExecutable(opt.ExecPath); ok && !now.same(started) {
+					logger.Printf("aiusage daemon: %s was replaced; restarting into the new build", opt.ExecPath)
+					return ErrBinaryReplaced
+				}
+			}
 			runOne()
 		}
 	}

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -43,8 +45,30 @@ func daemonOptions(cfg config.Config) collect.DaemonOptions {
 		Version:  buildinfo.Identity(),
 		Pricer:   newPricer(cfg),
 		NoRaw:    cfg.Privacy.NoRaw,
+		ExecPath: selfPath(),
 	}
 }
+
+// selfPath resolves this process's own executable, or "" if it cannot be named
+// — which disables the upgrade watch rather than guessing at a path to exec.
+func selfPath() string {
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return self
+}
+
+// execSelf replaces this process with a fresh run of path, keeping the pid, the
+// environment and the daemon's own arguments. A package-level var so the
+// restart path is testable: the real syscall.Exec never returns.
+var execSelf = func(path string) error {
+	return syscall.Exec(path, append([]string{path}, os.Args[1:]...), os.Environ())
+}
+
+// runDaemon is the collection loop, as a package-level var so the restart path
+// can be driven in a test without replacing the test binary on disk.
+var runDaemon = collect.RunDaemon
 
 // cycleOptions builds the RunCycle options for cfg, so a one-shot cycle honours
 // exactly the same pricing and privacy settings the daemon does.
@@ -84,7 +108,20 @@ func newRunCmd() *cobra.Command {
 
 			opt := daemonOptions(cfg)
 			opt.Logger = log.New(c.ErrOrStderr(), "", log.LstdFlags)
-			return collect.RunDaemon(ctx, defaultRegistry(), st, discoverConfig(cfg), opt)
+			err = runDaemon(ctx, defaultRegistry(), st, discoverConfig(cfg), opt)
+			if !errors.Is(err, collect.ErrBinaryReplaced) {
+				return err
+			}
+			// An upgrade landed under us. Close the database explicitly: exec
+			// replaces the process image, so the deferred close above would
+			// never run and the new image would inherit a WAL nobody finished
+			// with. (If the exec fails we return instead, and that deferred
+			// close lands on an already-closed store, which is harmless.)
+			_ = st.Close()
+			if err := execSelf(opt.ExecPath); err != nil {
+				return fmt.Errorf("restart into the upgraded binary %s: %w", opt.ExecPath, err)
+			}
+			return nil
 		},
 	}
 }
