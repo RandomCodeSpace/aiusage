@@ -445,6 +445,15 @@ func (b *Browse) applyColumns() {
 			{Title: ra("total", totW), Width: totW},
 		}
 	}
+	// SetColumns re-renders the viewport as a side effect, against whatever rows
+	// the table is still holding from the previous layout. Widening the set (the
+	// narrow 3-column form giving way to the full breakdown) would index cells
+	// those rows do not have and panic inside the widget's renderRow, taking the
+	// whole program down on nothing worse than a font-size change. Emptying the
+	// table first makes that intermediate render a no-op. Every caller follows
+	// with applyRows, which repopulates and restores the cursor that an empty
+	// SetRows clamps to -1.
+	b.table.SetRows(nil)
 	b.table.SetColumns(cols)
 	b.cols = cols
 }
