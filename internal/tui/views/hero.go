@@ -50,6 +50,16 @@ const (
 	// frame rather than a cheap strip.
 	minHeroLogH = 5
 
+	// heroCardChromeH is what the hero's card costs vertically: the design's two
+	// card padding rows plus the titled rule. heroPanel spends exactly this
+	// before handing the rest to the body.
+	heroCardChromeH = 2*blockPadY + 1
+
+	// minHeroPanelH is the shortest hero PANEL that can still carry a BUILT
+	// chart: the card chrome over the decade band's own floor. Overview reserves
+	// it for the hero before the KPI strip is allowed to claim rows (issue #48).
+	minHeroPanelH = heroCardChromeH + minHeroLogH
+
 	// minPaneGraphH is the smallest plot area worth handing a pane.
 	minPaneGraphH = 4
 
@@ -80,11 +90,11 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 	// on every scrub. Charts live on the ground plane by design (surface.go);
 	// focus is carried by the titled rule's focus bar, which needs no paint.
 	style := c.Block(ElevGround).Width(w)
-	inner := w - 4
+	inner := w - cardChromeW
 	if inner < 4 {
 		inner = 4
 	}
-	chartH := h - 3 // title rule + card padding
+	chartH := h - heroCardChromeH // title rule + card padding
 	if chartH < 1 {
 		chartH = 1
 	}
@@ -137,8 +147,15 @@ const (
 // heroFrameFor resolves the body kind for a mode at (w, h) under lay. It is the
 // single gate: heroPanel asks it (through heroUsesFrame) to decide the title,
 // and heroBodyMemo asks it to pick the builder.
+//
+// w is the pane's POST-CHROME inner width, so the width budget is charged
+// exactly once: lay.ChartMode was granted on a column width derived from the
+// same minChartInnerW this compares against (issue #48). Testing the outer
+// gate's constant here spent the same cells twice and left a band of widths
+// (80 columns, the classic terminal, among them) that passed the layout gate
+// and failed this one.
 func heroFrameFor(mode HeroMode, lay Layout, w, h int) heroFrameKind {
-	if lay.ChartMode != ChartFull || w < minChartW {
+	if lay.ChartMode != ChartFull || w < minChartInnerW {
 		return heroFrameNone
 	}
 	if mode == HeroLeverage {

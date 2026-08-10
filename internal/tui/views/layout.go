@@ -73,11 +73,34 @@ const (
 	// fits and the mini icon nav is used instead.
 	minTabStripW = 56
 
-	// minChartW / minChartH gate a full axed chart; minSparkW gates the
-	// one-row sparkline fallback. Below minChartW a real line chart is too narrow
-	// to read axes, and below minChartH too short to plot — both fall back to a
-	// sparkline, then to numbers.
-	minChartW = 48
+	// cardChromeW is what one card costs a pane horizontally: the design's
+	// uniform card padding on both sides (surface.go). A chart is drawn into the
+	// width the card LEAVES, never into the column width the layout hands out.
+	cardChromeW = 2 * blockPadX
+
+	// minChartInnerW is THE width gate for a full axed chart, and it is measured
+	// on the POST-CHROME inner width - the cells the chart actually gets. It is
+	// charged exactly once (issue #48): ComputeLayout derives its column-width
+	// gate from it below, and heroFrameFor tests the inner width against it, so
+	// no width can clear one gate and fail the other.
+	//
+	// 28 is measured, not chosen: it is the narrowest inner width at which the
+	// rendered decade-ring hero still reads with every SGR sequence stripped.
+	// At 27 and below the pane header drops its "SCALE 10^N/div" readout (the
+	// only channel that states magnitude on a log axis) because the head and the
+	// readout no longer fit one line; the two-pane hero survives to 24 and the
+	// leverage pivot to 27, so the decade band sets the floor for all three.
+	minChartInnerW = 28
+
+	// minChartW is minChartInnerW expressed as an OUTER column width, which is
+	// what ComputeLayout has to compare MainW against. It is derived, never
+	// stated: a column that clears it always leaves an inner width that clears
+	// minChartInnerW.
+	minChartW = minChartInnerW + cardChromeW
+
+	// minChartH gates a full axed chart on height; minSparkW gates the one-row
+	// sparkline fallback. Below minChartH a chart is too short to plot - it
+	// falls back to a sparkline, then to numbers.
 	minChartH = 9
 	minSparkW = 8
 

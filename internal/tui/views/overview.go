@@ -40,11 +40,33 @@ const (
 	PaneOverviewTools
 )
 
+// heroReserveH is the one body row Overview holds back from the hero: the
+// breathing line under the panels. It is counted in the strip's budget so the
+// reserve cannot be spent twice.
+const heroReserveH = 1
+
+// minHeroBodyH is the smallest Overview BODY that can host a BUILT hero chart
+// once the KPI strip has yielded everything it can: one tile row (the strip's
+// floor - an Overview with no numbers at all would be a worse trade than a
+// short hero), the reserve row, and minHeroPanelH for the panel itself. A body
+// shorter than this renders the hero's strip fallback whatever the width is;
+// that is a documented floor, not an emergent accident, and
+// TestOverviewHeroFloorIsPinned holds it in place. The sys gauge strip and (on
+// narrow bodies) the compact by-tool card cost their own rows on top of it.
+const minHeroBodyH = kpiTileH + heroReserveH + minHeroPanelH
+
 // Overview renders the calm landing hub: a KPI strip, a hero time-series, and a
 // side by-tool stacked bar panel over a fresh/cache split gauge. The layout is
 // fully driven by lay: KPI columns reflow to the body width, the side panel
 // appears only when lay grants it, and the hero degrades to a sparkline when
 // there isn't room for a full chart.
+//
+// The hero outranks the KPI strip (issue #48). Rows are handed out in that
+// order: the sys strip and the narrow-body tool card first (both fixed), then
+// minHeroPanelH is RESERVED for the hero, and the KPI strip fills what is left,
+// dropping trailing tile rows rather than taking rows off the chart. This is
+// the same rule that already forbids the cost tile from costing the hero a row,
+// applied to the whole strip.
 func Overview(c Ctx, d OverviewData, lay Layout) string {
 	width := lay.BodyW
 	if width < 8 {
@@ -59,9 +81,20 @@ func Overview(c Ctx, d OverviewData, lay Layout) string {
 		stripH = lipgloss.Height(strip)
 	}
 
-	kpis := overviewKPIs(c, d, lay)
+	// On a body with no side panel the by-tool card sits UNDER the hero, so its
+	// rows are part of the hero's budget. Measuring it here (instead of letting
+	// it overflow and be clamped) is what keeps the card whole now that the hero
+	// can grow into a chart at these widths.
+	tools, toolsH := "", 0
+	if !lay.SidePanel {
+		tools = compactToolStrip(c, d, width)
+		toolsH = lipgloss.Height(tools)
+	}
+
+	avail := lay.BodyH - stripH - toolsH - heroReserveH
+	kpis := overviewKPIs(c, d, lay, avail-minHeroPanelH)
 	kpisH := lipgloss.Height(kpis)
-	bodyH := lay.BodyH - kpisH - stripH - 1
+	bodyH := avail - kpisH
 	if bodyH < 3 {
 		bodyH = 3
 	}
@@ -78,7 +111,6 @@ func Overview(c Ctx, d OverviewData, lay Layout) string {
 
 	if !lay.SidePanel {
 		hero := heroPanel(c, d, width, bodyH, lay, d.ActivePane == PaneOverviewHero)
-		tools := compactToolStrip(c, d, width)
 		return head(hero, tools)
 	}
 
@@ -101,11 +133,25 @@ type kpiSpec struct {
 	fmtVal func(int64) string
 }
 
+// kpiTileH is the tallest a KPI tile renders: the card's two padding rows over
+// the titled rule, the number row, a sparkline row and the foot. It is what one
+// tile row of the strip costs, and therefore the strip's floor - the strip
+// yields rows to the hero but never vanishes. TestKPITileHeightMatchesTheBudget
+// keeps the constant honest against what kpiTile actually renders.
+const kpiTileH = 2*blockPadY + 4
+
 // overviewKPIs renders the read-only KPI strip: one tile per token component
 // (input, output, cache-read, cache-creation) with a self-scaled sparkline and
 // its share of the component sum, then total and events as bare numbers (total
 // is never graphed). Tiles reflow to fit the body width.
-func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
+//
+// maxRows is the strip's row budget - what the body has left once the hero's
+// floor is reserved. Tile rows are added while they fit it; the rest of the
+// tiles are dropped, trailing ones first, which is why the order (components,
+// then total/events, then cost) puts the numbers the hero is about at the
+// front. The first row is always kept even when it does not fit: that floor is
+// minHeroBodyH's kpiTileH term.
+func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 	width := lay.BodyW
 	tot := Split(d.Totals)
 	prev := Split(d.Prev)
@@ -193,8 +239,10 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 		tiles[i] = kpiTile(c, s, tileW)
 	}
 
-	// Arrange the tiles into rows of `per`.
+	// Arrange the tiles into rows of `per`, keeping only the rows the budget can
+	// pay for.
 	var rows []string
+	used := 0
 	for i := 0; i < len(tiles); i += per {
 		end := i + per
 		if end > len(tiles) {
@@ -207,7 +255,13 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 			}
 			segs = append(segs, tiles[j])
 		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, segs...))
+		row := lipgloss.JoinHorizontal(lipgloss.Top, segs...)
+		rh := lipgloss.Height(row)
+		if len(rows) > 0 && used+rh > maxRows {
+			break
+		}
+		rows = append(rows, row)
+		used += rh
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }

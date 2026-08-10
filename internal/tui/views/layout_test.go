@@ -107,6 +107,15 @@ func TestComputeLayoutSidePanelOnlyWhenWide(t *testing.T) {
 
 // TestComputeLayoutChartModeDegrades: the chart mode steps down as space shrinks
 // and never reports Full when there isn't room.
+//
+// The width case moved to TestChartColumnGateIsDerivedFromTheInnerOne, which
+// exercises the same rule on a hand-built column. It has to: since the width
+// gate became the MEASURED inner floor plus the card chrome (issue #48), the
+// narrowest primary column any usable terminal can produce - 40 columns of body
+// on the smallest allowed terminal, 46 next to a side panel - already clears it,
+// so no ComputeLayout input can express "too narrow for a chart" any more. The
+// assertion below would only have been kept alive by quoting a width the layout
+// rejects outright as TooSmall, which tests nothing.
 func TestComputeLayoutChartModeDegrades(t *testing.T) {
 	full := ComputeLayout(160, 40)
 	if full.ChartMode != ChartFull {
@@ -116,9 +125,18 @@ func TestComputeLayoutChartModeDegrades(t *testing.T) {
 	if short.ChartMode == ChartFull {
 		t.Fatalf("160x11 ChartMode = Full, want a degraded mode")
 	}
-	narrow := ComputeLayout(44, 40)
-	if narrow.ChartMode == ChartFull {
-		t.Fatalf("44x40 ChartMode = Full, want a degraded mode")
+	// Every usable width clears the measured chart floor; that is the claim the
+	// removed narrow case turned into, so it is asserted rather than assumed.
+	for w := MinUsableW; w <= 260; w++ {
+		l := ComputeLayout(w, 40)
+		col := l.MainW
+		if !l.SidePanel {
+			col = l.BodyW
+		}
+		if col < minChartW {
+			t.Fatalf("%d columns leaves a %d-column primary column, under the chart floor %d: the width gate is reachable again and needs its own case",
+				w, col, minChartW)
+		}
 	}
 }
 

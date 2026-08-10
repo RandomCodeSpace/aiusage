@@ -52,7 +52,9 @@ func heroBody(c Ctx, buckets []store.Bucket, dim string, lay Layout, w, h, scrub
 	if len(buckets) == 0 {
 		return emptyChartFrame(c, w, h)
 	}
-	if lay.ChartMode == ChartFull && w >= minChartW && h >= minHeroLogH {
+	// w is the pane's post-chrome inner width, so it is measured against the
+	// inner gate - the same one heroFrameFor uses (issue #48).
+	if lay.ChartMode == ChartFull && w >= minChartInnerW && h >= minHeroLogH {
 		// Clamp to exactly h rows: ntcharts can emit one trailing axis/overflow
 		// row beyond the requested canvas height for some data, which would push
 		// the panel one line past its budget. fitHeight makes the contract exact.
