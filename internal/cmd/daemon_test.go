@@ -323,15 +323,18 @@ func TestDaemonArgsForwardsFlags(t *testing.T) {
 	}
 }
 
-// TestDaemonArgsAbsolutizesConfigPath covers the working-directory split: the
-// CLI resolves a relative --config against the shell the user is standing in,
-// while the daemon it spawns keeps whatever CWD it inherited. Forwarded
-// verbatim the two processes read DIFFERENT files - and since config.Load
-// anchors the relative paths written inside a config file to that file's own
-// directory, they would then disagree about the database as well. The failure
-// is silent, because a missing config file is not an error: the daemon would
-// quietly collect into the default DB while the CLI reports on the configured
-// one. So the forwarded value must be absolute.
+// TestDaemonArgsAbsolutizesConfigPath covers the working-directory split. At
+// spawn the child inherits the parent's CWD, so a relative --config would
+// resolve the same for both - but the daemon then detaches and keeps that
+// directory for its whole life, while every LATER CLI invocation resolves the
+// same relative --config against wherever the user is standing then. From a
+// different directory the two processes read DIFFERENT files - and since
+// config.Load anchors the relative paths written inside a config file to that
+// file's own directory, they would then disagree about the database as well.
+// The failure is silent, because a missing config file is not an error: the
+// daemon would quietly collect into the default DB while the CLI reports on the
+// configured one. So the forwarded value must be absolute, pinning the daemon
+// to the file the spawning invocation meant.
 func TestDaemonArgsAbsolutizesConfigPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

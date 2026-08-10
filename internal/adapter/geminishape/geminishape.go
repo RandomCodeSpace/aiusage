@@ -8,13 +8,25 @@
 //
 // Token mapping (per plan section 1):
 //
-//	Input         = (tokens.input + tokens.tool) − cached overlap   (clamped >= 0)
+//	Input         = (tokens.input + tokens.tool) - cached overlap   (clamped >= 0)
 //	Output        = tokens.output
 //	CacheRead     = tokens.cached
 //	CacheCreation = 0
 //	Reasoning     = tokens.thoughts
-//	Total         = tokens.total if present, else input+output+thoughts
-//	                (cached is EXCLUDED from the authoritative total)
+//	Total         = max(tokens.total, input+tool+output+thoughts)
+//
+// The total accounts for every component this shape folds into the event's own
+// token fields, so a row can never report a total below the counts stored
+// beside it (issue #49). tokens.tool is part of it because it is folded into
+// InputTokens; tokens.thoughts is part of it because reasoning is ADDITIVE for
+// this shape (model.ReasoningModeFor). Cached is NOT added on top: it is the
+// slice of tokens.input that was served from cache, already inside that count,
+// and it is reported separately in CacheReadTokens.
+//
+// tokens.total is the provider's own figure and stays authoritative wherever it
+// covers those components; it is only raised when the provider itemised more
+// than it totalled (real records do: a turn reporting input+output+thoughts as
+// its total leaves its tool tokens out of it).
 //
 // The adapters keep their own roots/Discover policy and their size+mtime
 // checkpoint gates; only the file parsing lives here.
@@ -143,13 +155,32 @@ func (r rawRecord) auditJSON() string {
 	return string(b)
 }
 
-// total returns the record's reported provider total when present, else the
-// derived total (input+output+thoughts). Used to pick the max snapshot per id.
-func (r rawRecord) total() int64 {
-	if r.Tokens.Total > 0 {
-		return r.Tokens.Total
+// derivedTotal sums the components this shape folds into the event's own token
+// fields: input and tool (both land in InputTokens) plus output and thoughts
+// (reasoning is ADDITIVE here). Cached is not added on top - it is the slice of
+// input that was served from cache and is already inside that count.
+func (t tokenBlock) derivedTotal() int64 {
+	return adapter.NonNeg(t.Input) + adapter.NonNeg(t.Tool) +
+		adapter.NonNeg(t.Output) + adapter.NonNeg(t.Thoughts)
+}
+
+// authoritativeTotal reconciles the provider-reported tokens.total against the
+// components above: the reported figure wins wherever it covers them, and is
+// raised to the component sum when it does not, so the stored total never
+// contradicts the counts stored beside it.
+func (t tokenBlock) authoritativeTotal() int64 {
+	derived := t.derivedTotal()
+	if reported := adapter.NonNeg(t.Total); reported > derived {
+		return reported
 	}
-	return adapter.NonNeg(r.Tokens.Input) + adapter.NonNeg(r.Tokens.Output) + adapter.NonNeg(r.Tokens.Thoughts)
+	return derived
+}
+
+// total returns the record's authoritative total. Used to pick the max
+// (final) snapshot per id, so it must follow the same accounting the snapshot
+// itself stores.
+func (r rawRecord) total() int64 {
+	return r.Tokens.authoritativeTotal()
 }
 
 // setWrapper captures the optional `{"$set": {...}}` envelope.
@@ -286,7 +317,6 @@ func (s Shape) toSnapshot(r rawRecord, sourcePath string, now time.Time) (model.
 	cached := adapter.NonNeg(r.Tokens.Cached)
 	thoughts := adapter.NonNeg(r.Tokens.Thoughts)
 	toolTok := adapter.NonNeg(r.Tokens.Tool)
-	reported := adapter.NonNeg(r.Tokens.Total)
 
 	// Input = (input + tool) minus the cached overlap (cached is reported
 	// separately and is a subset of the prompt that was served from cache).
@@ -295,13 +325,10 @@ func (s Shape) toSnapshot(r rawRecord, sourcePath string, now time.Time) (model.
 		inputAdj = 0
 	}
 
-	// Authoritative total: provider total when present, else input+output+
-	// thoughts. Cached is EXCLUDED from the total (verified against Gemini's
-	// own `total` field, which excludes cached read tokens).
-	total := reported
-	if total == 0 {
-		total = in + out + thoughts
-	}
+	// Authoritative total: the provider's tokens.total, raised to cover every
+	// component folded into the fields above (tool tokens in particular, which
+	// reach InputTokens and which the provider leaves out of its own total).
+	total := r.Tokens.authoritativeTotal()
 
 	// Drop all-zero records (no usage to report).
 	if inputAdj == 0 && out == 0 && cached == 0 && thoughts == 0 && total == 0 {
@@ -342,19 +369,21 @@ func (s Shape) toSnapshot(r rawRecord, sourcePath string, now time.Time) (model.
 	}, true
 }
 
-// parseTime tries RFC3339 (with and without nanoseconds) and returns the zero
-// time when the stamp is empty or unparseable.
+// parseTime parses an RFC3339 stamp and returns it in UTC, or the zero time
+// when the stamp is empty or unparseable. One layout covers both the plain and
+// the fractional-second spellings: time.Parse accepts a fractional second
+// immediately after the seconds field even when the layout does not carry one,
+// so a separate time.RFC3339Nano pass would only ever repeat this one.
 func parseTime(s string) time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}
 	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.UTC()
-		}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
 	}
-	return time.Time{}
+	return t.UTC()
 }
 
 // trimLeadingSpace drops leading ASCII whitespace without allocating.

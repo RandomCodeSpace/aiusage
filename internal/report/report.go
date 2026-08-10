@@ -156,16 +156,21 @@ func keyColumns(sum *store.Summary) []string {
 	return nil
 }
 
-// unknownLabel is what a human-facing surface prints for a grouping value the
+// unknownLabel is what the rendered table prints for a grouping value the
 // ledger stores as the empty string. Provider is the only such dimension: an
 // adapter whose source never names the billing provider leaves it empty, and a
 // blank cell mid-table reads as a rendering fault rather than as the honest
-// "not known". The stored value is never rewritten; the CSV export still emits
-// the raw empty field (see eventRecord), because an export mirrors the ledger.
+// "not known". The stored value is never rewritten, and no machine surface
+// substitutes this word for it: the CSV and JSON event exports emit the raw
+// empty field (see eventRecord), and the JSON summary emits the raw value plus
+// a separate provider_label carrying this string (see bucketJSON). A consumer
+// that saw only the label could not tell a provider literally named "unknown"
+// from a missing one.
 const unknownLabel = "unknown"
 
-// displayKey renders one grouping value for a human-facing surface (the table
-// and the JSON summary). Every other dimension passes through untouched.
+// displayKey renders one grouping value for the rendered table, and feeds the
+// JSON summary's provider_label. Every other dimension passes through
+// untouched.
 func displayKey(dim, val string) string {
 	if dim == "provider" && val == "" {
 		return unknownLabel

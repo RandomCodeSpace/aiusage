@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +55,11 @@ func TestDiscoveredSourcesIsBounded(t *testing.T) {
 // key, the same map a direct sweep over the same resolved config produces. A
 // wiring that fed a different config, an empty map or none at all fails here.
 func TestRootHandsDiscoveredSourcesToTheTUI(t *testing.T) {
+	// The root command resolves the daemon pid/log and the TUI's ui-state.json
+	// under the state dir; without this the run reaches into the developer's
+	// real XDG_STATE_HOME, as every other command test in this package avoids
+	// doing. The StatePath assertion below keeps the isolation honest.
+	stateDir := isolateState(t)
 	home := t.TempDir()
 	// claude-code accepts both <home>/.config/claude and <home>/.claude when
 	// each holds a projects/ dir, so this fixture home has exactly two of its
@@ -94,6 +100,13 @@ func TestRootHandsDiscoveredSourcesToTheTUI(t *testing.T) {
 	}
 	if !launched {
 		t.Fatal("the root command did not launch the TUI; nothing was wired")
+	}
+
+	// Everything the command resolves must stay inside the sandbox, the state
+	// dir included: a run that persisted UI state to the host would also be
+	// reading a host daemon's pid file.
+	if !strings.HasPrefix(got.StatePath, stateDir) {
+		t.Errorf("tui.Options.StatePath = %q, want it under the isolated state dir %q", got.StatePath, stateDir)
 	}
 
 	if n, ok := got.Sources["claude-code"]; !ok || n != 2 {

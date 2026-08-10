@@ -39,10 +39,17 @@ func writeTemp(t *testing.T, name, content string) string {
 // shapes: cumulative records collapse to the max snapshot per id, one snapshot
 // per (file, id) in first-seen order, and every snapshot carries the shape's
 // tool/provider/project identity.
+//
+// The ids sort in the OPPOSITE order to their first appearance ("zulu" is seen
+// first, "alpha" second) so that first-seen order is the only order that
+// satisfies the assertions below. With ids that sort the way they appear, a
+// ReadFile that walked its map through sorted keys - or Go's randomised map
+// order, half the time - would pass while having dropped the ordering the
+// contract promises.
 func TestReadFileStampsShapeIdentity(t *testing.T) {
-	content := `{"id":"t1","model":"m-1","type":"gemini","sessionId":"s1","timestamp":"2026-08-09T10:00:00Z","tokens":{"input":100,"output":20,"thoughts":5}}
-{"id":"t2","model":"m-2","type":"gemini","sessionId":"s1","timestamp":"2026-08-09T10:00:01Z","tokens":{"input":7,"output":3}}
-{"id":"t1","model":"m-1","type":"gemini","sessionId":"s1","timestamp":"2026-08-09T10:00:02Z","tokens":{"input":300,"output":80,"thoughts":15}}
+	content := `{"id":"zulu","model":"m-1","type":"gemini","sessionId":"s1","timestamp":"2026-08-09T10:00:00Z","tokens":{"input":100,"output":20,"thoughts":5}}
+{"id":"alpha","model":"m-2","type":"gemini","sessionId":"s1","timestamp":"2026-08-09T10:00:01Z","tokens":{"input":7,"output":3}}
+{"id":"zulu","model":"m-1","type":"gemini","sessionId":"s1","timestamp":"2026-08-09T10:00:02Z","tokens":{"input":300,"output":80,"thoughts":15}}
 `
 	for _, sh := range []Shape{geminiShape, agyShape} {
 		t.Run(sh.Tool, func(t *testing.T) {
@@ -55,14 +62,14 @@ func TestReadFileStampsShapeIdentity(t *testing.T) {
 				t.Fatalf("clean file reported Skipped=%d ScanErr=%v", res.Skipped, res.ScanErr)
 			}
 			if len(res.Snapshots) != 2 {
-				t.Fatalf("want 2 snapshots (t1, t2), got %d: %+v", len(res.Snapshots), res.Snapshots)
+				t.Fatalf("want 2 snapshots (zulu, alpha), got %d: %+v", len(res.Snapshots), res.Snapshots)
 			}
 			first, second := res.Snapshots[0], res.Snapshots[1]
-			if want := path + "|t1"; first.Key != want {
-				t.Errorf("first Key = %q, want %q (first-seen id order)", first.Key, want)
+			if want := path + "|zulu"; first.Key != want {
+				t.Errorf("first Key = %q, want %q (first-seen id order, not sorted)", first.Key, want)
 			}
-			if want := path + "|t2"; second.Key != want {
-				t.Errorf("second Key = %q, want %q", second.Key, want)
+			if want := path + "|alpha"; second.Key != want {
+				t.Errorf("second Key = %q, want %q (first-seen id order, not sorted)", second.Key, want)
 			}
 			for _, s := range res.Snapshots {
 				if s.Tool != sh.Tool {
@@ -81,16 +88,16 @@ func TestReadFileStampsShapeIdentity(t *testing.T) {
 					t.Errorf("SessionID = %q, want s1", s.SessionID)
 				}
 			}
-			// Max (final) cumulative record wins for t1.
+			// Max (final) cumulative record wins for zulu.
 			if first.InputTokens != 300 || first.OutputTokens != 80 || first.ReasoningTokens != 15 {
-				t.Errorf("t1 not the max snapshot: in=%d out=%d thoughts=%d",
+				t.Errorf("zulu not the max snapshot: in=%d out=%d thoughts=%d",
 					first.InputTokens, first.OutputTokens, first.ReasoningTokens)
 			}
 			if want := int64(395); first.TotalTokens != want {
-				t.Errorf("t1 TotalTokens = %d, want %d (derived input+output+thoughts)", first.TotalTokens, want)
+				t.Errorf("zulu TotalTokens = %d, want %d (derived input+output+thoughts)", first.TotalTokens, want)
 			}
 			if got := first.ObservedTime.Format(time.RFC3339); got != "2026-08-09T10:00:02Z" {
-				t.Errorf("t1 ObservedTime = %q, want the chosen record's stamp", got)
+				t.Errorf("zulu ObservedTime = %q, want the chosen record's stamp", got)
 			}
 		})
 	}
@@ -98,9 +105,10 @@ func TestReadFileStampsShapeIdentity(t *testing.T) {
 
 // TestToSnapshotTokenMapping pins the documented mapping: Input is
 // (input+tool) minus the cached overlap clamped at zero, cached lands in
-// CacheRead and never in the total, CacheCreation is always zero, a reported
-// provider total wins over the derived one, negative counters clamp, and an
-// all-zero record is dropped.
+// CacheRead and is never added on top of the total, CacheCreation is always
+// zero, a reported provider total wins wherever it covers the components the
+// snapshot stores and is raised to them where it does not, negative counters
+// clamp, and an all-zero record is dropped.
 func TestToSnapshotTokenMapping(t *testing.T) {
 	cases := []struct {
 		name                                 string
@@ -109,27 +117,38 @@ func TestToSnapshotTokenMapping(t *testing.T) {
 		in, out, cacheRead, reasoning, total int64
 	}{
 		{
+			// The provider total covers input+tool+output+thoughts (290), so it
+			// stands as reported and cached is still subtracted from Input.
 			name:   "reported total wins and cached is subtracted from input",
-			tok:    tokenBlock{Input: 200, Output: 30, Cached: 40, Thoughts: 10, Tool: 50, Total: 260},
-			wantOK: true, in: 210, out: 30, cacheRead: 40, reasoning: 10, total: 260,
+			tok:    tokenBlock{Input: 200, Output: 30, Cached: 40, Thoughts: 10, Tool: 50, Total: 400},
+			wantOK: true, in: 210, out: 30, cacheRead: 40, reasoning: 10, total: 400,
 		},
 		{
-			name:   "derived total excludes cached",
+			// Real records total input+output+thoughts and leave tool out of it
+			// (see telemetryLine in raw_test.go). Those tool tokens are folded
+			// into Input, so the stored total is raised to cover them.
+			name:   "reported total below the components it stores is raised to them",
+			tok:    tokenBlock{Input: 200, Output: 30, Cached: 40, Thoughts: 10, Tool: 50, Total: 240},
+			wantOK: true, in: 210, out: 30, cacheRead: 40, reasoning: 10, total: 290,
+		},
+		{
+			name:   "cached is not added on top of the derived total",
 			tok:    tokenBlock{Input: 100, Output: 20, Cached: 90, Thoughts: 5},
 			wantOK: true, in: 10, out: 20, cacheRead: 90, reasoning: 5, total: 125,
 		},
 		{
+			// Input clamps, but the 15 tokens the record itemised are still
+			// itemised: the total reports them rather than the smaller 10.
 			name:   "cached larger than input+tool clamps Input to zero",
 			tok:    tokenBlock{Input: 10, Cached: 500, Tool: 5, Total: 10},
-			wantOK: true, in: 0, out: 0, cacheRead: 500, reasoning: 0, total: 10,
+			wantOK: true, in: 0, out: 0, cacheRead: 500, reasoning: 0, total: 15,
 		},
 		{
-			// Every negative counter clamps to zero, and the derived total is
-			// input+output+thoughts only: tool tokens reach Input but never the
-			// total, so a tool-only record totals zero.
-			name:   "negative counters clamp and the derived total excludes tool",
+			// Every negative counter clamps to zero, and tool tokens reach both
+			// Input and the total, so a tool-only record totals its tool tokens.
+			name:   "negative counters clamp and the derived total includes tool",
 			tok:    tokenBlock{Input: -5, Output: -7, Cached: -1, Thoughts: -2, Tool: 9, Total: -3},
-			wantOK: true, in: 9, out: 0, cacheRead: 0, reasoning: 0, total: 0,
+			wantOK: true, in: 9, out: 0, cacheRead: 0, reasoning: 0, total: 9,
 		},
 		{
 			name:   "all-zero record is dropped",
@@ -168,8 +187,80 @@ func TestToSnapshotTokenMapping(t *testing.T) {
 	}
 }
 
+// TestTotalCoversEveryComponentFoldedIntoFields is the invariant issue #49
+// broke: TotalTokens must account for every component the shape folds into the
+// snapshot's own token fields, so a stored row can never disagree with the
+// counts stored beside it. Tool tokens are folded into InputTokens, so a record
+// carrying nothing but tool tokens must total them, and adding tool tokens to a
+// record must move the total by exactly that many - with or without a
+// provider-reported total.
+//
+// Cache read is deliberately outside the invariant: tokens.cached is the slice
+// of tokens.input already counted there, so it is subtracted out of Input and
+// never added on top of the total.
+func TestTotalCoversEveryComponentFoldedIntoFields(t *testing.T) {
+	const n = 9
+
+	snapOf := func(t *testing.T, tok tokenBlock) model.AggregateSnapshot {
+		t.Helper()
+		snap, ok := agyShape.toSnapshot(rawRecord{ID: "r", Tokens: tok}, "/tmp/x.jsonl", fixedNow)
+		if !ok {
+			t.Fatalf("record %+v carries usage but was dropped", tok)
+		}
+		if sum := snap.InputTokens + snap.OutputTokens + snap.ReasoningTokens; snap.TotalTokens < sum {
+			t.Errorf("TotalTokens = %d, below the %d tokens held by the fields it covers (in=%d out=%d reasoning=%d)",
+				snap.TotalTokens, sum, snap.InputTokens, snap.OutputTokens, snap.ReasoningTokens)
+		}
+		return snap
+	}
+
+	// Each component that reaches a counting field, on its own: the total is
+	// exactly the tokens the record carries.
+	for _, tc := range []struct {
+		name string
+		tok  tokenBlock
+	}{
+		{"input only", tokenBlock{Input: n}},
+		{"output only", tokenBlock{Output: n}},
+		{"thoughts only", tokenBlock{Thoughts: n}},
+		{"tool only", tokenBlock{Tool: n}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if snap := snapOf(t, tc.tok); snap.TotalTokens != n {
+				t.Errorf("TotalTokens = %d, want %d (the only component this record carries)", snap.TotalTokens, n)
+			}
+		})
+	}
+
+	// Folding tool tokens into a record must move both InputTokens and the
+	// total by exactly that many, whether the total is derived or reported.
+	for _, tc := range []struct {
+		name string
+		base tokenBlock
+	}{
+		{"derived total", tokenBlock{Input: 100, Output: 20, Cached: 30, Thoughts: 5}},
+		{"reported total", tokenBlock{Input: 100, Output: 20, Cached: 30, Thoughts: 5, Total: 125}},
+	} {
+		t.Run("adding tool tokens moves the "+tc.name, func(t *testing.T) {
+			before := snapOf(t, tc.base)
+			with := tc.base
+			with.Tool = n
+			after := snapOf(t, with)
+			if got := after.InputTokens - before.InputTokens; got != n {
+				t.Errorf("InputTokens moved by %d, want %d", got, n)
+			}
+			if got := after.TotalTokens - before.TotalTokens; got != n {
+				t.Errorf("TotalTokens moved by %d, want %d: tool tokens reach InputTokens (%d) but not the total (%d)",
+					got, n, after.InputTokens, after.TotalTokens)
+			}
+		})
+	}
+}
+
 // TestRecordTotalOrdering covers the grouping key: total() reports the provider
-// total when positive, else the derived sum with negatives clamped.
+// total when it covers the components, else the derived sum with negatives
+// clamped. It must follow the same accounting toSnapshot stores, or the max
+// snapshot picked per id is not the one with the largest stored total.
 func TestRecordTotalOrdering(t *testing.T) {
 	cases := []struct {
 		name string
@@ -180,6 +271,8 @@ func TestRecordTotalOrdering(t *testing.T) {
 		{"derived when total absent", tokenBlock{Input: 10, Output: 20, Thoughts: 5, Cached: 77}, 35},
 		{"derived clamps negatives", tokenBlock{Input: -10, Output: 20, Thoughts: -5}, 20},
 		{"non-positive total falls back to derived", tokenBlock{Input: 4, Output: 6, Total: -1}, 10},
+		{"derived counts tool tokens", tokenBlock{Input: 10, Output: 20, Tool: 7}, 37},
+		{"reported total is raised to cover tool tokens", tokenBlock{Input: 10, Output: 20, Tool: 7, Total: 30}, 37},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,14 +389,25 @@ func TestIdentityFallbacks(t *testing.T) {
 	}
 }
 
-// TestParseTimeLayouts covers the timestamp helper directly.
-func TestParseTimeLayouts(t *testing.T) {
+// TestParseTimeRFC3339 covers the timestamp helper directly: an RFC3339 stamp
+// is normalised to UTC with its full precision kept, and anything else is the
+// zero time.
+//
+// It does NOT distinguish one layout constant from another, and no test can:
+// time.Parse accepts a fractional second under the plain time.RFC3339 layout,
+// so the fractional case below passes on that layout alone. That is why
+// parseTime has a single layout - a second, nanosecond-specific pass could
+// never be the one that succeeds.
+func TestParseTimeRFC3339(t *testing.T) {
 	if got := parseTime("2026-08-09T10:00:00Z"); got.Format(time.RFC3339) != "2026-08-09T10:00:00Z" {
-		t.Errorf("RFC3339 parse = %v", got)
+		t.Errorf("whole-second parse = %v", got)
 	}
+	// Offset and sub-second digits both have to survive: the offset is what
+	// makes the stamp comparable across sources, and truncating the fraction
+	// would collapse turns logged inside the same second onto one timestamp.
 	got := parseTime("2026-08-09T12:00:00.123456789+02:00")
 	if want := time.Date(2026, 8, 9, 10, 0, 0, 123456789, time.UTC); !got.Equal(want) || got.Location() != time.UTC {
-		t.Errorf("RFC3339Nano parse = %v (%v), want %v UTC", got, got.Location(), want)
+		t.Errorf("fractional-second parse = %v (%v), want %v UTC", got, got.Location(), want)
 	}
 	for _, s := range []string{"", "   ", "not a time", "2026-08-09"} {
 		if ts := parseTime(s); !ts.IsZero() {

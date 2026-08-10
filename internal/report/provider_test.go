@@ -66,10 +66,15 @@ func TestRenderTableLabelsEmptyProviderUnknown(t *testing.T) {
 	t.Errorf("no row starts with %q:\n%s", unknownLabel, out)
 }
 
-// TestSummaryJSONLabelsEmptyProviderUnknown holds --json to the same rule as
-// the table beside it, and pins that labelling the copy does not reach back
-// into the summary the cost fold-back matches on.
-func TestSummaryJSONLabelsEmptyProviderUnknown(t *testing.T) {
+// TestSummaryJSONSplitsRawProviderFromItsLabel is the issue #50 contract: the
+// machine surface emits what the LEDGER holds (an unnamed provider stays the
+// empty string, exactly as the CSV and the JSON event export write it) and
+// carries the human wording in a separate provider_label. Folding the label
+// into the value would make a provider literally named "unknown" and an absent
+// one indistinguishable, and would put the two JSON surfaces at odds about the
+// same fact. It also pins that building the payload does not reach back into
+// the summary the cost fold-back matches on.
+func TestSummaryJSONSplitsRawProviderFromItsLabel(t *testing.T) {
 	sum := providerSummary()
 	var buf bytes.Buffer
 	if err := WriteSummaryJSON(&buf, sum, nil); err != nil {
@@ -78,7 +83,11 @@ func TestSummaryJSONLabelsEmptyProviderUnknown(t *testing.T) {
 
 	var got struct {
 		Buckets []struct {
-			Keys map[string]string
+			Keys          map[string]string
+			ProviderLabel string `json:"provider_label"`
+		}
+		Totals struct {
+			ProviderLabel string `json:"provider_label"`
 		}
 	}
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
@@ -87,22 +96,66 @@ func TestSummaryJSONLabelsEmptyProviderUnknown(t *testing.T) {
 	if len(got.Buckets) != 2 {
 		t.Fatalf("buckets = %d, want 2\n%s", len(got.Buckets), buf.String())
 	}
-	if got.Buckets[0].Keys["provider"] != unknownLabel {
-		t.Errorf("json empty provider = %q, want %q", got.Buckets[0].Keys["provider"], unknownLabel)
+
+	// Machine half: the raw stored values, empty stays empty.
+	if v, ok := got.Buckets[0].Keys["provider"]; !ok || v != "" {
+		t.Errorf("json provider = %q (present=%v), want the raw empty value the ledger holds", v, ok)
 	}
 	if got.Buckets[1].Keys["provider"] != model.ProviderAnthropic {
 		t.Errorf("json named provider = %q, want %q", got.Buckets[1].Keys["provider"], model.ProviderAnthropic)
 	}
+
+	// Human half: the label the table prints, in its own field.
+	if got.Buckets[0].ProviderLabel != unknownLabel {
+		t.Errorf("provider_label = %q, want %q", got.Buckets[0].ProviderLabel, unknownLabel)
+	}
+	if got.Buckets[1].ProviderLabel != model.ProviderAnthropic {
+		t.Errorf("provider_label = %q, want %q", got.Buckets[1].ProviderLabel, model.ProviderAnthropic)
+	}
+	// The TOTAL bucket spans every provider, so it has nothing to label.
+	if got.Totals.ProviderLabel != "" {
+		t.Errorf("totals provider_label = %q, want it absent", got.Totals.ProviderLabel)
+	}
+
 	if sum.Buckets[0].Keys["provider"] != "" {
 		t.Errorf("rendering rewrote the stored key to %q; the cost fold-back matches on the stored value",
 			sum.Buckets[0].Keys["provider"])
 	}
+
+	// The human table is unchanged by the split: it still says "unknown".
+	if out := RenderTable(sum, Opt{}); !strings.Contains(out, unknownLabel) {
+		t.Errorf("table stopped labelling the empty provider %q:\n%s", unknownLabel, out)
+	}
 }
 
-// TestEventsCSVKeepsEmptyProviderRaw records the deliberate asymmetry: the CSV
-// export mirrors the ledger, so an unknown provider stays an empty field there
-// while the table and JSON label it. Every other export column already follows
-// that rule (an unpriced cost is empty, not "0").
+// TestSummaryJSONOmitsProviderLabelWithoutProviderGrouping: the label answers a
+// question only a provider-grouped summary asks. A summary grouped by anything
+// else must not sprout an empty field that a consumer could read as "the
+// provider is blank".
+func TestSummaryJSONOmitsProviderLabelWithoutProviderGrouping(t *testing.T) {
+	sum := &store.Summary{
+		GroupBy: []string{"tool"},
+		Buckets: []store.Bucket{{
+			Keys:        map[string]string{"tool": model.ToolOpenCode},
+			OrderedKeys: []string{"tool"},
+			Events:      1,
+			Total:       10,
+		}},
+		Totals: store.Bucket{Events: 1, Total: 10},
+	}
+	var buf bytes.Buffer
+	if err := WriteSummaryJSON(&buf, sum, nil); err != nil {
+		t.Fatalf("WriteSummaryJSON: %v", err)
+	}
+	if strings.Contains(buf.String(), "provider_label") {
+		t.Errorf("tool-grouped summary carries provider_label:\n%s", buf.String())
+	}
+}
+
+// TestEventsCSVKeepsEmptyProviderRaw: the CSV export mirrors the ledger, so an
+// unknown provider stays an empty field - the same value the JSON summary now
+// emits, and the same rule every other export column already follows (an
+// unpriced cost is empty, not "0"). Only the rendered table says "unknown".
 func TestEventsCSVKeepsEmptyProviderRaw(t *testing.T) {
 	evs := []model.UsageEvent{{
 		Tool:      model.ToolOpenCode,

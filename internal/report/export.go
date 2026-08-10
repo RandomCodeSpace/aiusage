@@ -37,8 +37,9 @@ var csvHeader = []string{
 	"kind",
 	// v3 columns, appended so existing consumers keep their positions.
 	// provider is the raw stored value and stays empty when the source never
-	// named one: the table and the JSON summary label that "unknown", an
-	// export does not relabel the ledger.
+	// named one: only the rendered table labels that "unknown", and the JSON
+	// summary carries the label in its own provider_label field. A machine
+	// surface does not relabel the ledger.
 	// cost_micro_usd is the exact stored integer (millionths of USD) and
 	// cost_usd the same value as a decimal string; BOTH are empty for an
 	// unpriced event, never "0" — export mirrors the ledger, so it does not
@@ -64,9 +65,16 @@ type summaryJSON struct {
 
 // bucketJSON is one summary bucket plus its resolved cost. The embedded bucket
 // keeps CostMicroUSD as the exact stamped sum and UnpricedEvents as the count
-// behind it; the three added keys say what the table's Cost column says.
+// behind it; the three added cost keys say what the table's Cost column says.
 type bucketJSON struct {
 	store.Bucket
+	// ProviderLabel is the human string the table prints in the provider
+	// column: the stored value, or "unknown" when the ledger holds the empty
+	// string. Keys stays exactly what the ledger holds - a consumer must be
+	// able to tell a provider literally named "unknown" from an absent one -
+	// so the label lives here instead of overwriting the value. Omitted when
+	// the summary does not group by provider: there is nothing to label.
+	ProviderLabel string `json:"provider_label,omitempty"`
 	// DisplayCostMicroUSD is CostMicroUSD plus a valuation, at the CURRENT
 	// price table, of the rows that carry no stamped cost — the number the
 	// table renders.
@@ -126,30 +134,25 @@ func bucketCost(costs *Costs, i int, b store.Bucket) Cost {
 }
 
 func bucketPayload(b store.Bucket, c Cost) bucketJSON {
-	// JSON is a display surface, so it labels an unknown provider exactly as
-	// the table does. The keys are copied rather than edited in place: the same
-	// summary feeds the cost fold-back, which matches buckets on the STORED
-	// values.
-	b.Keys = displayKeys(b.Keys)
+	// Keys is emitted untouched: JSON is a machine surface and must report what
+	// the ledger holds. The human wording travels beside it in ProviderLabel.
 	return bucketJSON{
 		Bucket:              b,
+		ProviderLabel:       providerLabel(b.Keys),
 		DisplayCostMicroUSD: c.MicroUSD,
 		CostApproximate:     c.Approximate,
 		CostKnown:           c.Known,
 	}
 }
 
-// displayKeys copies a bucket's grouping keys with the display rules applied.
-// A nil map stays nil so an ungrouped bucket keeps emitting a JSON null.
-func displayKeys(keys map[string]string) map[string]string {
-	if keys == nil {
-		return nil
+// providerLabel returns the human string for a bucket's provider dimension, or
+// "" when the summary does not group by provider (the TOTAL bucket included).
+func providerLabel(keys map[string]string) string {
+	val, ok := keys["provider"]
+	if !ok {
+		return ""
 	}
-	out := make(map[string]string, len(keys))
-	for dim, val := range keys {
-		out[dim] = displayKey(dim, val)
-	}
-	return out
+	return displayKey("provider", val)
 }
 
 // WriteEventsJSON writes a slice of usage events as indented JSON. Raw is
