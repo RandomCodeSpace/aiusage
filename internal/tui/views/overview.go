@@ -95,6 +95,10 @@ type kpiSpec struct {
 	spark              string // pre-rendered sparkline row; "" → none (total/events are never graphed)
 	style              lipgloss.Style
 	shareVal, shareTot int64 // shareTot>0 shows a share %
+	// fmtVal overrides the default token humanizer. Cost is not a token count,
+	// so it carries its own renderer rather than being humanized into a bare
+	// number with no currency.
+	fmtVal func(int64) string
 }
 
 // overviewKPIs renders the read-only KPI strip: one tile per token component
@@ -111,6 +115,13 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 	// (memoized sparklines key on their rendered width). How many tiles fit
 	// across, given a minimum useful tile width + 1-col gutters.
 	nspec := len(c.Comp) + 2
+	// The cost tile is counted here even though it may not survive the fit check
+	// below: the per-row cap is what decides whether a sixth tile can share the
+	// existing row or has to wrap into a new one, so excluding it would wrap it
+	// at every width and it would never appear at all.
+	if c.Money != nil {
+		nspec++
+	}
 	const minTileW = 16
 	per := (width + 1) / (minTileW + 1)
 	if per > nspec {
@@ -150,6 +161,32 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout) string {
 		kpiSpec{label: "total", foot: "tokens", value: d.Totals.Total, prev: d.Prev.Total, style: c.Subtle},
 		kpiSpec{label: "events", foot: "requests", value: d.Totals.Events, prev: d.Prev.Events, style: c.Subtle},
 	)
+	// The cost tile rides along only when it fits in the rows the strip already
+	// occupies. It is the newest tile and the hero is the reason the screen
+	// exists: at 90 columns a sixth tile wraps to a second row and takes five
+	// rows off the chart, which is too much to pay for a number `summary`
+	// prints. Where there is slack — 120 columns and up, the common case — it
+	// costs nothing.
+	if c.Money != nil && (len(specs)+1+per-1)/per == (len(specs)+per-1)/per {
+		// A range holding rows nothing could price understates the bill, so the
+		// figure is marked approximate rather than presented as exact. The foot
+		// says which of the two the tile is showing.
+		approx := d.Totals.UnpricedEvents > 0
+		// Nothing in range could be priced: show the unpriced mark, not a zero.
+		known := d.Totals.CostMicroUSD > 0 || d.Totals.UnpricedEvents == 0
+		foot := "spend"
+		if approx {
+			foot = "spend (partial)"
+		}
+		specs = append(specs, kpiSpec{
+			label:  "cost",
+			foot:   foot,
+			value:  d.Totals.CostMicroUSD,
+			prev:   d.Prev.CostMicroUSD,
+			style:  c.Subtle,
+			fmtVal: func(v int64) string { return c.Money(v, approx, known) },
+		})
+	}
 
 	tiles := make([]string, len(specs))
 	for i, s := range specs {
@@ -204,6 +241,9 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 	}
 
 	num := c.Humanize(s.value)
+	if s.fmtVal != nil {
+		num = s.fmtVal(s.value)
+	}
 	deltaTxt, dir := "·", 0
 	if c.Delta != nil {
 		deltaTxt, dir = c.Delta(s.value, s.prev)

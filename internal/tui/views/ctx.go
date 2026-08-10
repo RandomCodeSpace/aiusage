@@ -65,12 +65,18 @@ type Ctx struct {
 	LeverageFloor int64
 
 	// Formatting helpers.
-	Humanize   func(int64) string
-	PadLeft    func(string, int) string
-	PadRight   func(string, int) string
-	Truncate   func(string, int) string
-	Percent    func(value, total int64) string
-	Delta      func(cur, prev int64) (text string, dir int)
+	Humanize func(int64) string
+	PadLeft  func(string, int) string
+	PadRight func(string, int) string
+	Truncate func(string, int) string
+	Percent  func(value, total int64) string
+	Delta    func(cur, prev int64) (text string, dir int)
+	// Money renders a micro-USD amount — model.FormatCost, shared with the
+	// report surfaces so the two cannot drift. approximate marks a figure the
+	// ledger cannot state exactly (a range holding rows nothing priced is a
+	// floor, not a bill); known is false when nothing could be priced at all.
+	// Nil renders no cost tile rather than a bare number with no currency.
+	Money      func(microUSD int64, approximate, known bool) string
 	ToolAccent func(tool string) compat.AdaptiveColor
 	ToolGlyph  func(tool string) string
 

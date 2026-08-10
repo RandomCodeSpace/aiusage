@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2/compat"
 	zone "github.com/lrstanley/bubblezone/v2"
 
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/sysmon"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
@@ -324,6 +325,7 @@ func buildCtx(th Theme, zm *zone.Manager, leverageFloor int64) views.Ctx {
 		Truncate:   Truncate,
 		Percent:    Percent,
 		Delta:      Delta,
+		Money:      model.FormatCost,
 		ToolAccent: th.ToolAccent,
 		ToolGlyph:  th.ToolGlyph,
 		Zone:       zm,

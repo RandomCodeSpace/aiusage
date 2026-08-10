@@ -108,10 +108,10 @@ func TestResolveCostsUnpriceableStaysDash(t *testing.T) {
 
 	costs := ResolveCosts(sum, groups, fixedPricer{miss: map[string]bool{"mystery-model": true}})
 	if got := costs.Buckets[0].String(); got != "-" {
-		t.Errorf("unpriceable bucket = %q, want %q", got, unpricedMark)
+		t.Errorf("unpriceable bucket = %q, want %q", got, model.UnpricedMark)
 	}
 	if got := costs.Totals.String(); got != "-" {
-		t.Errorf("unpriceable total = %q, want %q", got, unpricedMark)
+		t.Errorf("unpriceable total = %q, want %q", got, model.UnpricedMark)
 	}
 }
 
@@ -253,7 +253,7 @@ func TestRenderTableCostUngrouped(t *testing.T) {
 // mismatch: a short cost slice must degrade to the unpriced marker, not panic.
 func TestRenderTableCostShorterThanBuckets(t *testing.T) {
 	out := RenderTable(sampleSummary(), Opt{Costs: &Costs{Buckets: nil, Totals: Cost{}}})
-	if !strings.Contains(out, unpricedMark) {
+	if !strings.Contains(out, model.UnpricedMark) {
 		t.Errorf("short cost slice did not render the unpriced marker\n%s", out)
 	}
 }

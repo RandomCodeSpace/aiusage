@@ -287,7 +287,7 @@ func breakdownLegend(used map[string]bool) string {
 // panic mid-render).
 func costCell(costs []Cost, i int) string {
 	if i < 0 || i >= len(costs) {
-		return unpricedMark
+		return model.UnpricedMark
 	}
 	return costs[i].String()
 }

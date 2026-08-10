@@ -1,18 +1,12 @@
 package report
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/pricing"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
-
-// unpricedMark is what a bucket renders when nothing in it could be priced.
-// Deliberately not "$0.00": a missing price is not a free request. ASCII so the
-// column survives pipes, dumb terminals and CSV round trips.
-const unpricedMark = "-"
 
 // Cost is the resolved display cost of one bucket.
 type Cost struct {
@@ -24,7 +18,7 @@ type Cost struct {
 	// exact by being added to an exact number.
 	Approximate bool
 	// Known is false when nothing in the bucket could be priced at all. Such a
-	// bucket renders as unpricedMark rather than a zero.
+	// bucket renders as model.UnpricedMark rather than a zero.
 	Known bool
 }
 
@@ -33,27 +27,7 @@ type Cost struct {
 // unpriced. Sub-cent amounts widen to four decimals, and anything smaller than
 // that renders as "<$0.0001" — a real charge must never print as $0.00.
 func (c Cost) String() string {
-	if !c.Known {
-		return unpricedMark
-	}
-	prefix := ""
-	if c.Approximate {
-		prefix = "~"
-	}
-	if c.MicroUSD > 0 && c.MicroUSD < 100 {
-		return prefix + "<$0.0001"
-	}
-	return prefix + "$" + formatUSD(c.MicroUSD)
-}
-
-// formatUSD renders micro-USD as a dollar amount, widening the precision below
-// a cent so small-but-real costs stay visible.
-func formatUSD(micro int64) string {
-	usd := float64(micro) / 1e6
-	if micro < 10_000 && micro > 0 {
-		return fmt.Sprintf("%.4f", usd)
-	}
-	return fmt.Sprintf("%.2f", usd)
+	return model.FormatCost(c.MicroUSD, c.Approximate, c.Known)
 }
 
 // Costs holds the resolved cost per summary bucket (aligned by index with
