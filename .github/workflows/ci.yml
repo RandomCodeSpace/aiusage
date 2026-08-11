@@ -1,11 +1,24 @@
 name: CI
 
 # Build, vet, format-check, test (with coverage), staticcheck, race detection,
-# SonarCloud analysis and vulnerability scan on every push to main and every
-# pull request. Pure-Go, CGO disabled to match the release build; the race job
-# re-enables CGO. The weekly schedule runs ONLY govulncheck (every other job
-# carries an event_name guard, and sonar is skipped through its build-test
-# dependency).
+# web UI build, SonarCloud analysis and vulnerability scan on every push to main
+# and every pull request. Pure-Go, CGO disabled to match the release build; the
+# race job re-enables CGO. The weekly schedule runs ONLY govulncheck (every
+# other job carries an event_name guard, and sonar is skipped through its
+# build-test dependency).
+#
+# Every Go gate runs TWICE: once plain, once with -tags webui. An untagged
+# build, vet, staticcheck, test or govulncheck never loads a //go:build webui
+# file, so without the second pass a compile error, a vet finding, a failing
+# test or a reachable vulnerability behind the tag reaches a release tag
+# unnoticed - the release binary is the tagged one. gofmt is tag-agnostic, so
+# it runs once.
+#
+# The tagged passes need internal/web/dist to exist (embed_webui.go does
+# //go:embed all:dist). CI plants a placeholder file there rather than running
+# the Vite build: what the tagged passes check is the Go code behind the tag,
+# not the assets. The real UI build is its own job (webui, below) and the real
+# embed happens in release.yml.
 
 on:
   push:
@@ -70,6 +83,31 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
+      # --- same gates again, with the webui tag set ---
+
+      - name: placeholder web UI assets
+        run: |
+          mkdir -p internal/web/dist
+          printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+
+      - name: go vet (webui tag)
+        env:
+          CGO_ENABLED: "0"
+        run: go vet -tags webui ./...
+
+      - name: build (webui tag)
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags webui ./...
+
+      # No coverage profile here: the untagged run above is what SonarCloud
+      # consumes, and a second profile would need a second report path in
+      # sonar-project.properties.
+      - name: test (webui tag)
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags webui ./... -count=1
+
   staticcheck:
     name: staticcheck
     if: github.event_name != 'schedule'
@@ -80,6 +118,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: placeholder web UI assets
+        run: |
+          mkdir -p internal/web/dist
+          printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
       # Pinned so a new staticcheck release cannot break CI on unchanged code.
       # v0.7.0 is the 2026.1 release; bump deliberately, alongside Go upgrades.
       # U1000 (unused code) is in the default check set, so dead-code
@@ -90,6 +132,9 @@ jobs:
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           staticcheck ./...
+          # The untagged pass above cannot see //go:build webui files at all,
+          # so U1000 and friends never look at the embedded-UI code.
+          staticcheck -tags webui ./...
 
   race:
     name: race detector
@@ -108,6 +153,52 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -count=1 ./...
+
+      - name: placeholder web UI assets
+        run: |
+          mkdir -p internal/web/dist
+          printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+
+      # The embedded-UI server has its own goroutines (live push, websockets),
+      # and they only exist in a tagged build.
+      - name: go test -race (webui tag)
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -tags webui -count=1 ./...
+
+  webui:
+    name: web UI
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          # Relative to the repository root: setup-node is an action, so the
+          # working-directory default above does not apply to it.
+          cache-dependency-path: webui/package-lock.json
+
+      # ci, not install: the lockfile is the spec, and a drifting dependency
+      # tree should fail here rather than be silently rewritten.
+      - name: npm ci
+        run: npm ci
+
+      # `npm run build` typechecks too (tsc --noEmit && vite build). Running it
+      # separately first costs seconds and names the failure: type error vs
+      # bundler error.
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: build
+        run: npm run build
 
   sonar:
     name: SonarCloud scan
@@ -160,10 +251,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # The tagged pass below needs internal/web/dist to exist: embed_webui.go
+      # does //go:embed all:dist and will not compile without it. Same
+      # placeholder the other jobs plant.
+      - name: placeholder web UI assets
+        run: |
+          mkdir -p internal/web/dist
+          printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+
       - name: govulncheck
         # govulncheck reports only vulns actually reachable from this code.
         # The binary is pinned for reproducibility; the vulnerability database
         # is fetched live either way, so pinning loses nothing.
+        #
+        # Reachability is computed per build configuration, so the untagged run
+        # cannot see a single line behind //go:build webui - and the embedded-UI
+        # code is the half that speaks HTTP and WebSocket to the network. The
+        # tagged pass is where a vulnerable net/http path would actually show up.
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
+          govulncheck -tags webui ./...
