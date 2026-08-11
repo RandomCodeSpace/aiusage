@@ -87,8 +87,9 @@ jobs:
 
       - name: placeholder web UI assets
         run: |
-          mkdir -p internal/web/dist
+          mkdir -p internal/web/dist/assets
           printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+          printf '/* placeholder */\n' > internal/web/dist/assets/placeholder.css
 
       - name: go vet (webui tag)
         env:
@@ -120,8 +121,9 @@ jobs:
           cache: true
       - name: placeholder web UI assets
         run: |
-          mkdir -p internal/web/dist
+          mkdir -p internal/web/dist/assets
           printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+          printf '/* placeholder */\n' > internal/web/dist/assets/placeholder.css
       # Pinned so a new staticcheck release cannot break CI on unchanged code.
       # v0.7.0 is the 2026.1 release; bump deliberately, alongside Go upgrades.
       # U1000 (unused code) is in the default check set, so dead-code
@@ -156,8 +158,9 @@ jobs:
 
       - name: placeholder web UI assets
         run: |
-          mkdir -p internal/web/dist
+          mkdir -p internal/web/dist/assets
           printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+          printf '/* placeholder */\n' > internal/web/dist/assets/placeholder.css
 
       # The embedded-UI server has its own goroutines (live push, websockets),
       # and they only exist in a tagged build.
@@ -256,8 +259,9 @@ jobs:
       # placeholder the other jobs plant.
       - name: placeholder web UI assets
         run: |
-          mkdir -p internal/web/dist
+          mkdir -p internal/web/dist/assets
           printf '<!doctype html><title>aiusage</title>\n' > internal/web/dist/index.html
+          printf '/* placeholder */\n' > internal/web/dist/assets/placeholder.css
 
       - name: govulncheck
         # govulncheck reports only vulns actually reachable from this code.
