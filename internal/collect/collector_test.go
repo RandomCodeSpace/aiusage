@@ -38,6 +38,7 @@ type fakeStore struct {
 	state       map[string]model.AggregateSnapshot // key: tool|key
 	checkpoints map[string]model.SourceCheckpoint  // key: tool|sourcePath
 	upserts     int                                // standalone UpsertState calls (snapshot path must not use it)
+	ensureCalls int                                // EnsureRollup calls (one per cycle)
 }
 
 var _ store.Store = (*fakeStore)(nil)
@@ -191,13 +192,42 @@ func (s *fakeStore) UnpricedGroups(_ context.Context, _ store.Filter) ([]store.U
 	return out, nil
 }
 
-func (s *fakeStore) ListEvents(_ context.Context, _ store.Filter) ([]model.UsageEvent, error) {
+func (s *fakeStore) ListEvents(_ context.Context, _ store.Filter, _ ...store.ListOption) ([]model.UsageEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]model.UsageEvent, len(s.events))
 	copy(out, s.events)
 	return out, nil
 }
+
+// SummarizeRollup is unreachable through the collector; the fake keeps no
+// rollup, so it answers from the same events Summarize reads. It exists so the
+// fake still satisfies store.Store.
+func (s *fakeStore) SummarizeRollup(ctx context.Context, f store.Filter) (*store.RollupSummary, error) {
+	sum, err := s.Summarize(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	return &store.RollupSummary{
+		GroupBy: sum.GroupBy,
+		Buckets: sum.Buckets,
+		Totals:  sum.Totals,
+		Since:   f.Since,
+		Until:   f.Until,
+	}, nil
+}
+
+// EnsureRollup / RebuildRollup: the fake derives nothing, so there is nothing
+// to fall out of step. ensureCalls counts the collector's calls so a test can
+// pin that a cycle checks the rollup before it appends.
+func (s *fakeStore) EnsureRollup(context.Context) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureCalls++
+	return false, nil
+}
+
+func (s *fakeStore) RebuildRollup(context.Context) error { return nil }
 
 func (s *fakeStore) SourceStats(context.Context) ([]store.SourceStat, error) { return nil, nil }
 func (s *fakeStore) Stats(context.Context) (store.DBStats, error)            { return store.DBStats{}, nil }

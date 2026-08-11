@@ -73,6 +73,12 @@ type CycleStats struct {
 	Snapshots      int      // aggregate snapshots observed
 	Errors         []string // non-fatal per-adapter / per-source errors
 
+	// RollupRebuilt reports that the pass found the derived rollup out
+	// of step with the ledger and rebuilt it before collecting. Expected once,
+	// on the first pass after the v4 migration; anywhere else it means a write
+	// reached the ledger without its rollup delta and is worth noticing.
+	RollupRebuilt bool
+
 	// Canceled reports that the context was cancelled mid-pass and the cycle
 	// stopped early. Every count above is then partial — in particular the
 	// adapter and source being processed are already counted — so a truncated
@@ -105,6 +111,21 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 
 	var stats CycleStats
 	observedAt := nowFn()
+
+	// Before anything is appended. The rollup's deltas ride the event
+	// transactions, so the only way it can fall behind is a ledger that grew
+	// without this code running: the v4 migration creates it empty, and that is
+	// the case this call exists for. Doing it first means every reader sees a
+	// consistent summary for the whole pass rather than after it, and the pass's
+	// own deltas land on a rollup that is already in step.
+	//
+	// Non-fatal: collection is the daemon's job and must not be held hostage to
+	// a derived summary. A failure is reported and the pass continues.
+	if rebuilt, err := st.EnsureRollup(ctx); err != nil {
+		stats.Errors = append(stats.Errors, fmt.Sprintf("rollup: %v", err))
+	} else {
+		stats.RollupRebuilt = rebuilt
+	}
 
 	// One refresh attempt per cycle, before anything is stamped, so a stamped
 	// cost uses the newest table this machine can reach. The ladder throttles

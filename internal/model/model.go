@@ -125,6 +125,13 @@ const (
 // UsageEvent is one immutable observed usage record. Stored append-only and
 // deduplicated on DedupKey. All token counts are non-negative.
 type UsageEvent struct {
+	// ID is the ledger row id (usage_events.id), set by event listing and left
+	// zero on an event that has not been read back from the store. It is the
+	// keyset-pagination handle: ids are AUTOINCREMENT, so they never repeat and
+	// their order agrees with insertion order. It stays out of the serialised
+	// event shape (json:"-") because it is storage identity rather than
+	// observed usage, and the export key set is a pinned contract.
+	ID    int64  `json:"-"`
 	Tool  string // agent CLI id (ToolClaudeCode, ...) — categorisation dim
 	Model string // model id — categorisation dim
 	// Provider is the billing identity behind the request (ProviderAnthropic,

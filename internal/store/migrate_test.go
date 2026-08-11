@@ -198,8 +198,8 @@ func TestMigrateV2ToV3AddsCostColumns(t *testing.T) {
 	defer st.Close()
 
 	v, err := readSchemaVersion(ctx, st.db)
-	if err != nil || v != 3 {
-		t.Fatalf("post-migration version=%d err=%v want 3,nil", v, err)
+	if err != nil || v != SchemaVersion {
+		t.Fatalf("post-migration version=%d err=%v want %d,nil", v, err, SchemaVersion)
 	}
 	assertV3Columns(t, st)
 }
@@ -322,6 +322,16 @@ CREATE TABLE source_checkpoints (
   PRIMARY KEY (tool, source_path)
 );`
 
+// legacyCostDDL adds the four cost/provider columns exactly as the v3
+// migration appended them, building a v3 database on top of the v2 one. It is
+// spelled as ALTERs, not a wider CREATE, so the column ORDER matches what a
+// migrated v3 file really has.
+const legacyCostDDL = `
+ALTER TABLE usage_events ADD COLUMN provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_events ADD COLUMN service_tier TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_events ADD COLUMN cost_micro_usd INTEGER;
+ALTER TABLE usage_events ADD COLUMN price_source TEXT NOT NULL DEFAULT '';`
+
 // legacyDB writes a database at the given historical schema version, holding
 // one usage row, and returns its path. It never goes through Open, so the file
 // is exactly what the older binary would have left behind.
@@ -333,6 +343,9 @@ func legacyDB(t *testing.T, version int) string {
 	ddl := legacyDBSchema
 	if version >= 2 {
 		ddl += legacyCheckpointsDDL
+	}
+	if version >= 3 {
+		ddl += legacyCostDDL
 	}
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatalf("create v%d schema: %v", version, err)

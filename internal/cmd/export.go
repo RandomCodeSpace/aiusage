@@ -71,7 +71,13 @@ func runExport(c *cobra.Command, o exportOpts) error {
 	}
 	defer st.Close()
 
-	evs, err := st.ListEvents(cmdContext(c), store.Filter{Since: since, Until: until})
+	// The raw column is projected only for --include-raw: it is the bulk of the
+	// ledger's bytes and every other consumer discards it.
+	var listOpts []store.ListOption
+	if o.includeRaw {
+		listOpts = append(listOpts, store.WithRaw())
+	}
+	evs, err := st.ListEvents(cmdContext(c), store.Filter{Since: since, Until: until}, listOpts...)
 	if err != nil {
 		return fmt.Errorf("list events: %w", err)
 	}

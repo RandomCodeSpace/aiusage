@@ -283,7 +283,9 @@ func TestNoRawConfigStoresNoPayload(t *testing.T) {
 	}
 	defer st.Close()
 
-	evs, err := st.ListEvents(t.Context(), store.Filter{})
+	// WithRaw, or the assertion would pass on the projection rather than on
+	// what privacy.no_raw actually stored.
+	evs, err := st.ListEvents(t.Context(), store.Filter{}, store.WithRaw())
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -316,7 +318,9 @@ func TestDefaultRawIsUsageObjectOnly(t *testing.T) {
 	}
 	defer st.Close()
 
-	evs, err := st.ListEvents(t.Context(), store.Filter{})
+	// WithRaw: this asserts on what was STORED, which the default projection
+	// deliberately no longer carries.
+	evs, err := st.ListEvents(t.Context(), store.Filter{}, store.WithRaw())
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}

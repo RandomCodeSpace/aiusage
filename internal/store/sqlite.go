@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -25,12 +26,17 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // SQLite is the concrete append-only store backed by modernc.org/sqlite.
 type SQLite struct {
 	db   *sql.DB
 	path string
+	// readOnly marks a handle opened by OpenReadOnly. SQLite would refuse the
+	// writes anyway (mode=ro); the flag makes the refusal this package's own,
+	// so a read-only consumer fails on the method it called rather than on a
+	// driver error three layers down.
+	readOnly bool
 }
 
 var _ Store = (*SQLite)(nil)
@@ -71,6 +77,64 @@ func Open(path string) (*SQLite, error) {
 	restrictPerms(path)
 
 	return &SQLite{db: db, path: path}, nil
+}
+
+// OpenReadOnly opens an EXISTING database for reading only (issue #60): the
+// connection is mode=ro, no schema is created, no migration is run, and no file
+// mode is touched. It is what a serving process gets, so "this process cannot
+// write the ledger" is true by construction rather than by the append-only
+// triggers being the last line of defence.
+//
+// A schema version that differs from this binary's in EITHER direction is
+// refused. Migrating would be a write, and a reader that quietly serves a
+// schema it does not understand is worse than one that will not start.
+func OpenReadOnly(path string) (*SQLite, error) {
+	if path == "" {
+		return nil, fmt.Errorf("store: empty database path")
+	}
+	// No journal_mode pragma: WAL is a property of the file, and setting it on
+	// a read-only connection fails. busy_timeout still matters - readers wait
+	// out a writer's commit instead of erroring.
+	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %s read-only: %w", path, err)
+	}
+
+	ctx := context.Background()
+	hasMeta, err := tableExists(ctx, db, "schema_meta")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	version := 0
+	if hasMeta {
+		version, err = readSchemaVersion(ctx, db)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: read schema version: %w", err)
+		}
+	}
+	if version != SchemaVersion {
+		db.Close()
+		return nil, fmt.Errorf(
+			"store: %s records schema v%d, this binary's is v%d; a read-only handle never migrates, so open it read-write once (or run a matching aiusage build) before serving it",
+			path, version, SchemaVersion)
+	}
+
+	return &SQLite{db: db, path: path, readOnly: true}, nil
+}
+
+// errReadOnly is returned by every write path of a handle from OpenReadOnly.
+var errReadOnly = errors.New("store: this database handle is read-only")
+
+// writable guards the write paths. It is the whole reason SQLite carries the
+// flag: the refusal names the store, not the driver.
+func (s *SQLite) writable() error {
+	if s.readOnly {
+		return errReadOnly
+	}
+	return nil
 }
 
 // restrictPerms chmods the DB and its WAL/SHM sidecars to 0600. Missing
@@ -115,6 +179,9 @@ func (s *SQLite) InsertEvents(ctx context.Context, events []model.UsageEvent) (i
 	if len(events) == 0 {
 		return 0, nil
 	}
+	if err := s.writable(); err != nil {
+		return 0, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("store: begin tx: %w", err)
@@ -139,6 +206,14 @@ func (s *SQLite) InsertEvents(ctx context.Context, events []model.UsageEvent) (i
 // failures are skipped (a failed statement does not abort the SQLite
 // transaction) and summarised in skipErr; err is reserved for failures of the
 // batch itself, after which the transaction must not be committed.
+//
+// The derived rollup's delta is written here, from the rows that were ACTUALLY
+// inserted (dedup collisions contribute nothing), inside the caller's
+// transaction. Every event that reaches the ledger passes through this
+// function, so that placement is what makes "a crash cannot land events
+// without the matching rollup delta" true rather than aspirational. A rollup
+// failure is returned as err, not skipErr: the batch must roll back, since
+// committing events whose delta was lost is exactly the state being prevented.
 func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) (inserted int, skipErr, err error) {
 	if len(events) == 0 {
 		return 0, nil, nil
@@ -161,6 +236,7 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 	var (
 		skipped   int
 		firstSkip error
+		roll      rollupDelta
 	)
 	skip := func(rowErr error) {
 		skipped++
@@ -194,7 +270,15 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
+			id, idErr := res.LastInsertId()
+			if idErr != nil {
+				return inserted, nil, fmt.Errorf("store: row id of event %s: %w", e.DedupKey, idErr)
+			}
+			roll.add(e, id)
 		}
+	}
+	if err := roll.apply(ctx, tx); err != nil {
+		return inserted, nil, err
 	}
 	if skipped > 0 {
 		return inserted, fmt.Errorf("store: skipped %d of %d event(s); first: %w", skipped, len(events), firstSkip), nil
@@ -213,6 +297,9 @@ var applySnapshotFault func() error
 // The checkpoint upsert shares the state write's condition: a collided delta
 // stays re-derivable only while neither baseline nor checkpoint advances.
 func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
+	if err := s.writable(); err != nil {
+		return 0, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("store: begin tx: %w", err)
@@ -257,6 +344,9 @@ func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, s
 func (s *SQLite) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
 	if len(events) == 0 && cp == nil {
 		return 0, nil
+	}
+	if err := s.writable(); err != nil {
+		return 0, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -373,6 +463,9 @@ func (s *SQLite) LastState(ctx context.Context, tool, key string) (*model.Aggreg
 // UpsertState records the latest observed counters for (tool, key), replacing
 // any previous value. This is mutable accumulator state, not history.
 func (s *SQLite) UpsertState(ctx context.Context, st model.AggregateSnapshot) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	return upsertState(ctx, s.db, st)
 }
 
@@ -584,15 +677,49 @@ func (s *SQLite) distinctSessions(ctx context.Context, where string, args []any)
 	return n, nil
 }
 
-// ListEvents returns raw events matching Filter, ordered by event_time.
-func (s *SQLite) ListEvents(ctx context.Context, f Filter) ([]model.UsageEvent, error) {
+// eventColumnsNoRaw is ListEvents' default projection: every column of
+// usage_events EXCEPT raw. Naming them is not cosmetic - raw holds the audit
+// payload, and on a real ledger it is the overwhelming majority of the bytes
+// (rows appended before the allow-list landed carry whole transcript lines).
+// A SELECT that dragged it along would move tens of megabytes through the
+// driver on every call, for callers that discard it.
+const eventColumnsNoRaw = `id, tool, model, session_id, project, event_time_unix, observed_time_unix,
+	input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+	reasoning_tokens, total_tokens, request_id, message_id, source_path, kind,
+	dedup_key, provider, service_tier, cost_micro_usd, price_source`
+
+// ListEvents returns events matching Filter, ordered by event_time then row id
+// (a total order, which keyset pagination will need). Raw is excluded unless
+// WithRaw is passed - see Store.ListEvents. WithKeyset switches it to one page
+// of an id-ordered walk.
+func (s *SQLite) ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error) {
+	var lo listOptions
+	for _, fn := range opts {
+		fn(&lo)
+	}
 	where, args := buildWhere(f)
-	q := `SELECT tool, model, session_id, project, event_time_unix, observed_time_unix,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		reasoning_tokens, total_tokens, request_id, message_id, source_path, kind,
-		dedup_key, COALESCE(raw,''),
-		provider, service_tier, cost_micro_usd, price_source
-		FROM usage_events` + where + ` ORDER BY event_time_unix, id`
+	cols := eventColumnsNoRaw
+	if lo.includeRaw {
+		cols += ", COALESCE(raw,'')"
+	}
+	order := " ORDER BY event_time_unix, id"
+	limit := ""
+	if lo.keyset {
+		if lo.afterID > 0 {
+			if where == "" {
+				where = " WHERE id > ?"
+			} else {
+				where += " AND id > ?"
+			}
+			args = append(args, lo.afterID)
+		}
+		order = " ORDER BY id"
+		if lo.limit > 0 {
+			limit = " LIMIT ?"
+			args = append(args, lo.limit)
+		}
+	}
+	q := `SELECT ` + cols + ` FROM usage_events` + where + order + limit
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -609,13 +736,16 @@ func (s *SQLite) ListEvents(ctx context.Context, f Filter) ([]model.UsageEvent, 
 			kind         string
 			cost         sql.NullInt64
 		)
-		if err := rows.Scan(
-			&e.Tool, &e.Model, &e.SessionID, &e.Project, &eventUnix, &observedUnix,
+		dest := []any{
+			&e.ID, &e.Tool, &e.Model, &e.SessionID, &e.Project, &eventUnix, &observedUnix,
 			&e.InputTokens, &e.OutputTokens, &e.CacheCreationTokens, &e.CacheReadTokens,
 			&e.ReasoningTokens, &e.TotalTokens, &e.RequestID, &e.MessageID, &e.SourcePath, &kind,
-			&e.DedupKey, &e.Raw,
-			&e.Provider, &e.ServiceTier, &cost, &e.PriceSource,
-		); err != nil {
+			&e.DedupKey, &e.Provider, &e.ServiceTier, &cost, &e.PriceSource,
+		}
+		if lo.includeRaw {
+			dest = append(dest, &e.Raw)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
 		}
 		e.EventTime = time.Unix(eventUnix, 0).UTC()
@@ -631,6 +761,36 @@ func (s *SQLite) ListEvents(ctx context.Context, f Filter) ([]model.UsageEvent, 
 		return nil, fmt.Errorf("store: event rows: %w", err)
 	}
 	return out, nil
+}
+
+// IngestWatermark returns the observed time of the NEWEST row in the ledger, or
+// the zero time when the ledger is empty. It is the "how far has collection
+// got" token a serving process publishes: it moves when a cycle appends and
+// stands still when one appends nothing, which is exactly what a client
+// invalidating its queries needs to know.
+//
+// It reads the last row by id rather than taking MAX(observed_time_unix). id is
+// an INTEGER PRIMARY KEY, so the newest row is one index step, while the max
+// over an unindexed column is a full scan of a 300k-row ledger on every meta
+// poll. The two agree because observed time is stamped at insert and inserts
+// are id-ordered.
+//
+// This is deliberately NOT on the Store interface: it serves the read-only web
+// surface, and the collector has no use for it.
+func (s *SQLite) IngestWatermark(ctx context.Context) (time.Time, error) {
+	var observed sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT observed_time_unix FROM usage_events ORDER BY id DESC LIMIT 1`).Scan(&observed)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("store: read ingest watermark: %w", err)
+	}
+	if !observed.Valid {
+		return time.Time{}, nil
+	}
+	return time.Unix(observed.Int64, 0).UTC(), nil
 }
 
 // SourceStats returns per-tool stored stats for the `sources` command.

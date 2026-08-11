@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,12 +39,37 @@ func (d countingDriver) Open(name string) (driver.Conn, error) {
 
 type countingConn struct{ driver.Conn }
 
+// preparedSQL records the text of every statement prepared through the counting
+// driver. Statement counts pin how MANY queries run; this pins WHAT they ask
+// for, which is how the event projection can be checked to leave the raw
+// column in the database rather than merely to discard it after transfer.
+var preparedSQL struct {
+	mu sync.Mutex
+	q  []string
+}
+
 func (c countingConn) Prepare(q string) (driver.Stmt, error) {
+	preparedSQL.mu.Lock()
+	preparedSQL.q = append(preparedSQL.q, q)
+	preparedSQL.mu.Unlock()
 	s, err := c.Conn.Prepare(q)
 	if err != nil {
 		return nil, err
 	}
 	return countingStmt{Stmt: s}, nil
+}
+
+// queriesDuring returns the SQL prepared while fn executed.
+func queriesDuring(fn func()) []string {
+	preparedSQL.mu.Lock()
+	before := len(preparedSQL.q)
+	preparedSQL.mu.Unlock()
+
+	fn()
+
+	preparedSQL.mu.Lock()
+	defer preparedSQL.mu.Unlock()
+	return append([]string{}, preparedSQL.q[before:]...)
 }
 
 // countingStmt counts executions via the context interfaces, which

@@ -86,6 +86,65 @@ type Summary struct {
 	Totals  Bucket
 }
 
+// RollupSummary is the result of SummarizeRollup: the same buckets Summarize
+// produces, from the derived rollup instead of the ledger, plus the range those
+// buckets actually cover.
+//
+// Bucket.Sessions is always 0 here. The rollup keeps no session dimension, so
+// a distinct-session count is not merely absent but underivable - reading the
+// zero as "no sessions" would be a lie the shape cannot prevent, which is why
+// this is a distinct type and not a Summary.
+type RollupSummary struct {
+	GroupBy []string
+	Buckets []Bucket
+	Totals  Bucket
+	// Since and Until are the requested bounds snapped OUTWARD to whole UTC
+	// 15-minute buckets - the rollup's resolution - so the buckets can cover
+	// slightly more than was asked for. Zero means that bound was open. A
+	// caller labelling a range must label these, not the ones it passed in.
+	Since time.Time
+	Until time.Time
+}
+
+// ListOption tunes what ListEvents projects. It exists so the expensive column
+// is opt-in at the call site rather than a default every caller pays for.
+type ListOption func(*listOptions)
+
+type listOptions struct {
+	includeRaw bool
+	keyset     bool
+	afterID    int64
+	limit      int
+}
+
+// WithKeyset turns ListEvents into one page of a keyset walk: at most limit rows
+// with a row id ABOVE afterID, ordered by id. Pass afterID 0 for the first page
+// and the last id of a page for the next one.
+//
+// The order changes with the option, and it has to: ids are AUTOINCREMENT, so
+// ordering by id is a total order that a cursor can resume from exactly, while
+// the default (event_time, id) order interleaves later-ingested rows with
+// earlier event times and would make an id cursor skip them. A caller that wants
+// event-time order must page some other way, or not page at all.
+//
+// A limit of 0 or less means unlimited, which is the point of a cap living at
+// the caller: the store enforces the walk, not the policy.
+func WithKeyset(afterID int64, limit int) ListOption {
+	return func(o *listOptions) {
+		o.keyset = true
+		o.afterID = afterID
+		o.limit = limit
+	}
+}
+
+// WithRaw restores the raw audit payload to a ListEvents projection. ONLY the
+// export --include-raw path may pass it: raw can carry full transcript content
+// for rows appended before the usage-object allow-list landed, and every other
+// consumer has no use for it. Without it, raw never leaves the database.
+func WithRaw() ListOption {
+	return func(o *listOptions) { o.includeRaw = true }
+}
+
 // SourceStat summarises stored usage per tool for the `sources` command.
 type SourceStat struct {
 	Tool         string
@@ -166,9 +225,29 @@ type Store interface {
 	// bucket per event. An empty result means every matching row is stamped.
 	UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error)
 
-	// ListEvents returns raw events matching Filter (ordered by event_time).
-	// Used by export.
-	ListEvents(ctx context.Context, f Filter) ([]model.UsageEvent, error)
+	// SummarizeRollup answers the same question as Summarize from the derived
+	// rollup: identical numbers, without scanning the ledger. It cannot serve
+	// session or provider dimensions, distinct-session counts, or ranges finer
+	// than its 15-minute bucket - those stay with Summarize. See
+	// SQLite.SummarizeRollup for the exact differences.
+	SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary, error)
+
+	// EnsureRollup rebuilds the derived rollup when it disagrees with the
+	// ledger (an empty one just created by migration, or one that missed a
+	// write), and reports whether it rebuilt. The collector calls it before a
+	// pass; it is cheap when the rollup is in step.
+	EnsureRollup(ctx context.Context) (bool, error)
+
+	// RebuildRollup rebuilds the derived rollup from usage_events
+	// unconditionally, in one transaction. The rollup is derived data: this is
+	// always a safe repair, and it is the only direction a disagreement is
+	// ever resolved in.
+	RebuildRollup(ctx context.Context) error
+
+	// ListEvents returns events matching Filter, ordered by event_time then
+	// row id. The projection names its columns and EXCLUDES raw; pass WithRaw
+	// to include it (export --include-raw only). Used by export.
+	ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error)
 
 	// SourceStats returns per-tool stored stats.
 	SourceStats(ctx context.Context) ([]SourceStat, error)

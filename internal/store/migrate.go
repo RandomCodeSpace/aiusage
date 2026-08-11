@@ -30,6 +30,7 @@ type migration struct {
 //
 //	v2 — source_checkpoints table (incremental collection, issue #5)
 //	v3 — cost/provider/tier columns on usage_events (issues #9, #16)
+//	v4 — usage_rollup derived rollup table, 15-minute UTC buckets (issue #59)
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -53,6 +54,12 @@ var migrations = []migration{
 		`ALTER TABLE usage_events ADD COLUMN cost_micro_usd INTEGER`,
 		`ALTER TABLE usage_events ADD COLUMN price_source TEXT NOT NULL DEFAULT ''`,
 	}},
+	// v4 creates the derived rollup EMPTY and deliberately does not fill it:
+	// a migration that scanned the whole ledger would hold the write lock for
+	// the length of a rebuild on every upgrade. The collector detects the empty
+	// rollup against the ledger watermark on its next pass and rebuilds it
+	// there (EnsureRollup), where the cost is visible and non-fatal.
+	{version: 4, statements: []string{rollupTableDDL}},
 }
 
 // ensureSchema reads the recorded schema version before touching anything and

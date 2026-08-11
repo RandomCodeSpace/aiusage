@@ -75,3 +75,35 @@ func groupExpr(dim string) (string, error) {
 		return "", fmt.Errorf("store: invalid group dimension %q", dim)
 	}
 }
+
+// rollupGroupExpr is groupExpr against the derived rollup. The time dimensions
+// fold bucket_start_unix to local wall clock with the SAME layouts groupExpr
+// uses on event_time_unix, so a bucket key means the same thing whichever table
+// produced it - the only way two surfaces reading different tables can be
+// compared at all. The fold is exact because the rollup's 15-minute UTC buckets
+// never straddle a local boundary: every UTC offset is a whole number of
+// quarter hours. The dimensions the rollup does not keep are refused by name
+// rather than silently answered from a table that cannot know: a session or
+// provider breakdown must go to the ledger.
+func rollupGroupExpr(dim string) (string, error) {
+	switch dim {
+	case "hour":
+		return "strftime('%Y-%m-%d %H', bucket_start_unix, 'unixepoch', 'localtime')", nil
+	case "day":
+		return "strftime('%Y-%m-%d', bucket_start_unix, 'unixepoch', 'localtime')", nil
+	case "week":
+		return "strftime('%Y-W%W', bucket_start_unix, 'unixepoch', 'localtime')", nil
+	case "month":
+		return "strftime('%Y-%m', bucket_start_unix, 'unixepoch', 'localtime')", nil
+	case "tool":
+		return "tool", nil
+	case "model":
+		return "model", nil
+	case "project":
+		return "project", nil
+	case "session", "provider":
+		return "", fmt.Errorf("store: the rollup keeps no %q dimension; group the ledger instead", dim)
+	default:
+		return "", fmt.Errorf("store: invalid group dimension %q", dim)
+	}
+}

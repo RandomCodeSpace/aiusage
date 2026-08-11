@@ -90,6 +90,9 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc ad
 		if stats.Canceled {
 			label = "cycle canceled (partial counts)"
 		}
+		if stats.RollupRebuilt {
+			logger.Printf("rebuilt the derived rollup from the ledger")
+		}
 		logger.Printf("%s: adapters=%d sources=%d seen=%d inserted=%d snapshots=%d errors=%d",
 			label, stats.Adapters, stats.Sources, stats.EventsSeen, stats.EventsInserted, stats.Snapshots, len(stats.Errors))
 		for _, e := range stats.Errors {

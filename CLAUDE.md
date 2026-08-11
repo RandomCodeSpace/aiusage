@@ -11,9 +11,49 @@ UPDATE / BEFORE DELETE triggers in internal/store/schema.sql abort any
 mutation. Insert new rows only, deduplicated via
 `ON CONFLICT(dedup_key) DO NOTHING` (deliberately not INSERT OR IGNORE, which
 would also swallow CHECK violations). Corrections are new rows with
-kind='adjustment'. aggregate_state and source_checkpoints are the only mutable
-data tables (schema_meta holds the mutable version stamp) — working state, not
-history.
+kind='adjustment'. aggregate_state, source_checkpoints and usage_rollup are the
+only mutable data tables (schema_meta holds mutable bookkeeping: the version
+stamp and the rollup watermark) — working state, not history.
+
+**usage_rollup is derived, never authoritative** (issue #59, resolved). It is a
+summary of usage_events keyed by (UTC 15-minute bucket, tool, model, project),
+and nothing may read it as history: every row is reproducible from the ledger
+by store.RebuildRollup, and dropping the whole table loses nothing. Its deltas
+are written inside the same transaction that appends the events
+(store.insertEventsTx), so a crash cannot land events without the matching
+delta; the collector re-checks it against the ledger watermark and event count
+at the start of every pass (EnsureRollup) and rebuilds when they disagree,
+which is the only direction a disagreement is ever resolved in. The bucket key
+is UTC — rolling up by local time would bake the writing machine's calendar
+into stored data — and the local fold happens on read, in SQL, exactly the way
+query.go folds event_time_unix. The width is 15 minutes because every
+real-world UTC offset is a whole number of quarter hours: hourly keys misplace
+half-hour zones (Asia/Kolkata at +05:30, this machine's zone), where an hour
+bucket straddles two local buckets and the first half hour of every local day
+would land in the previous one. The rollup deliberately keeps no session,
+provider or service-tier dimension and no resolution below its bucket:
+distinct-session counts, per-event listing and finer buckets go to the ledger,
+and the read API refuses granularities below an hour outright.
+
+**A stale rollup falls back to the ledger, and says so.** The v4 migration
+creates usage_rollup EMPTY and leaves the fill to the collector's next pass, so
+a read-only `aiusage serve` on a machine with no daemon would otherwise answer
+every rollup-served question with zeros over a full ledger. internal/web asks
+store.RollupStale (watermark vs MAX(id), then SUM(events) vs COUNT(*)), caches
+the verdict against the database's write time with a short TTL, and routes to
+the ledger while it is stale. Every /api/summary and /api/facets response
+carries "source": "rollup" | "ledger".
+
+**The web surface is read-only and Host-checked.** `aiusage serve` opens the
+store with store.OpenReadOnly and never takes the collection lock. Every
+request must be addressed to a Host in the allowlist (localhost, 127.0.0.1,
+::1, plus `serve --allowed-hosts`), or it is refused with 421 before a handler
+runs, and a WebSocket Origin must name a host in that same list (an absent
+Origin is a non-browser client and is allowed). Binding loopback is not the
+defence: DNS rebinding makes an attacker's page same-origin with this port, and
+the Host header is the one part of that request the page cannot choose. A
+reverse proxy preserves the public Host, so a proxied deployment must list its
+name. No response ever carries usage_events.raw.
 
 **Raw is usage-object-only** (issues #17 and #42, resolved). Every adapter
 builds usage_events.raw / aggregate_state.raw from an explicit ALLOW-LIST of
@@ -52,6 +92,11 @@ system timezone, not Go's time.Local, so mutating time.Local in a test moves
 Go's formatting while SQLite's buckets stay put and the keys silently
 disagree. Produce both sides of any bucket-key comparison through the same
 store query (see TestScrubCompositionBracketsLocalDay in internal/tui).
+
+usage_rollup folds the same way, from its 15-minute UTC buckets. Since the zone
+is fixed when the process starts and cannot be moved from inside a test, the
++05:30 case re-executes the test binary with TZ set
+(TestRollupFoldsSubHourEventsInKolkata in internal/store).
 
 ## TUI stack
 

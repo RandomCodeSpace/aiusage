@@ -62,8 +62,16 @@ func newOnceCmd() *cobra.Command {
 }
 
 // printCycleStats writes a human-readable summary of one cycle to stdout.
+//
+// The rebuild line is printed only when a rebuild happened, and it happens
+// rarely: after the v4 migration, or when the derived rollup was found to
+// disagree with the ledger. The daemon logs the same fact, and `once` was the
+// one path where a several-hundred-millisecond pause had no explanation.
 func printCycleStats(c *cobra.Command, s collect.CycleStats) {
 	out := c.OutOrStdout()
+	if s.RollupRebuilt {
+		fmt.Fprintln(out, "rebuilt the derived rollup from the ledger")
+	}
 	fmt.Fprintf(out, "adapters=%d sources=%d seen=%d inserted=%d snapshots=%d errors=%d\n",
 		s.Adapters, s.Sources, s.EventsSeen, s.EventsInserted, s.Snapshots, len(s.Errors))
 	for _, e := range s.Errors {

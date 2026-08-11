@@ -10,6 +10,10 @@
 -- used to derive positive deltas for sources whose per-record totals grow
 -- between polls (hermes sessions, gemini/agy per-turn snapshots). It is NOT
 -- history — the immutable history is the sequence of delta rows in usage_events.
+--
+-- usage_rollup is a MUTABLE DERIVED summary of usage_events. It is not
+-- history either: every row is reproducible from the ledger, and it may be
+-- dropped and rebuilt at any time.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -77,6 +81,40 @@ CREATE TABLE IF NOT EXISTS source_checkpoints (
   state       TEXT,
   PRIMARY KEY (tool, source_path)
 );
+
+-- Derived rollup (v4): the summary the reporting surfaces read instead of
+-- scanning the ledger. DERIVED ONLY, never authoritative - RebuildRollup
+-- reproduces every row from usage_events, and nothing may read it as history.
+--
+-- The bucket key is the UTC 15-MINUTE bucket the events fall in, folded to
+-- local wall clock on READ, in SQL, exactly the way query.go folds
+-- event_time_unix. Rolling up by local time would bake the writing machine's
+-- calendar into stored data. The width is 15 minutes rather than an hour
+-- because every real-world UTC offset is a whole number of quarter hours:
+-- hourly keys misplace half-hour zones (Asia/Kolkata at +05:30 among them),
+-- where one hour bucket straddles two local buckets and would land wholly in
+-- the earlier one. Session id, provider, service tier and resolution below the
+-- bucket width are deliberately absent: those queries go to the ledger.
+--
+-- cost_micro_usd sums ONLY the costs actually stamped on events;
+-- unpriced_events counts the rows that carry none, so a partial cost can never
+-- be read as a bill.
+CREATE TABLE IF NOT EXISTS usage_rollup (
+  bucket_start_unix     INTEGER NOT NULL,             -- UTC 15-minute bucket start, unix seconds
+  tool                  TEXT    NOT NULL,
+  model                 TEXT    NOT NULL DEFAULT '',
+  project               TEXT    NOT NULL DEFAULT '',
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens      INTEGER NOT NULL DEFAULT 0,
+  total_tokens          INTEGER NOT NULL DEFAULT 0,
+  events                INTEGER NOT NULL DEFAULT 0,
+  cost_micro_usd        INTEGER NOT NULL DEFAULT 0,
+  unpriced_events       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (bucket_start_unix, tool, model, project)
+) WITHOUT ROWID;
 
 -- Mutable accumulator state: latest observed counters per growing cell.
 CREATE TABLE IF NOT EXISTS aggregate_state (
