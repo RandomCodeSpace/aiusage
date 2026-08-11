@@ -12,6 +12,9 @@
 
 # Agent session scratch (worktrees, plans) — never commit
 /.claude/
+# Playwright MCP drops console logs and page snapshots here during an agent
+# browser session. Session output, not a build artifact.
+/.playwright-mcp/
 
 # Agent-generated working docs (promote explicitly if they become deliverables)
 PLAN.md
@@ -21,3 +24,11 @@ NOTES.md
 
 # Go
 /vendor/
+
+# Web UI. The /dist/ rule above is rooted at the repo and does NOT cover the
+# UI's output, so the repo carries two different dist directories: GoReleaser's
+# and this one. The built assets are embedded into the release binary at
+# release time (//go:embed all:dist) and are never committed.
+/internal/web/dist/
+/webui/node_modules/
+/webui/tsconfig.tsbuildinfo
