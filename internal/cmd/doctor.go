@@ -9,9 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/internal/web"
 )
 
 // adapterNotes are operator-facing caveats surfaced by `doctor` for adapters
@@ -82,6 +84,8 @@ func runDoctor(c *cobra.Command) error {
 	fmt.Fprintf(out, "logfile:  %s\n", cfg.LogPath)
 	fmt.Fprintf(out, "home:     %s\n", cfg.Home)
 	fmt.Fprintf(out, "interval: %ds\n", cfg.IntervalSeconds)
+	fmt.Fprintf(out, "build:    %s\n", buildinfo.Identity())
+	fmt.Fprintf(out, "web ui:   %s\n", webUIStatus())
 	fmt.Fprintln(out)
 
 	printPermWarnings(out, cfg)
@@ -103,6 +107,17 @@ func runDoctor(c *cobra.Command) error {
 
 	printAdapterDiscovery(c, cfg)
 	return nil
+}
+
+// webUIStatus describes this build's web-UI capability for doctor (issue #61).
+// It is the same tag that Identity() folds into the build identity, so a user
+// comparing `aiusage version` between two installs and a user reading this line
+// are being told the same fact.
+func webUIStatus() string {
+	if web.HasEmbeddedUI() {
+		return "embedded (`aiusage serve` available)"
+	}
+	return "not embedded (`aiusage serve` is unavailable; collection is unaffected)"
 }
 
 // printPermWarnings warns when the data dir or the DB is accessible by group or

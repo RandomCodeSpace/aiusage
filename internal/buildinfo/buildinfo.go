@@ -13,26 +13,98 @@
 // informational only: cmd.ensureDaemon deliberately does not auto-restart on
 // dev-stamp mismatches (`go run` is a fresh temp binary each time — acting on
 // those would flap the daemon on every invocation).
+//
+// An identity is version plus CAPABILITIES (issue #61): two builds of the same
+// source that differ in what they can do are different builds, and the one the
+// user installed is the one that should be collecting. The only capability today
+// is the embedded web UI, appended as a "+webui" suffix, so a UI build meeting a
+// UI-less daemon of the same version restarts it instead of leaving an install
+// half-applied.
+//
+// Version FORMATS differ by install path and must be normalised before two
+// identities are compared: GoReleaser interpolates {{ .Version }}, which has the
+// leading v stripped ("1.2.3"), while the module version the toolchain embeds for
+// go install keeps it ("v1.2.3"). Comparing those verbatim would restart the
+// daemon forever, so Identity emits the canonical leading-v form and SameIdentity
+// normalises both sides before comparing.
 package buildinfo
 
 import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 )
 
 // Version is the declared build version. Override via -ldflags for a real
 // release; otherwise it stays "dev" and Identity() derives a per-build stamp.
 var Version = "dev"
 
-// Identity returns a stable identifier for this build. A real (non-"dev")
-// Version is returned verbatim. Otherwise, if the binary was produced by
-// `go install <module>@vX.Y.Z`, the module version embedded by the toolchain is
-// returned. Failing that it is "dev-<size>-<modtimeUnixNano>" of the running
-// executable, which changes on every rebuild/reinstall. If the executable cannot
-// be stat'd, the bare Version is returned (degrades to "always matches", which is
-// safe — it just disables auto-restart).
+// capabilitySep separates the version from the capability suffix in an identity.
+// It is "+" because that is semver's build-metadata separator and it survives a
+// filename, a pidfile stamp and a JSON string without escaping.
+const capabilitySep = "+"
+
+// webUICapability names the embedded-web-UI capability in an identity.
+const webUICapability = "webui"
+
+// Identity returns a stable identifier for this build: the normalised version
+// plus this binary's capabilities, e.g. "v1.2.3" or "v1.2.3+webui".
+//
+// The version part is a real (non-"dev") Version when one was linked in.
+// Otherwise, if the binary was produced by `go install <module>@vX.Y.Z`, it is
+// the module version embedded by the toolchain. Failing that it is
+// "dev-<size>-<modtimeUnixNano>" of the running executable, which changes on
+// every rebuild/reinstall. If the executable cannot be stat'd, the bare Version
+// is used (degrades to "always matches", which is safe - it just disables
+// auto-restart).
 func Identity() string {
+	return withCapabilities(Normalize(version()))
+}
+
+// withCapabilities appends this build's capability suffix to a version.
+func withCapabilities(v string) string {
+	if HasWebUI {
+		return v + capabilitySep + webUICapability
+	}
+	return v
+}
+
+// Normalize canonicalises an identity for comparison: it trims surrounding
+// space and restores the leading v on a bare numeric version, so the GoReleaser
+// form ("1.2.3") and the module form ("v1.2.3") of one release compare equal.
+// Capabilities are preserved - they are a real difference between builds, not a
+// spelling difference.
+func Normalize(id string) string {
+	id = strings.TrimSpace(id)
+	base, caps, hasCaps := strings.Cut(id, capabilitySep)
+	if base != "" && base[0] >= '0' && base[0] <= '9' {
+		base = "v" + base
+	}
+	if !hasCaps {
+		return base
+	}
+	return base + capabilitySep + caps
+}
+
+// BaseVersion returns the normalised version part of an identity, without its
+// capability suffix. Callers classifying a build (release vs dev stamp) want
+// this: gaining the web UI does not make a dev stamp a release.
+func BaseVersion(id string) string {
+	base, _, _ := strings.Cut(Normalize(id), capabilitySep)
+	return base
+}
+
+// SameIdentity reports whether two identities name the same build, comparing
+// them in normalised form so a version-format difference is not mistaken for a
+// version difference. A daemon stamped before normalisation landed differs once,
+// is restarted once, and records the canonical form on the way back up.
+func SameIdentity(a, b string) bool {
+	return Normalize(a) == Normalize(b)
+}
+
+// version resolves the version part of the identity (see Identity).
+func version() string {
 	if Version != "dev" && Version != "" {
 		return Version
 	}

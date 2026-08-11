@@ -49,9 +49,15 @@ var flags globalFlags
 // doctor/completion/help/version are diagnostics that should never have a side
 // effect. Everything else (the root TUI default plus today/last/summary/
 // sources/export) is data-facing and triggers ensureDaemon.
+//
+// serve is here for a different reason than the rest: it is a long-lived
+// read-only server, and spawning a background writer as a side effect of asking
+// for a web page is a surprise nobody asked for. It reports whether a daemon is
+// running instead, and the user starts one deliberately.
 var daemonSkip = map[string]bool{
 	"run":        true,
 	"once":       true,
+	"serve":      true,
 	"doctor":     true,
 	"completion": true,
 	"help":       true,
@@ -148,6 +154,7 @@ func newRootCmd() *cobra.Command {
 		newSourcesCmd(),
 		newDoctorCmd(),
 		newExportCmd(),
+		newServeCmd(),
 		newVersionCmd(),
 	)
 	return root

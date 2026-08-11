@@ -162,7 +162,12 @@ func ensureDaemon(cfg config.Config, warn io.Writer) error {
 	}
 	recorded := collect.ReadDaemonVersion(cfg)
 	self := buildinfo.Identity()
-	if recorded == self {
+	// Normalised, not verbatim: the same release installed two ways spells its
+	// version differently (GoReleaser strips the leading v, the module version
+	// keeps it), and comparing the spellings would restart the daemon on every
+	// single invocation. Capabilities are NOT normalised away - a build that
+	// gained the web UI is a different build (issue #61).
+	if buildinfo.SameIdentity(recorded, self) {
 		return nil
 	}
 	if !restartOnMismatch(recorded, self) {
@@ -207,7 +212,10 @@ func restartOnMismatch(recorded, self string) bool {
 }
 
 // isDevIdentity reports whether id is an unstamped build identity: the literal
-// "dev" default or the dev-<size>-<mtime> executable fallback stamp.
+// "dev" default or the dev-<size>-<mtime> executable fallback stamp. It
+// classifies the VERSION part only - gaining a capability like the embedded web
+// UI does not turn a dev stamp into a release.
 func isDevIdentity(id string) bool {
-	return id == "dev" || strings.HasPrefix(id, "dev-")
+	base := buildinfo.BaseVersion(id)
+	return base == "dev" || strings.HasPrefix(base, "dev-")
 }

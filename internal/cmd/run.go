@@ -15,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/web"
 )
 
 // repairPrivatePerms tightens permissions left behind by older releases, which
@@ -102,6 +103,13 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
+
+			// A missing web UI is not the collector's problem: it warns once, into
+			// the daemon log, so that "serve stopped working after I rebuilt" has
+			// an answer, and then collects exactly as before (issue #61).
+			if !web.HasEmbeddedUI() {
+				fmt.Fprintln(c.ErrOrStderr(), noEmbeddedUIDaemonNotice)
+			}
 
 			ctx, stop := signal.NotifyContext(cmdContext(c), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
