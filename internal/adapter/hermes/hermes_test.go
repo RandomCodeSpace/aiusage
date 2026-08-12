@@ -254,7 +254,7 @@ func TestDiscoverHonorsEnvOverride(t *testing.T) {
 		insertSession(t, db, "e-1", "model-x", "prov", "", 1, 1, 0, 0, 0)
 	})
 
-	t.Setenv(homeEnv, envHome)
+	t.Setenv(HomeEnv, envHome)
 	a := New()
 	// Home points elsewhere; HERMES_HOME must win.
 	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{Home: filepath.Join(dir, "ignored")})

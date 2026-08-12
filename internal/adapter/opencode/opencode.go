@@ -54,7 +54,9 @@ import (
 )
 
 const (
-	dataDirEnv     = "OPENCODE_DATA_DIR"
+	// DataDirEnv names the environment variable that moves the opencode data
+	// directory, and with it every database this adapter reads.
+	DataDirEnv     = "OPENCODE_DATA_DIR"
 	primaryDBName  = "opencode.db"
 	dbPrefix       = "opencode-"
 	dbSuffix       = ".db"
@@ -82,7 +84,7 @@ func (Adapter) DisplayName() string { return "opencode" }
 // may be a comma-separated list that fully REPLACES the default; otherwise the
 // discovery root (override or ~/.local/share/opencode) is used.
 func (a Adapter) dataDirs(cfg adapter.DiscoverConfig) []string {
-	if env := strings.TrimSpace(os.Getenv(dataDirEnv)); env != "" {
+	if env := strings.TrimSpace(os.Getenv(DataDirEnv)); env != "" {
 		var out []string
 		for _, p := range strings.Split(env, ",") {
 			if p = strings.TrimSpace(p); p != "" {

@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	// homeEnv may hold a comma-separated list of Hermes home directories.
-	homeEnv = "HERMES_HOME"
+	// HomeEnv may hold a comma-separated list of Hermes home directories.
+	HomeEnv = "HERMES_HOME"
 	// dbName is the SQLite state database within a Hermes home.
 	dbName = "state.db"
 	// driverName is the modernc.org/sqlite database/sql driver name.
@@ -63,7 +63,7 @@ func (Adapter) DisplayName() string { return "Hermes" }
 // homes returns the configured Hermes home directories. HERMES_HOME may be a
 // comma-separated list; otherwise the discovery root (override or ~/.hermes).
 func (a Adapter) homes(cfg adapter.DiscoverConfig) []string {
-	if env := strings.TrimSpace(os.Getenv(homeEnv)); env != "" {
+	if env := strings.TrimSpace(os.Getenv(HomeEnv)); env != "" {
 		var out []string
 		for _, p := range strings.Split(env, ",") {
 			if p = strings.TrimSpace(p); p != "" {

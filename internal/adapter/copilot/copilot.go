@@ -39,8 +39,8 @@ import (
 // attrMarker fast-skips JSONL lines that cannot carry usage attributes.
 const attrMarker = `"attributes"`
 
-// exporterEnv names the single-file OTEL exporter override.
-const exporterEnv = "COPILOT_OTEL_FILE_EXPORTER_PATH"
+// ExporterEnv names the single-file OTEL exporter override.
+const ExporterEnv = "COPILOT_OTEL_FILE_EXPORTER_PATH"
 
 // recordSource classifies an OTEL record. Lower value = higher priority; a
 // higher-priority record for the same trace/response suppresses lower ones.
@@ -130,7 +130,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		}
 	}
 
-	if env := strings.TrimSpace(os.Getenv(exporterEnv)); env != "" {
+	if env := strings.TrimSpace(os.Getenv(ExporterEnv)); env != "" {
 		if fi, err := os.Stat(env); err == nil && !fi.IsDir() {
 			add(env)
 		}

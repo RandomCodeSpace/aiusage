@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -542,6 +543,76 @@ func TestLoadMalformedFileErrors(t *testing.T) {
 
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load(malformed) error = nil, want non-nil")
+	}
+}
+
+// TestPathEnvNamesIncludesHome pins HOME into the list a caller reads before
+// copying this process's paths into another one.
+//
+// It is not one variable among five. os.UserHomeDir resolves it, so it moves
+// the database, the state directory, the config file and the systemd unit
+// directory together, and unlike AIUSAGE_DB it has no flag that could carry it
+// into a unit file instead.
+func TestPathEnvNamesIncludesHome(t *testing.T) {
+	names := PathEnvNames()
+	for _, n := range names {
+		if n == "HOME" {
+			return
+		}
+	}
+	t.Fatalf("PathEnvNames() = %v, with no HOME in it", names)
+}
+
+// TestHomeIsAnOverrideOnlyWhenItMoved: HOME is always set, so being set cannot
+// be the test. The account's own home directory - which the user database holds
+// and the environment cannot touch - is what it is compared against.
+func TestHomeIsAnOverrideOnlyWhenItMoved(t *testing.T) {
+	clearXDG(t)
+	real := accountHome()
+	if real == "" {
+		t.Skip("this account has no resolvable home directory to compare against")
+	}
+
+	tests := []struct {
+		name string
+		home string
+		want bool
+	}{
+		{name: "the account's own home", home: real},
+		{name: "the same home spelled with a trailing separator", home: real + string(filepath.Separator)},
+		{name: "somewhere else entirely", home: t.TempDir(), want: true},
+		{name: "unset", home: "", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", tc.home)
+			got := false
+			for _, n := range PathEnvOverrides() {
+				if n == "HOME" {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("HOME=%q reported as an override = %v, want %v", tc.home, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnverifiableHomeCountsAsMoved: with no account home to compare against,
+// the value cannot be vouched for. Callers ask this question before baking
+// these paths into something permanent, so the unverifiable case is treated as
+// an override - a refusal costs one fallback, a wrong answer costs a unit
+// supervising the wrong directory until somebody notices.
+func TestUnverifiableHomeCountsAsMoved(t *testing.T) {
+	clearXDG(t)
+	prev := accountHome
+	accountHome = func() string { return "" }
+	t.Cleanup(func() { accountHome = prev })
+
+	t.Setenv("HOME", t.TempDir())
+	if !slices.Contains(PathEnvOverrides(), "HOME") {
+		t.Fatal("an unverifiable HOME was reported as no override at all")
 	}
 }
 

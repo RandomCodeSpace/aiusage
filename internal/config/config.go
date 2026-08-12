@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 )
@@ -330,6 +331,123 @@ func applyEnv(cfg *Config) {
 			cfg.IntervalSeconds = n
 		}
 	}
+}
+
+// pathEnv is every environment variable this package reads that can move the
+// database, the config file or the state directory, with the rule that decides
+// whether a given value actually moves one.
+//
+// AIUSAGE_INTERVAL is deliberately absent: it is a cadence, it is clamped to a
+// sane range, and it names no path.
+var pathEnv = []struct {
+	name string
+	// moved reports whether the value the variable currently holds actually
+	// moves a path. Presence is not the test for every one of them: an XDG base
+	// directory is ignored unless absolute, and HOME is always set.
+	moved func(val string) bool
+}{
+	{name: "AIUSAGE_HOME", moved: envSet},
+	{name: "AIUSAGE_DB", moved: envSet},
+	{name: "XDG_DATA_HOME", moved: envAbs},
+	{name: "XDG_STATE_HOME", moved: envAbs},
+	{name: "XDG_CONFIG_HOME", moved: envAbs},
+	{name: "HOME", moved: homeMoved},
+}
+
+// envSet is the rule for a variable honoured whenever it holds anything.
+func envSet(val string) bool { return val != "" }
+
+// envAbs is the rule for a variable honoured only when it holds an absolute
+// path: xdgDir follows the XDG spec and ignores a relative base directory, so a
+// relative value there changes nothing at all.
+func envAbs(val string) bool { return filepath.IsAbs(val) }
+
+// homeMoved reports whether HOME points somewhere other than the home directory
+// this account owns.
+//
+// HOME is what os.UserHomeDir resolves, so it moves every default derived here
+// (the database, the state directory, the config file) and the systemd unit
+// directory with them, while carrying no flag a caller could forward instead.
+// It is also the one variable in this table that is never absent, so being set
+// cannot be the test; the account's own home directory, which the user database
+// holds and the environment cannot touch, is the thing to compare it against.
+//
+// An account whose home cannot be looked up counts as moved. The comparison is
+// the only evidence available, callers ask this question before baking these
+// paths into something permanent, and with nothing to vouch for the value a
+// refusal costs one fallback while a wrong answer costs a unit that supervises
+// the wrong directory until somebody notices.
+func homeMoved(val string) bool {
+	real := accountHome()
+	if real == "" {
+		return true
+	}
+	return !sameDir(val, real)
+}
+
+// accountHome returns the home directory of the account this process runs as,
+// read from the user database rather than from the environment. It is a var so
+// a test can take the lookup away and prove the unverifiable case is treated as
+// an override.
+var accountHome = func() string {
+	if u, err := user.Current(); err == nil {
+		return u.HomeDir
+	}
+	return ""
+}
+
+// sameDir reports whether two paths name the same directory. A home directory
+// has more than one legitimate spelling - a trailing slash, or a symlink such
+// as an automounted /home/x resolving to /export/home/x - and none of those is
+// a move.
+func sameDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, aerr := filepath.EvalSymlinks(a)
+	rb, berr := filepath.EvalSymlinks(b)
+	return aerr == nil && berr == nil && ra == rb
+}
+
+// PathEnvNames returns the names of every environment variable that can move a
+// resolved path, in a fixed order.
+//
+// It is exported for the callers that copy this process's paths into another
+// one - the systemd units internal/service writes, above all. Such a caller has
+// to know that the environment, not the defaults, decided where things live: a
+// unit does not inherit the installing shell's environment, so a unit written
+// under one of these supervises a daemon that resolves different paths than the
+// CLI that wrote it. HOME is in the list for that reason above all - it moves
+// every derived path at once, including the unit directory itself, and no flag
+// carries it across. Enumerating the list is also how a test proves no variable
+// was forgotten.
+func PathEnvNames() []string {
+	out := make([]string, 0, len(pathEnv))
+	for _, v := range pathEnv {
+		out = append(out, v.name)
+	}
+	return out
+}
+
+// PathEnvOverrides returns the PathEnvNames variables currently set to a value
+// this package honours, in the same fixed order.
+//
+// Honoured is not the same as present: an empty AIUSAGE_* variable is no
+// override, a relative XDG base directory is ignored per the spec, and HOME is
+// an override only when it names something other than the account's own home
+// directory. A variable that moves nothing is not reported, because a caller
+// that refused to act on it would be refusing over nothing.
+func PathEnvOverrides() []string {
+	var out []string
+	for _, v := range pathEnv {
+		if v.moved(os.Getenv(v.name)) {
+			out = append(out, v.name)
+		}
+	}
+	return out
 }
 
 // clampInterval bounds n to [minInterval, maxInterval]. A non-positive value

@@ -34,6 +34,12 @@ const (
 	dirArchived  = "archived_sessions"
 )
 
+// HomeEnv names the environment variable that moves the Codex home, and with it
+// every session transcript this adapter reads. Exported for the same reason
+// claudecode.ConfigDirEnv is: what gets collected is decided here, not by the
+// defaults, and a supervised install must account for that.
+const HomeEnv = "CODEX_HOME"
+
 // Adapter reads Codex CLI session transcripts. Read-only.
 type Adapter struct{}
 
@@ -49,7 +55,7 @@ func (Adapter) DisplayName() string { return "Codex" }
 // homes returns the configured Codex home directories. CODEX_HOME may be a
 // comma-separated list; otherwise the discovery root (override or ~/.codex).
 func (a Adapter) homes(cfg adapter.DiscoverConfig) []string {
-	if env := strings.TrimSpace(os.Getenv("CODEX_HOME")); env != "" {
+	if env := strings.TrimSpace(os.Getenv(HomeEnv)); env != "" {
 		var out []string
 		for _, p := range strings.Split(env, ",") {
 			if p = strings.TrimSpace(p); p != "" {

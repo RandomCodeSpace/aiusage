@@ -82,6 +82,137 @@ and the store depend only on `model`; collect/report/tui compose adapters and
 the store; `cmd` wires everything. Shared types belong in `model`, not in a
 sideways import.
 
+`internal/service` sits off to the side: it may import stdlib, `config` and
+`buildinfo`, and nothing else — never collect/store/report/tui/web. It knows
+how a machine supervises processes, not what aiusage collects.
+
+## Supervision
+
+aiusage installs itself. Two systemd **user** units — `aiusage-collect.service`
+and `aiusage-web.service` — are written to `$XDG_CONFIG_HOME/systemd/user`
+(default `~/.config/systemd/user`), enabled and started. No root anywhere: user
+units, `loginctl enable-linger` for survival past logout, and every call
+non-interactive (`--no-ask-password`).
+
+**Install is create-if-missing; removal is stamp-gated.** An existing unit file
+is never rewritten — the user may have edited it — only its enabled/active state
+is corrected. `aiusage setup --force` is the sole path that replaces one, and it
+then restarts whatever it rewrote, because the point of a new ExecStart is that
+the new one runs. Every generated unit opens with the
+`# aiusage-generated-unit` stamp, and `setup --remove` refuses to delete a unit
+file that lacks it — naming the file and `--force`, and exiting NON-ZERO, since
+`setup --remove && rm -rf ~/.config/systemd/user` must not proceed as though the
+directory were clean — since create-if-missing exists precisely because the file
+may be the user's own (the hand-written units this feature replaced carry no
+stamp, and removal must refuse them). The whole
+thing happens on any run that already auto-spawns a daemon (`ensureDaemon`);
+`setup` is the explicit, inspectable version of it, and `doctor` prints which of
+the three states holds (systemd units, unsupervised background process, none).
+`--no-daemon` suppresses the AUTOMATIC daemon start and the automatic install;
+it does not suppress `setup`, which is the explicit ask.
+
+**Path overrides suppress the automatic install — flags and environment alike.**
+`aiusage --db /tmp/scratch.db report` must never bake `/tmp/scratch.db` into a
+unit that then collects there forever, so any of --db/--config/--home skips
+supervision entirely and falls back to the detached spawn (`cmd.autoInstall`).
+The environment counts for a sharper reason: `config.PathEnvOverrides` reports
+which of AIUSAGE_DB, AIUSAGE_HOME, XDG_DATA_HOME, XDG_STATE_HOME,
+XDG_CONFIG_HOME and **HOME** moved a path, and a unit does NOT inherit the
+installing shell's environment — an install made under one of them writes
+ReadWritePaths for the overridden directories while its ExecStart carries no
+flags at all, i.e. a daemon sandboxed for one database and collecting into
+another. HOME is the worst of them and the only one that is never absent, so
+being set cannot be its test: it is compared against the account's own home
+(`os/user`, which the environment cannot move) and only a difference counts, an
+unresolvable account home included. It moves every derived path at once —
+database, state, config, and the unit directory itself — while the unit NAMES
+stay fixed constants, so a sandboxed-HOME run used to query the machine's REAL
+`aiusage-collect.service`, find it running, and manage a sandbox file while
+believing itself supervised. `cmd.discoveryEnv` is the same trap from the other
+side: CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_OTEL_FILE_EXPORTER_PATH,
+HERMES_HOME and OPENCODE_DATA_DIR move what the adapters READ, have no flag to
+forward either, and suppress the install the same way (a test parses the adapter
+sources and fails on a variable the list has not been taught about). --interval
+and AIUSAGE_INTERVAL are exempt from the refusal — clamped, and they name no
+path — but exempt is not the same as permanent: the automatic install bakes NO
+flags at all (`cmd.autoArgs`), so `aiusage --interval 61 today` cannot leave a
+unit polling at 61 seconds forever. The explicit `setup` command has the
+opposite rule — it bakes whatever flags it was given, because being asked is the
+difference — and prints one note per environment override it cannot bake (there
+is no flag for a state directory, and none for an adapter's discovery root).
+
+**The automatic install reports itself once.** Installing, enabling and starting
+two long-lived services — one of them a network listener — is not a side effect
+to perform in silence behind `aiusage today`, so a run that CHANGED the machine
+prints its account to stderr (`service.Result.Changed`, `cmd.reportSupervision`).
+A run that changed nothing prints nothing: the steady state is a dozen report
+commands a day finding everything in place. Lines that explain something which
+did NOT happen — a dashboard skipped for a busy port, a linger refusal — do not
+count as a change; they ride along with the install that first produced them and
+are silent afterwards. A failure is not routed there either: it keeps the single
+warning line the CLI has always printed before falling back.
+
+**Everything degrades, and every wait is bounded.** Availability is `systemctl`
+on PATH *plus* a successful `systemctl --user show-environment` (what actually
+works over ssh — testing XDG_RUNTIME_DIR gets it wrong both ways), detected once
+per process. No user manager, a refusal, a timeout: the CLI silently spawns the
+detached background daemon it always did, prints at most one warning line, and
+runs the command the user asked for. Two separate bounds hold that promise up.
+Per call, `service.DefaultTimeout` (5s) kills the command and `WaitDelay` (500ms)
+force-closes its pipes — without the second, `CombinedOutput` blocks until every
+writer is gone, so a systemctl leaving a grandchild behind hangs the CLI forever
+despite the context. Per phase, `cmd.supervisionBudget` (5s) is one parent
+deadline over the WHOLE attempt: an install is a dozen calls, and a manager
+answering each of them slowly would otherwise add its latency twelve times to a
+report command. When the budget expires supervision is abandoned mid-sequence
+and the fallback takes over. Every phase gets one, not just `ensureDaemon`:
+`doctor`'s supervision block shares that same 5s (it is five calls, measured at
+20s against a manager answering in 4s each) and reports a unit it got no answer
+about as state unknown rather than inventing "inactive, not enabled"
+(`service.UnitStatus.StateKnown`); the explicit `setup` gets its own, far larger
+`cmd.setupBudget` (30s), because the user asked for that one and is watching it,
+and abandoning an install between writing a unit and starting it is worse than
+waiting. A command that ran out of time SAYS so — `timed out after 5s` for the
+per-call bound, `the supervision deadline expired` for the phase — rather than
+reporting the signal that killed it (`signal: killed` names the mechanism and
+hides the cause).
+
+**The web unit may never cost the machine its collector.** It is installed only
+when `buildinfo.HasWebUI` — `serve` exits 1 without it, and a unit that exits 1
+under `Restart=always` is a restart loop — and `serve` stays in `daemonSkip` so
+serving a page never starts a second process on the same port. Before starting
+it, the install probes its address (`Manager.Dial`): something already answering
+there is a manual `aiusage serve`, and starting the unit against it would be a
+restart loop until StartLimitBurst trips, so the unit is written and then left
+alone entirely — not started, not even enabled, with one line saying so.
+`Install` returns the collection unit's error and no other; every dashboard
+failure is a line in the result. Version sync under systemd is `systemctl --user
+restart` of the units that are ACTIVE (the web unit does not self-exec on binary
+replacement the way the collector does); an inactive unit is never started by
+that path, because a second collector against a single-holder lock is worse than
+a stale one.
+
+**Enable and start are two calls, and the second can fail.** An enable that this
+install performed is rolled back when the start then fails: a unit left enabled
+but not started comes up at the next login against the collection lock the
+fallback daemon is by then holding. `is-enabled` is matched exactly, so
+`enabled-runtime` (enabled until the next reboot, and no longer) is not enabled
+and gets a persistent enable.
+
+Both units carry `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
+`ProtectKernelTunables`, `ProtectControlGroups`, `RestrictSUIDSGID` and explicit
+`ReadWritePaths`. Honest caveat, measured on this host: for **user** units on
+Ubuntu 24.04 the namespace-building directives (ProtectSystem, PrivateTmp,
+ProtectKernelTunables, ProtectControlGroups) are inert, because
+`kernel.apparmor_restrict_unprivileged_userns=1` stops `systemd --user` building
+the namespace and it silently carries on without it. They are kept because they
+are real on hosts without that restriction, and because the ReadWritePaths they
+imply document what the daemon is allowed to touch.
+
+Tests never touch a real systemd: `service.Manager` takes an injected `Runner`,
+`Dial` and `UnitDir`, and `internal/cmd`'s TestMain pins the supervisor seam to
+a refusing fake for the whole package.
+
 ## Time buckets
 
 Timestamps are stored as UTC unix seconds. Grouping keys are formatted by

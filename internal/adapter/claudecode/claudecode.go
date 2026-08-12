@@ -34,6 +34,13 @@ var usageMarkerBytes = []byte(usageMarker)
 // syntheticModel is dropped per the parsing spec.
 const syntheticModel = "<synthetic>"
 
+// ConfigDirEnv names the environment variable that moves the Claude Code
+// configuration root, and with it every transcript this adapter reads. It is
+// exported because a caller that copies this process's discovery into another
+// one - the systemd units internal/service writes - has to know that the
+// environment, not the defaults, decided what gets collected.
+const ConfigDirEnv = "CLAUDE_CONFIG_DIR"
+
 // Adapter reads Claude Code usage transcripts.
 type Adapter struct{}
 
@@ -64,7 +71,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		}
 	}
 	if len(candidates) == 0 {
-		if env := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); env != "" {
+		if env := strings.TrimSpace(os.Getenv(ConfigDirEnv)); env != "" {
 			candidates = append(candidates, splitRoots(env)...)
 		}
 	}

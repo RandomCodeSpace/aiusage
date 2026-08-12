@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -50,7 +51,16 @@ var stopDaemon = collect.StopDaemon
 // TestDaemonArgsCoversEveryPersistentFlag enumerates globalFlags and fails on
 // any field this function has not been taught about.
 func daemonArgs(f globalFlags) []string {
-	args := []string{"run"}
+	return append([]string{"run"}, globalArgs(f)...)
+}
+
+// globalArgs renders the persistent flags that must follow aiusage into another
+// process: the spawned daemon above, and the systemd units internal/service
+// writes. Both need the same set for the same reason - a child that resolves
+// its own defaults while the CLI reports on an override is a silent
+// disagreement about which database is the real one.
+func globalArgs(f globalFlags) []string {
+	var args []string
 	if f.db != "" {
 		args = append(args, "--db", f.db)
 	}
@@ -155,9 +165,28 @@ var spawnDaemon = func(cfg config.Config) error {
 // CLI that manages it — except for dev-stamp identities, which only get a notice
 // on warn (see restartOnMismatch). A daemon with no recorded version (older
 // build) counts as a mismatch and is restarted once.
-func ensureDaemon(cfg config.Config, warn io.Writer) error {
+//
+// Supervision (internal/service) is tried first at both points where this
+// function would otherwise start a process: systemd owns a daemon far better
+// than a detached spawn does, since it restarts one that dies and starts one at
+// login. Every supervision step is allowed to decline - no user manager, a path
+// override that must not be baked into a unit, a manager that refuses - and
+// each declining path lands back on exactly the spawn this function performed
+// before the feature existed.
+//
+// All of that happens in front of a command the user is waiting on, so the
+// whole of it shares one deadline (supervisionBudget), derived here and not per
+// attempt: the mismatch path talks to the service manager twice, and two
+// budgets would be two waits.
+func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error {
+	ctx, cancel := supervisionContext(ctx)
+	defer cancel()
+
 	running, pid := collect.DaemonStatus(cfg)
 	if !running {
+		if superviseStart(ctx, cfg, flags, warn) {
+			return nil
+		}
 		return spawnDaemon(cfg)
 	}
 	recorded := collect.ReadDaemonVersion(cfg)
@@ -182,11 +211,23 @@ func ensureDaemon(cfg config.Config, warn io.Writer) error {
 		}
 		return nil
 	}
+	// A supervised collector is replaced by restarting its unit, not by killing
+	// it: systemd would only start it again anyway, and the dashboard unit needs
+	// the same treatment because it has no self-exec watch of its own.
+	if superviseRestart(ctx, flags, warn) {
+		return nil
+	}
 	if err := stopDaemon(cfg, pid); err != nil {
 		if pid > 0 {
 			return fmt.Errorf("daemon (pid %d, build %s) still running and collecting with the old build — stop it manually (kill %d): %w", pid, recorded, pid, err)
 		}
 		return fmt.Errorf("daemon (build %s) still running and collecting with the old build — stop the process holding %s.lock: %w", recorded, cfg.PIDPath, err)
+	}
+	// The daemon that was running here was not a unit (or Restart declined), so
+	// this is also the moment an unsupervised install can become a supervised
+	// one: the lock is free and nothing is collecting.
+	if superviseStart(ctx, cfg, flags, warn) {
+		return nil
 	}
 	return spawnDaemon(cfg)
 }

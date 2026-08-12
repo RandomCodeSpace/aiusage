@@ -39,7 +39,7 @@ func writeDB(t *testing.T, dir string, rows [][3]string) string {
 func discover(t *testing.T, dir string) []adapter.Source {
 	t.Helper()
 	// Ensure no ambient env override leaks into discovery.
-	t.Setenv(dataDirEnv, dir)
+	t.Setenv(DataDirEnv, dir)
 	a := New()
 	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{})
 	if err != nil {

@@ -82,7 +82,7 @@ func TestEnsureDaemonNoSpawnWhenRunning(t *testing.T) {
 
 	cfg := config.Config{PIDPath: pidPath}
 	stampCurrentVersion(t, cfg) // same build → no restart
-	if err := ensureDaemon(cfg, io.Discard); err != nil {
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon: %v", err)
 	}
 	if *calls != 0 {
@@ -100,7 +100,7 @@ func TestEnsureDaemonSpawnsWhenNotRunning(t *testing.T) {
 	defer restore()
 
 	cfg := config.Config{PIDPath: pidPath}
-	if err := ensureDaemon(cfg, io.Discard); err != nil {
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon: %v", err)
 	}
 	if *calls != 1 {
@@ -123,10 +123,10 @@ func TestEnsureDaemonSelfHeal(t *testing.T) {
 	defer restore()
 
 	cfg := config.Config{PIDPath: pidPath}
-	if err := ensureDaemon(cfg, io.Discard); err != nil {
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (1): %v", err)
 	}
-	if err := ensureDaemon(cfg, io.Discard); err != nil {
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (2): %v", err)
 	}
 	if *calls != 2 {
@@ -147,7 +147,7 @@ func TestEnsureDaemonSingletonAfterSpawn(t *testing.T) {
 	cfg := config.Config{PIDPath: pidPath}
 
 	// First call: no daemon yet -> spawn.
-	if err := ensureDaemon(cfg, io.Discard); err != nil {
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (1): %v", err)
 	}
 	// Simulate the spawned daemon taking the lock + recording its version.
@@ -155,7 +155,7 @@ func TestEnsureDaemonSingletonAfterSpawn(t *testing.T) {
 	defer release()
 	stampCurrentVersion(t, cfg) // same build → no restart
 	// Second call: lock held + version matches -> no spawn.
-	if err := ensureDaemon(cfg, io.Discard); err != nil {
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
 		t.Fatalf("ensureDaemon (2): %v", err)
 	}
 	if *calls != 1 {
@@ -185,7 +185,7 @@ func TestEnsureDaemonDuringOnceCycle(t *testing.T) {
 	defer func() { stopDaemon = prevStop }()
 
 	var warn bytes.Buffer
-	if err := ensureDaemon(config.Config{PIDPath: pidPath}, &warn); err != nil {
+	if err := ensureDaemon(t.Context(), config.Config{PIDPath: pidPath}, &warn); err != nil {
 		t.Fatalf("ensureDaemon during once cycle: %v", err)
 	}
 	if stopped != 0 || *calls != 0 || warn.Len() != 0 {
@@ -277,7 +277,7 @@ func TestEnsureDaemonIdentityMismatch(t *testing.T) {
 			defer func() { stopDaemon = prevStop }()
 
 			var warn bytes.Buffer
-			if err := ensureDaemon(cfg, &warn); err != nil {
+			if err := ensureDaemon(t.Context(), cfg, &warn); err != nil {
 				t.Fatalf("ensureDaemon: %v", err)
 			}
 			if stopped != tc.wantStop {

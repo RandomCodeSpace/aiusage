@@ -231,7 +231,7 @@ func TestExporterEnvAdditive(t *testing.T) {
 			`"gen_ai.conversation.id":"cb","gen_ai.usage.input_tokens":7,"gen_ai.usage.output_tokens":3}}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write extra: %v", err)
 	}
-	t.Setenv(exporterEnv, extraFile)
+	t.Setenv(ExporterEnv, extraFile)
 
 	a := New()
 	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{Home: home})

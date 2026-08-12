@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -53,11 +54,16 @@ var flags globalFlags
 // serve is here for a different reason than the rest: it is a long-lived
 // read-only server, and spawning a background writer as a side effect of asking
 // for a web page is a surprise nobody asked for. It reports whether a daemon is
-// running instead, and the user starts one deliberately.
+// running instead, and the user starts one deliberately. Supervision gives that
+// entry a second job: `aiusage serve` binds the dashboard port itself, so a
+// hook here that installed and started the dashboard unit would put two
+// processes on one port. setup is skipped for the plain reason that it is the
+// command that does the installing.
 var daemonSkip = map[string]bool{
 	"run":        true,
 	"once":       true,
 	"serve":      true,
+	"setup":      true,
 	"doctor":     true,
 	"completion": true,
 	"help":       true,
@@ -107,7 +113,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureDaemon(cfg, c.ErrOrStderr()); err != nil {
+			if err := ensureDaemon(cmdContext(c), cfg, c.ErrOrStderr()); err != nil {
 				fmt.Fprintf(c.ErrOrStderr(), "warning: could not start daemon: %v\n", err)
 			}
 			return nil
@@ -143,7 +149,9 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&flags.config, "config", "", "path to the JSON config file (default: XDG config path)")
 	pf.IntVar(&flags.interval, "interval", 0, "collection interval in seconds (overrides config; clamped [60,1800])")
 	pf.StringVar(&flags.home, "home", "", "discovery home directory (overrides config; for testing/sandboxing)")
-	pf.BoolVar(&flags.noDaemon, "no-daemon", false, "do not auto-start the background collection daemon")
+	pf.BoolVar(&flags.noDaemon, "no-daemon", false,
+		"do not auto-start the collection daemon or install its systemd user units "+
+			"(the explicit setup command still installs them)")
 
 	root.AddCommand(
 		newRunCmd(),
@@ -155,6 +163,7 @@ func newRootCmd() *cobra.Command {
 		newDoctorCmd(),
 		newExportCmd(),
 		newServeCmd(),
+		newSetupCmd(),
 		newVersionCmd(),
 	)
 	return root
@@ -294,6 +303,42 @@ func defaultRegistry() *adapter.Registry {
 		hermes.New(),
 		agy.New(),
 	)
+}
+
+// discoveryEnv names every environment variable that moves WHAT the adapters
+// read, as opposed to where aiusage keeps its own files (config.PathEnvNames
+// covers those). It is assembled here because cmd is the composition root: each
+// adapter owns its variable, and package adapter cannot collect them without
+// importing the packages that import it.
+//
+// The list matters for supervision. A systemd unit does not inherit the
+// installing shell's environment, so a unit written under CLAUDE_CONFIG_DIR
+// supervises a daemon that reads the DEFAULT Claude directory while the CLI
+// that installed it reads the overridden one - the same disagreement a path
+// override causes, arriving through what is collected rather than where it is
+// stored. TestDiscoveryEnvCoversEveryAdapterVariable reads the adapter sources
+// and fails when one consults a variable this list has not been taught about.
+func discoveryEnv() []string {
+	return []string{
+		claudecode.ConfigDirEnv,
+		codex.HomeEnv,
+		copilot.ExporterEnv,
+		hermes.HomeEnv,
+		opencode.DataDirEnv,
+	}
+}
+
+// discoveryEnvOverrides returns the discoveryEnv variables currently set to a
+// value an adapter would act on, in the same fixed order. Adapters trim before
+// testing, so a blank value moves nothing and is not reported.
+func discoveryEnvOverrides() []string {
+	var out []string
+	for _, name := range discoveryEnv() {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // cmdContext returns the context for a command invocation. cobra wires

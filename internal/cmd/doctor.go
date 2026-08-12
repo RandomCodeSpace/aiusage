@@ -10,8 +10,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
+	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/internal/service"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/web"
 )
@@ -88,6 +90,8 @@ func runDoctor(c *cobra.Command) error {
 	fmt.Fprintf(out, "web ui:   %s\n", webUIStatus())
 	fmt.Fprintln(out)
 
+	printSupervision(c, cfg)
+
 	printPermWarnings(out, cfg)
 
 	st, err := openStore(cfg)
@@ -118,6 +122,94 @@ func webUIStatus() string {
 		return "embedded (`aiusage serve` available)"
 	}
 	return "not embedded (`aiusage serve` is unavailable; collection is unaffected)"
+}
+
+// printSupervision reports how the collector is being kept alive, which is the
+// question behind every complaint that numbers stopped updating.
+//
+// There are three honest answers and doctor gives whichever holds: systemd user
+// units (named, with each one's enabled and running state), an unsupervised
+// background process (collecting now, gone at the next reboot), or nothing at
+// all. It never installs anything - doctor is in daemonSkip precisely so a
+// diagnostic has no side effects.
+//
+// The whole block shares one deadline, for the reason ensureDaemon has one. It
+// is five calls into the service manager - availability, then enabled and
+// active for each unit - and a manager answering each of them slowly (four
+// seconds is a loaded machine, not a broken one) turns twenty seconds of
+// nothing into the first thing a user sees when they run this. doctor is
+// reached BECAUSE supervision is suspect, so the one thing it may not do is
+// hang on it: when the budget expires the block says what it managed to
+// establish and moves on, and a unit nobody got an answer about is reported as
+// unknown rather than dressed up as inactive.
+func printSupervision(c *cobra.Command, cfg config.Config) {
+	out := c.OutOrStdout()
+	fmt.Fprintln(out, "Supervision")
+	fmt.Fprintln(out, strings.Repeat("-", 11))
+
+	ctx, cancel := supervisionContext(cmdContext(c))
+	defer cancel()
+
+	m := newSupervisor()
+	if m.Available(ctx) {
+		units := m.Status(ctx)
+		installed := false
+		for _, u := range units {
+			if u.Installed {
+				installed = true
+			}
+		}
+		if installed {
+			fmt.Fprintln(out, "systemd user units:")
+			for _, u := range units {
+				fmt.Fprintf(out, "  %-24s %s\n", u.Name, unitState(u))
+			}
+			if ctx.Err() != nil {
+				fmt.Fprintf(out, "  (the service manager stopped answering within %s; states above may be incomplete)\n",
+					supervisionBudget)
+			}
+			fmt.Fprintln(out)
+			return
+		}
+	}
+
+	// A deadline that expired before the manager answered leaves "no units" as
+	// an assumption rather than a finding, so it is not stated. The collection
+	// lock is a local file and answers instantly, so whatever it says is still
+	// worth printing.
+	if ctx.Err() != nil {
+		fmt.Fprintf(out, "unknown: the service manager did not answer within %s\n", supervisionBudget)
+		if running, pid := collect.DaemonStatus(cfg); running {
+			fmt.Fprintf(out, "a collector is running right now regardless (pid %d)\n", pid)
+		}
+		fmt.Fprintln(out)
+		return
+	}
+
+	if running, pid := collect.DaemonStatus(cfg); running {
+		fmt.Fprintf(out, "unsupervised background process (pid %d); `aiusage setup` installs systemd user units\n\n", pid)
+		return
+	}
+	fmt.Fprintln(out, "none: no collector is running")
+	fmt.Fprintln(out)
+}
+
+// unitState renders one unit's state for the supervision block.
+func unitState(u service.UnitStatus) string {
+	switch {
+	case !u.Installed:
+		return "not installed"
+	case !u.StateKnown:
+		return "installed, state unknown (no answer from the service manager)"
+	}
+	state := "inactive"
+	if u.Active {
+		state = "active"
+	}
+	if u.Enabled {
+		return state + ", enabled"
+	}
+	return state + ", not enabled"
 }
 
 // printPermWarnings warns when the data dir or the DB is accessible by group or
