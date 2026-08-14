@@ -723,10 +723,11 @@ func drawRidgeCenterline(m *timeserieslinechart.Model, g paneGeom, r ridgeGeom) 
 // --- candidate D: self-scaled heat lanes --------------------------------------
 
 // heatRamp is the intensity ladder: six rungs built from four BMP shade and
-// block glyphs plus two SGR attributes. The glyph carries magnitude on its own,
-// which is termgraph's calendar model and the reason this ramp survives a
-// 16-color terminal, NO_COLOR and grayscale alike - stripped of every attribute
-// and color it still reads light, medium, dark, full.
+// block glyphs plus two SGR attributes. It is the REINFORCING channel now that a
+// column's height carries the value, and it is what still reads when a band
+// degrades to a flat strip with no height to modulate. Magnitude survives in the
+// glyph alone - termgraph's calendar model - so a 16-color terminal, NO_COLOR
+// and grayscale all keep light, medium, dark, full.
 var heatRamp = [...]struct {
 	glyph rune
 	faint bool
@@ -763,37 +764,56 @@ func heatRungFor(f float64) int {
 	return r - 1
 }
 
-// heatGeom is the vertical layout of the lanes inside a pane: how tall a lane's
-// band is, where the first lane's header sits, and the blank rows between lanes.
-// The hero's two-pane budget is taller than three lanes need, and the freed rows
-// are spent on breathing room rather than on inventing a fourth thing to show.
+// heatGeom is the vertical layout of the lanes inside a pane: how tall each
+// lane's band is, where the first lane's rule sits, and - in the degraded flat
+// modes only - the blank rows between lanes.
+//
+// tall is the shipping shape: the bands GROW to consume the hero body, split
+// three ways, and the vertical space inside a band carries the value. The flat
+// modes are what is left when there are not enough rows for that, and they fall
+// back to thickness-free strips where the ramp alone carries magnitude.
 type heatGeom struct {
-	laneH int
+	tall  bool
+	bandH int
 	top   int
 	gap   int
 }
 
-// heatLaneH is the band height a lane gets when the pane can afford it.
-const heatLaneH = 2
+// heatFlatBandH is the band height of the degraded flat strip.
+const heatFlatBandH = 2
 
-// heatMaxGap caps the blank rows between lanes. Slack past it goes to the
-// margins instead: lanes that drift too far apart stop reading as one chart.
+// heatMinTallBand is the shortest band worth modulating a height inside. Two
+// rows would work arithmetically - a cell holds eight eighths - but a two-row
+// column reads as a thick strip rather than as a height, and the flat strip
+// says the same thing more honestly at that size.
+const heatMinTallBand = 3
+
+// heatMaxGap caps the blank rows between lanes in the flat modes. Slack past it
+// goes to the margins: lanes that drift too far apart stop reading as one chart.
 const heatMaxGap = 3
 
-// newHeatGeom lays out n lanes in gh rows. Slack is shared between the margins
-// and the inter-lane gaps rather than piled at one end - three lanes clustered
-// in the middle of a two-pane budget read as an empty panel with a band in it.
-// ok=false when even one row per lane plus its header does not fit, which leaves
+// newHeatGeom lays out n lanes in gh rows.
+//
+// The rows go into the BANDS first. Three equal bands plus their three rules is
+// the whole budget, and any remainder (0..n-1 rows, from the integer split) sits
+// above the first lane rather than being smeared between bands, so the three
+// bands stay exactly equal - a lane one row taller than its neighbour would make
+// two equal values render at different heights.
+//
+// ok=false when even one row per lane plus its rule does not fit, which leaves
 // the caller on the pane layout.
 func newHeatGeom(gh, n int) (heatGeom, bool) {
 	if n < 1 || gh < n*2 {
 		return heatGeom{}, false
 	}
-	hg := heatGeom{laneH: heatLaneH}
-	if gh < n*(1+heatLaneH) {
-		hg.laneH = 1
+	if bandH := (gh - n) / n; bandH >= heatMinTallBand {
+		return heatGeom{tall: true, bandH: bandH, top: gh - n*(1+bandH)}, true
 	}
-	content := n * (1 + hg.laneH)
+	hg := heatGeom{bandH: heatFlatBandH}
+	if gh < n*(1+heatFlatBandH) {
+		hg.bandH = 1
+	}
+	content := n * (1 + hg.bandH)
 	// The slack falls into n+1 slots: the top margin, the n-1 gaps, the bottom.
 	if slack := gh - content; slack > 0 && n > 1 {
 		if hg.gap = slack / (n + 1); hg.gap > heatMaxGap {
@@ -805,23 +825,32 @@ func newHeatGeom(gh, n int) (heatGeom, bool) {
 	return hg, true
 }
 
-// headerRow is the canvas row carrying lane i's header.
+// headerRow is the canvas row carrying lane i's rule.
 func (hg heatGeom) headerRow(i int) int {
-	return hg.top + i*(1+hg.laneH+hg.gap)
+	return hg.top + i*(1+hg.bandH+hg.gap)
 }
 
-// heatRow is the first canvas row of lane i's band.
+// heatRow is the TOP canvas row of lane i's band.
 func (hg heatGeom) heatRow(i int) int { return hg.headerRow(i) + 1 }
 
-// drawHeatLanes is candidate D: one horizontal lane per series, each cell an
-// intensity rung of that lane's OWN peak.
+// baseRow is the canvas row of lane i's baseline - the bottom of its band, where
+// a column starts and where an idle bucket leaves its track mark.
+func (hg heatGeom) baseRow(i int) int { return hg.heatRow(i) + hg.bandH - 1 }
+
+// drawHeatLanes is candidate D: one horizontal lane per series, each bucket a
+// column whose HEIGHT tracks its value against that lane's own peak and whose
+// ink carries the intensity ramp as reinforcement.
 //
 // Self-scaling per lane is the whole point. Cache runs about 155x fresh, which
-// is the same data fact that forced the two-pane split; on one shared ramp two
-// of the three lanes would be flat at the bottom rung and the picture would say
-// nothing. Each lane therefore states its own peak in its header, so an
-// intensity is read as a fraction of a number the reader can see rather than of
-// an unstated one.
+// is the same data fact that forced the two-pane split; on one shared scale two
+// of the three lanes would sit flat on the baseline and the picture would say
+// nothing. Each lane states its own peak on its rule, so both channels are read
+// as a fraction of a number the reader can see rather than of an unstated one.
+//
+// Height and ink are the same quantity twice over - deliberate redundancy. The
+// height is the precise channel (eighth-block caps give eight sub-rows of
+// resolution per cell); the ramp is what still reads when the band degrades to
+// a flat strip, and what keeps a one-row column visible.
 func drawHeatLanes(c Ctx, m *timeserieslinechart.Model, specs []CompSpec,
 	buckets []store.Bucket, times []time.Time, dim string) bool {
 	g := newPaneGeom(m)
@@ -848,33 +877,28 @@ func drawHeatLanes(c Ctx, m *timeserieslinechart.Model, specs []CompSpec,
 		writeHeatHeader(c, m, g, hg.headerRow(i), s, peak)
 		base := c.compStyle(s)
 		for x := 0; x < g.gw; x++ {
-			r, style := heatCell(c, base, pts, g.rawX(x), reach, peak)
-			if r == 0 {
-				continue
-			}
-			for row := 0; row < hg.laneH; row++ {
-				m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: hg.heatRow(i) + row},
-					canvas.NewCellWithStyle(r, style))
+			v, ok := nearestValue(pts, g.rawX(x), reach)
+			switch {
+			case !ok:
+				// A missing bucket leaves the track blank: an outage and an idle
+				// day are different facts, and only one is about usage.
+			case v <= 0 || peak <= 0:
+				m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: hg.baseRow(i)},
+					canvas.NewCellWithStyle(heatTrack, c.Faint))
+			case hg.tall:
+				drawHeatColumn(m, g, hg, i, x, v/peak, base)
+			default:
+				drawHeatStrip(m, g, hg, i, x, v/peak, base)
 			}
 		}
 	}
 	return true
 }
 
-// heatCell resolves one lane cell: a rung glyph for a non-zero bucket, the track
-// mark for a bucket that exists and is zero, and rune 0 - draw nothing at all -
-// for a MISSING bucket, so an outage is an explicit hole in the track rather
-// than an indistinguishable zero.
-func heatCell(c Ctx, base lipgloss.Style, pts []canvas.Float64Point,
-	tx, reach, peak float64) (rune, lipgloss.Style) {
-	v, ok := nearestValue(pts, tx, reach)
-	if !ok {
-		return 0, base
-	}
-	if v <= 0 || peak <= 0 {
-		return heatTrack, c.Faint
-	}
-	rung := heatRamp[heatRungFor(v/peak)]
+// heatInk is the ramp style for a fraction of a lane's peak: the shade or block
+// glyph plus whichever SGR attributes that rung carries.
+func heatInk(base lipgloss.Style, frac float64) (rune, lipgloss.Style) {
+	rung := heatRamp[heatRungFor(frac)]
 	s := base
 	if rung.faint {
 		s = s.Faint(true)
@@ -883,6 +907,51 @@ func heatCell(c Ctx, base lipgloss.Style, pts []canvas.Float64Point,
 		s = s.Bold(true)
 	}
 	return rung.glyph, s
+}
+
+// drawHeatColumn draws one bucket as a column rising from the lane baseline to
+// frac of the band, whole cells in the ramp glyph plus an eighth-block cap for
+// the remainder. A non-zero value that would round to nothing still gets the
+// smallest mark the ramp has - one eighth - so an active bucket is never drawn
+// as an idle one.
+func drawHeatColumn(m *timeserieslinechart.Model, g paneGeom, hg heatGeom,
+	lane, x int, frac float64, base lipgloss.Style) {
+	if frac > 1 {
+		frac = 1
+	}
+	glyph, style := heatInk(base, frac)
+	total := frac * float64(hg.bandH)
+	full := int(total)
+	if full > hg.bandH {
+		full = hg.bandH
+	}
+	for k := 0; k < full; k++ {
+		m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: hg.baseRow(lane) - k},
+			canvas.NewCellWithStyle(glyph, style))
+	}
+	if full >= hg.bandH {
+		return
+	}
+	tipRune := runes.LowerBlockElementFromFloat64(total - float64(full))
+	if tipRune == runes.Null {
+		if full > 0 {
+			return
+		}
+		tipRune = runes.LowerBlockOne
+	}
+	m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: hg.baseRow(lane) - full},
+		canvas.NewCellWithStyle(tipRune, style))
+}
+
+// drawHeatStrip is the degraded flat band: no height to modulate, so the ramp
+// glyph fills the whole strip and carries the magnitude alone.
+func drawHeatStrip(m *timeserieslinechart.Model, g paneGeom, hg heatGeom,
+	lane, x int, frac float64, base lipgloss.Style) {
+	glyph, style := heatInk(base, frac)
+	for row := 0; row < hg.bandH; row++ {
+		m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: hg.heatRow(lane) + row},
+			canvas.NewCellWithStyle(glyph, style))
+	}
 }
 
 // writeHeatHeader draws one lane's rule directly onto the canvas: glyph, name,
