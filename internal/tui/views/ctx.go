@@ -65,6 +65,12 @@ type Ctx struct {
 	// render memo does not key on it.
 	LeverageFloor int64
 
+	// Trend selects the hero's candidate LINE TREATMENT (ticket #65). Unlike
+	// LeverageFloor it is NOT static - the reader flips it live with x - so the
+	// render memo keys on it explicitly (HeroMemo.trend). The zero value is the
+	// shipped renderer, so every partial headless Ctx keeps the old behaviour.
+	Trend TrendRender
+
 	// Formatting helpers.
 	Humanize func(int64) string
 	PadLeft  func(string, int) string

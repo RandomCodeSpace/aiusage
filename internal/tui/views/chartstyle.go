@@ -472,6 +472,13 @@ func buildDecadeLogFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim s
 
 // buildTwoPaneFrame builds the hero proper: fresh (input+output) over cache,
 // each pane linearly scaled to its own detent and labelled with it.
+//
+// c.Trend selects the LINE TREATMENT only (ticket #65): the pane split, the
+// detent ladder, the SCALE readouts, the shared gutter and the gap runs are the
+// same whichever candidate is drawing. Candidate C is the one exception that
+// touches arithmetic rather than ink - a mirrored fresh pane measures from a
+// centerline, so its detent is picked against HALF the pane and its ring labels
+// read as distance from that centerline.
 func buildTwoPaneFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int, lock *detentLock) (*heroFrame, bool) {
 	freshSpecs, cacheSpecs := heroPaneSeries(c)
 	if len(freshSpecs) == 0 || len(cacheSpecs) == 0 {
@@ -483,14 +490,36 @@ func buildTwoPaneFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim str
 		return nil, false
 	}
 
-	freshStep := lock.pick("fresh", freshGH, detentYStep, seriesMax(buckets, freshSpecs))
 	cacheStep := lock.pick("cache", cacheGH, detentYStep, seriesMax(buckets, cacheSpecs))
+	freshMax := seriesMax(buckets, freshSpecs)
+
+	// The ridge keeps its own lock key: it quantizes against half a pane, so
+	// sharing "fresh" would make the two treatments fight over the hysteresis.
+	ridge, isRidge := ridgeGeom{}, false
+	if c.Trend == TrendRidge {
+		ridge, isRidge = newRidgeGeom(freshGH)
+	}
+	var freshStep int64
+	var freshLabelW int
+	if isRidge {
+		freshStep = lock.pick("ridge", ridge.half, detentYStep, freshMax)
+		freshLabelW = ridgeLabelWidth(c, freshStep, ridge)
+	} else {
+		freshStep = lock.pick("fresh", freshGH, detentYStep, freshMax)
+		freshLabelW = detentLabelWidth(c, []detentAxis{{step: freshStep, graphH: freshGH}})
+	}
 	// The shared gutter width is settled before either widget exists: ntcharts
 	// reserves the Y gutter from its formatter's widest output, and that width
 	// is what column-aligns the two plot areas.
-	labelW := detentLabelWidth(c, []detentAxis{{step: freshStep, graphH: freshGH}, {step: cacheStep, graphH: cacheGH}})
+	labelW := detentLabelWidth(c, []detentAxis{{step: cacheStep, graphH: cacheGH}})
+	if freshLabelW > labelW {
+		labelW = freshLabelW
+	}
 
 	fresh := detentPane(c, buckets, times, dim, freshSpecs, w, freshH, freshGH, freshStep, 0, labelW)
+	if isRidge {
+		fresh = ridgePane(c, buckets, times, dim, freshSpecs, w, freshH, freshStep, ridge, labelW)
+	}
 	cache := detentPane(c, buckets, times, dim, cacheSpecs, w, cacheH, cacheGH, cacheStep, heroXSteps, labelW)
 	return &heroFrame{
 		panes: []heroPane{
@@ -523,9 +552,34 @@ func detentPane(c Ctx, buckets []store.Bucket, times []time.Time, dim string,
 		timeserieslinechart.WithXLabelFormatter(xLabelFormatter(dim)),
 		timeserieslinechart.WithYLabelFormatter(detentYLabel(c, step, detentYStep, labelW)),
 	)
-	// One dataset per contiguous run per series: a braille line only joins
-	// points inside a single dataset, so a missing bucket breaks the line
-	// instead of drawing an interpolated diagonal across the outage.
+	drawPane(c, &tslc, specs, buckets, times, dim)
+	return &tslc
+}
+
+// drawPane fills a built pane's plot rectangle with the active treatment's ink
+// (ticket #65). Everything above it - the canvas, the ranges, the axes, the ring
+// labels, the shared gutter - is identical whichever treatment runs, so a flip
+// changes the line and nothing else.
+func drawPane(c Ctx, tslc *timeserieslinechart.Model, specs []CompSpec,
+	buckets []store.Bucket, times []time.Time, dim string) {
+	switch c.Trend {
+	case TrendSmooth, TrendRidge:
+		// The ridge only mirrors the FRESH pane; every other pane it touches
+		// renders as candidate A, which is the treatment it is a variation of.
+		drawSmoothBraille(tslc, paneSeriesFor(specs, buckets, times, dim))
+	case TrendColumns:
+		drawBlockColumns(tslc, paneSeriesFor(specs, buckets, times, dim), bucketStep(dim))
+	default:
+		drawCurrentBraille(tslc, specs, buckets, times, dim)
+	}
+}
+
+// drawCurrentBraille is the shipped renderer, kept reachable as the prototype's
+// baseline: one dataset per contiguous run per series, handed to ntcharts. A
+// braille line only joins points inside a single dataset, so a missing bucket
+// breaks the line instead of drawing an interpolated diagonal across the outage.
+func drawCurrentBraille(tslc *timeserieslinechart.Model, specs []CompSpec,
+	buckets []store.Bucket, times []time.Time, dim string) {
 	runs := gapRuns(times, dim)
 	order := make([]string, 0, len(specs)*len(runs))
 	for _, s := range specs {
@@ -540,6 +594,32 @@ func detentPane(c Ctx, buckets []store.Bucket, times []time.Time, dim string,
 		}
 	}
 	tslc.DrawBrailleDataSets(order)
+}
+
+// ridgePane builds candidate C's fresh pane: the same detented widget, with the
+// ring labels read as distance from a centerline and the two series drawn away
+// from it in opposite directions. It carries no x axis, exactly as the flat
+// fresh pane does not.
+func ridgePane(c Ctx, buckets []store.Bucket, times []time.Time, dim string,
+	specs []CompSpec, w, h int, step int64, r ridgeGeom, labelW int) *timeserieslinechart.Model {
+	minT, maxT := times[0], times[len(times)-1]
+	if !maxT.After(minT) {
+		maxT = minT.Add(bucketStep(dim))
+	}
+	axis := lipgloss.NewStyle().Foreground(c.FaintColor)
+	label := lipgloss.NewStyle().Foreground(c.FaintColor)
+	tslc := timeserieslinechart.New(w, h,
+		timeserieslinechart.WithTimeRange(minT, maxT),
+		timeserieslinechart.WithYRange(0, detentViewMax(step, h, detentYStep)),
+		// A Y step of 1 hands the formatter every row: the rings are measured out
+		// from the centerline rather than from the baseline, so the ridge is free
+		// to sit on the pane's true middle row (see newRidgeGeom).
+		timeserieslinechart.WithXYSteps(0, 1),
+		timeserieslinechart.WithAxesStyles(axis, label),
+		timeserieslinechart.WithXLabelFormatter(xLabelFormatter(dim)),
+		timeserieslinechart.WithYLabelFormatter(ridgeYLabel(c, step, r, labelW)),
+	)
+	drawSplitRidge(&tslc, paneSeriesFor(specs, buckets, times, dim), r, step)
 	return &tslc
 }
 

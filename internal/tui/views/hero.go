@@ -105,6 +105,10 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 			title += "  " + chip
 		}
 	}
+	// The prototype's treatment chip (ticket #65). It names what the reader is
+	// looking at in plain text, so a screenshot or a monochrome terminal still
+	// says which candidate produced the picture.
+	add(c.Subtle.Render(c.Trend.Chip()))
 	if d.Mode == HeroLeverage {
 		add(c.Subtle.Render("leverage · cache-read / input"))
 	}

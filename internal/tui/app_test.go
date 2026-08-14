@@ -681,9 +681,13 @@ func TestQuitWhileFiltering(t *testing.T) {
 func TestSelectionFollowsRebinding(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	m = step(t, m, keyMsg("2")) // By-Tool
+	// The rebind targets have to be letters the default map does not already
+	// claim — a key another binding matches first would be swallowed before the
+	// rebound one is ever consulted, and the test would be measuring precedence
+	// rather than rebinding.
 	m.keys.Up = key.NewBinding(key.WithKeys("w"))
-	m.keys.Down = key.NewBinding(key.WithKeys("x"))
-	m = send(m, keyMsg("x"))
+	m.keys.Down = key.NewBinding(key.WithKeys("z"))
+	m = send(m, keyMsg("z"))
 	if m.byTool.Selected != 1 {
 		t.Fatalf("rebound down did not move selection: %d", m.byTool.Selected)
 	}

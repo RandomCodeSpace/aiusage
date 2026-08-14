@@ -22,6 +22,7 @@ type KeyMap struct {
 	Sort     key.Binding
 	Range    key.Binding
 	Pivot    key.Binding // p — pivot the Overview hero between trend and leverage
+	Render   key.Binding // x — cycle the Overview hero's trend line treatment
 	StepBack key.Binding // [ — step time window earlier
 	StepFwd  key.Binding // ] — step time window later
 	Enter    key.Binding
@@ -86,6 +87,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("p"),
 			key.WithHelp("p", "pivot"),
 		),
+		// Prototype switcher (ticket #65): cycles the hero's candidate trend
+		// treatment. Presentation state only — no persistence, no reload.
+		Render: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "render"),
+		),
 		// Window stepping moves whole calendar spans; the bindings are enabled
 		// only where they can act (Model.syncStepKeys), so help never lists a key
 		// that would do nothing — ] disappears at the live edge.
@@ -131,7 +138,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.View1, k.View2, k.View3, k.View4},
 		{k.NextPane, k.PrevPane, k.Up, k.Down, k.Left, k.Right},
 		{k.Enter, k.Back, k.Top, k.Bottom},
-		{k.Range, k.StepBack, k.StepFwd, k.Pivot, k.Sort, k.Filter},
+		{k.Range, k.StepBack, k.StepFwd, k.Pivot, k.Render, k.Sort, k.Filter},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }
