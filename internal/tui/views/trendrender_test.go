@@ -10,6 +10,7 @@ import (
 
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas/runes"
+	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -21,42 +22,67 @@ import (
 // below zero on an idle stretch, or a real bucket with no marker on it.
 
 // allTrends is the switcher's cycle, in order.
-var allTrends = []TrendRender{TrendCurrent, TrendSmooth, TrendColumns, TrendRidge}
+var allTrends = []TrendRender{TrendCurrent, TrendSmooth, TrendColumns, TrendRidge, TrendHeat}
+
+// TestTrendCycleVisitsEveryCandidate: x must reach every candidate and come back
+// to the shipped renderer, or one of them is unreachable in the prototype.
+func TestTrendCycleVisitsEveryCandidate(t *testing.T) {
+	got := []TrendRender{TrendCurrent}
+	for tr := TrendCurrent.Next(); tr != TrendCurrent; tr = tr.Next() {
+		got = append(got, tr)
+		if len(got) > len(allTrends) {
+			t.Fatalf("x cycle does not return to the baseline: %v", got)
+		}
+	}
+	if len(got) != len(allTrends) {
+		t.Fatalf("x cycle visits %v, want %v", got, allTrends)
+	}
+	for i, tr := range allTrends {
+		if got[i] != tr {
+			t.Fatalf("x cycle position %d = %v, want %v", i, got[i], tr)
+		}
+	}
+}
 
 // spikeIdleBuckets is the shape the interpolation research measured against:
 // a spike, a run of idle buckets, another spike — plus a real gap, so a
-// treatment that smooths across an outage is caught here too. Every series
-// carries the shape so both hero panes exercise it.
+// treatment that smooths across an outage is caught here too.
+//
+// Cache deliberately does NOT track input. A fixed multiple would make the
+// self-scaled heat lanes render three identical strips, which proves the
+// scaling arithmetic and nothing about whether the lanes can disagree; cache
+// here peaks where input is idle and still runs the ~100x larger that forced
+// the two-pane split in the first place.
 func spikeIdleBuckets() []store.Bucket {
-	// day index -> input tokens; the days missing from this list are the gap.
+	// day index -> (input, cache) tokens; days missing from this list are the gap.
 	shape := []struct {
-		day int
-		v   int64
+		day       int
+		in, cache int64
 	}{
-		{0, 4_000_000},
-		{1, 0},
-		{2, 0},
-		{3, 0},
-		{4, 0},
-		{5, 3_200_000},
-		{6, 0},
-		{7, 900_000},
+		{0, 4_000_000, 500_000_000},
+		{1, 0, 90_000_000},
+		{2, 0, 0},
+		{3, 0, 12_000_000},
+		{4, 0, 0},
+		{5, 3_200_000, 620_000_000},
+		{6, 0, 40_000_000},
+		{7, 900_000, 150_000_000},
 		// days 8 and 9 are absent: an outage wider than 1.5 bucket steps.
-		{10, 5_000_000},
-		{11, 0},
-		{12, 0},
-		{13, 2_400_000},
+		{10, 5_000_000, 300_000_000},
+		{11, 0, 0},
+		{12, 0, 210_000_000},
+		{13, 2_400_000, 480_000_000},
 	}
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local)
 	out := make([]store.Bucket, 0, len(shape))
 	for _, s := range shape {
 		out = append(out, store.Bucket{
 			Keys:          map[string]string{"day": base.AddDate(0, 0, s.day).Format("2006-01-02")},
-			Input:         s.v,
-			Output:        s.v / 3,
-			CacheRead:     s.v * 120,
-			CacheCreation: s.v * 4,
-			Total:         s.v * 125,
+			Input:         s.in,
+			Output:        s.in / 3,
+			CacheRead:     s.cache * 4 / 5,
+			CacheCreation: s.cache / 5,
+			Total:         s.in + s.in/3 + s.cache,
 		})
 	}
 	return out
@@ -272,6 +298,134 @@ func ansiFor(s CompSpec) string {
 	return r
 }
 
+// heatLanesFor builds candidate D and returns its single pane, the pane
+// geometry and the lane layout the assertions below index with.
+func heatLanesFor(t *testing.T, w, h int) (*timeserieslinechart.Model, paneGeom, heatGeom, []CompSpec) {
+	t.Helper()
+	c := trendTestCtx(TrendHeat)
+	f, ok := buildHeroFrame(c, spikeIdleBuckets(), "day", heroFrameTwoPane, w, h, nil)
+	if !ok || len(f.panes) != 1 {
+		t.Fatalf("heat frame did not build at %dx%d", w, h)
+	}
+	m := f.panes[0].model
+	g := newPaneGeom(m)
+	hg, ok := newHeatGeom(g.gh, len(c.Comp))
+	if !ok {
+		t.Fatalf("heat lanes do not fit %d rows", g.gh)
+	}
+	return m, g, hg, c.Comp
+}
+
+// heatColOf is the plot column a bucket time owns, matching paneGeom's mapping.
+func heatColOf(g paneGeom, ts time.Time) int {
+	x := float64(ts.UnixMilli()) / 1e3
+	return int(math.Round((x - g.minX) / (g.maxX - g.minX) * float64(g.gw-1)))
+}
+
+// isHeatRung reports whether r is one of the ramp's intensity glyphs — not the
+// idle track and not the blank a missing bucket leaves.
+func isHeatRung(r rune) bool {
+	for _, rung := range heatRamp {
+		if rung.glyph == r {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHeatMarksEveryNonZeroBucket: every bucket that carries tokens must carry a
+// mark on its lane. The smallest-honest-mark rule says a non-zero bucket may
+// never render as an idle one, and an idle one may never render as a hole.
+func TestHeatMarksEveryNonZeroBucket(t *testing.T) {
+	m, g, hg, specs := heatLanesFor(t, 100, 24)
+	buckets := spikeIdleBuckets()
+	times := bucketTimes(buckets, "day")
+	for li, s := range specs {
+		for i, b := range buckets {
+			p := canvas.Point{X: g.startX + heatColOf(g, times[i]), Y: hg.heatRow(li)}
+			got := m.Canvas.Cell(p).Rune
+			if v := s.Pick(Split(b)); v > 0 {
+				if !isHeatRung(got) {
+					t.Errorf("lane %s bucket %s (%d tokens): cell holds %q, want a ramp glyph",
+						s.Key, b.Keys["day"], v, string(got))
+				}
+				continue
+			}
+			if got != heatTrack {
+				t.Errorf("lane %s bucket %s (idle): cell holds %q, want the track mark %q",
+					s.Key, b.Keys["day"], string(got), string(heatTrack))
+			}
+		}
+	}
+}
+
+// TestHeatGapIsAHoleNotAZero: a missing bucket must leave the lane track blank,
+// which is the one thing that distinguishes an outage from an idle day. Both
+// would otherwise read as "no tokens", and only one of them is a fact about
+// usage rather than about collection.
+func TestHeatGapIsAHoleNotAZero(t *testing.T) {
+	m, g, hg, specs := heatLanesFor(t, 100, 24)
+	buckets := spikeIdleBuckets()
+	times := bucketTimes(buckets, "day")
+	// Days 8 and 9 are absent; day 7 and day 10 bracket the outage.
+	lo := heatColOf(g, times[7])
+	hi := heatColOf(g, times[8]) // the bucket AFTER the gap
+	if hi-lo < 4 {
+		t.Fatalf("gap spans %d columns, too narrow to assert on", hi-lo)
+	}
+	mid := (lo + hi) / 2
+	for li := range specs {
+		got := m.Canvas.Cell(canvas.Point{X: g.startX + mid, Y: hg.heatRow(li)}).Rune
+		if got != 0 && got != ' ' {
+			t.Errorf("lane %d: outage column %d holds %q, want an explicit hole",
+				li, mid, string(got))
+		}
+	}
+}
+
+// TestHeatLanesSelfScale is the point of the treatment: each lane is quantized
+// against its OWN peak, so the lane's largest bucket reaches the top rung even
+// though cache runs about 100x fresh. On one shared ramp the two fresh lanes
+// would sit flat on the bottom rung — the same data fact that forced the
+// two-pane split.
+func TestHeatLanesSelfScale(t *testing.T) {
+	m, g, hg, specs := heatLanesFor(t, 100, 24)
+	buckets := spikeIdleBuckets()
+	times := bucketTimes(buckets, "day")
+	top := heatRamp[len(heatRamp)-1].glyph
+
+	peaks := make([]int64, len(specs))
+	for li, s := range specs {
+		var at int
+		for i, b := range buckets {
+			if v := s.Pick(Split(b)); v > peaks[li] {
+				peaks[li], at = v, i
+			}
+		}
+		if peaks[li] == 0 {
+			t.Fatalf("lane %s has no non-zero bucket to peak on", s.Key)
+		}
+		p := canvas.Point{X: g.startX + heatColOf(g, times[at]), Y: hg.heatRow(li)}
+		if got := m.Canvas.Cell(p).Rune; got != top {
+			t.Errorf("lane %s peak (%d tokens) renders %q, want the top rung %q",
+				s.Key, peaks[li], string(got), string(top))
+		}
+	}
+	// And the spread the treatment exists to absorb is really there.
+	if peaks[len(peaks)-1] < 20*peaks[0] {
+		t.Fatalf("cache peak %d is only %.1fx input peak %d — the fixture no longer exercises self-scaling",
+			peaks[len(peaks)-1], float64(peaks[len(peaks)-1])/float64(peaks[0]), peaks[0])
+	}
+	// Each lane must state the number its intensities are a fraction of.
+	frame := ansiHero.ReplaceAllString(m.View(), "")
+	for li, s := range specs {
+		want := "max " + detentHuman(trendTestCtx(TrendHeat), peaks[li])
+		if !strings.Contains(frame, want) {
+			t.Errorf("lane %s does not declare %q:\n%s", s.Key, want, frame)
+		}
+	}
+}
+
 // TestTrendFrameDump writes one ANSI-stripped frame per treatment when
 // AIUSAGE_TREND_FRAMES names a directory. It exists so a reviewer can eyeball
 // the candidates without a terminal; a normal test run writes nothing.
@@ -284,7 +438,8 @@ func TestTrendFrameDump(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := map[TrendRender]string{
-		TrendCurrent: "current", TrendSmooth: "a", TrendColumns: "b", TrendRidge: "c",
+		TrendCurrent: "current", TrendSmooth: "a", TrendColumns: "b",
+		TrendRidge: "c", TrendHeat: "d",
 	}
 	for _, tr := range allTrends {
 		var b strings.Builder

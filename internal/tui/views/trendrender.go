@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/bits"
 	"sort"
+	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
@@ -53,6 +54,11 @@ const (
 	// output down from a shared centerline - which makes occlusion structurally
 	// impossible. The cache pane keeps candidate A's rendering.
 	TrendRidge
+	// TrendHeat is candidate D: all three series as horizontal heat lanes, each
+	// self-scaled to its own peak. It is the ONE treatment that collapses the
+	// two-pane split, by request: the split exists because cache runs ~155x
+	// fresh, and per-lane scaling answers that spread a different way.
+	TrendHeat
 	// trendRenderCount bounds the cycle.
 	trendRenderCount
 )
@@ -77,6 +83,8 @@ func (t TrendRender) Chip() string {
 		return "render: B block columns"
 	case TrendRidge:
 		return "render: C split ridge"
+	case TrendHeat:
+		return "render: D heat"
 	}
 	return "render: current"
 }
@@ -709,5 +717,201 @@ func drawRidgeCenterline(m *timeserieslinechart.Model, g paneGeom, r ridgeGeom) 
 	for x := 0; x < g.gw; x++ {
 		m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: y},
 			canvas.NewCellWithStyle(runes.LineHorizontal, m.AxisStyle))
+	}
+}
+
+// --- candidate D: self-scaled heat lanes --------------------------------------
+
+// heatRamp is the intensity ladder: six rungs built from four BMP shade and
+// block glyphs plus two SGR attributes. The glyph carries magnitude on its own,
+// which is termgraph's calendar model and the reason this ramp survives a
+// 16-color terminal, NO_COLOR and grayscale alike - stripped of every attribute
+// and color it still reads light, medium, dark, full.
+var heatRamp = [...]struct {
+	glyph rune
+	faint bool
+	bold  bool
+}{
+	{'░', true, false},
+	{'░', false, false},
+	{'▒', false, false},
+	{'▓', false, false},
+	{'█', false, false},
+	{'█', false, true},
+}
+
+// heatTrack marks a lane cell whose bucket exists and is zero. It is deliberately
+// NOT the bottom rung of the ramp: an idle bucket and a missing one are different
+// facts, so the track shows where the lane runs and a gap leaves it blank.
+const heatTrack = '·'
+
+// heatRungFor maps a fraction of a lane's own peak onto a rung. Any non-zero
+// value reaches at least the first rung - the smallest-honest-mark rule - and a
+// value at the peak reaches the last, which is what makes per-lane scaling
+// legible rather than merely true.
+func heatRungFor(f float64) int {
+	if f <= 0 {
+		return -1
+	}
+	r := int(math.Ceil(f * float64(len(heatRamp))))
+	if r < 1 {
+		r = 1
+	}
+	if r > len(heatRamp) {
+		r = len(heatRamp)
+	}
+	return r - 1
+}
+
+// heatGeom is the vertical layout of the lanes inside a pane: how tall a lane's
+// band is, where the first lane's header sits, and the blank rows between lanes.
+// The hero's two-pane budget is taller than three lanes need, and the freed rows
+// are spent on breathing room rather than on inventing a fourth thing to show.
+type heatGeom struct {
+	laneH int
+	top   int
+	gap   int
+}
+
+// heatLaneH is the band height a lane gets when the pane can afford it.
+const heatLaneH = 2
+
+// heatMaxGap caps the blank rows between lanes. Slack past it goes to the
+// margins instead: lanes that drift too far apart stop reading as one chart.
+const heatMaxGap = 3
+
+// newHeatGeom lays out n lanes in gh rows. Slack is shared between the margins
+// and the inter-lane gaps rather than piled at one end - three lanes clustered
+// in the middle of a two-pane budget read as an empty panel with a band in it.
+// ok=false when even one row per lane plus its header does not fit, which leaves
+// the caller on the pane layout.
+func newHeatGeom(gh, n int) (heatGeom, bool) {
+	if n < 1 || gh < n*2 {
+		return heatGeom{}, false
+	}
+	hg := heatGeom{laneH: heatLaneH}
+	if gh < n*(1+heatLaneH) {
+		hg.laneH = 1
+	}
+	content := n * (1 + hg.laneH)
+	// The slack falls into n+1 slots: the top margin, the n-1 gaps, the bottom.
+	if slack := gh - content; slack > 0 && n > 1 {
+		if hg.gap = slack / (n + 1); hg.gap > heatMaxGap {
+			hg.gap = heatMaxGap
+		}
+		content += hg.gap * (n - 1)
+	}
+	hg.top = (gh - content) / 2
+	return hg, true
+}
+
+// headerRow is the canvas row carrying lane i's header.
+func (hg heatGeom) headerRow(i int) int {
+	return hg.top + i*(1+hg.laneH+hg.gap)
+}
+
+// heatRow is the first canvas row of lane i's band.
+func (hg heatGeom) heatRow(i int) int { return hg.headerRow(i) + 1 }
+
+// drawHeatLanes is candidate D: one horizontal lane per series, each cell an
+// intensity rung of that lane's OWN peak.
+//
+// Self-scaling per lane is the whole point. Cache runs about 155x fresh, which
+// is the same data fact that forced the two-pane split; on one shared ramp two
+// of the three lanes would be flat at the bottom rung and the picture would say
+// nothing. Each lane therefore states its own peak in its header, so an
+// intensity is read as a fraction of a number the reader can see rather than of
+// an unstated one.
+func drawHeatLanes(c Ctx, m *timeserieslinechart.Model, specs []CompSpec,
+	buckets []store.Bucket, times []time.Time, dim string) bool {
+	g := newPaneGeom(m)
+	hg, ok := newHeatGeom(g.gh, len(specs))
+	if !g.ok() || !ok {
+		return false
+	}
+	m.Clear()
+	m.DrawXYAxisAndLabel()
+
+	series := paneSeriesFor(specs, buckets, times, dim)
+	reach := bucketStep(dim).Seconds() / 2
+	for i, s := range specs {
+		var pts []canvas.Float64Point
+		for _, run := range series[i].runs {
+			pts = append(pts, run...)
+		}
+		var peak float64
+		for _, p := range pts {
+			if p.Y > peak {
+				peak = p.Y
+			}
+		}
+		writeHeatHeader(c, m, g, hg.headerRow(i), s, peak)
+		base := c.compStyle(s)
+		for x := 0; x < g.gw; x++ {
+			r, style := heatCell(c, base, pts, g.rawX(x), reach, peak)
+			if r == 0 {
+				continue
+			}
+			for row := 0; row < hg.laneH; row++ {
+				m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: hg.heatRow(i) + row},
+					canvas.NewCellWithStyle(r, style))
+			}
+		}
+	}
+	return true
+}
+
+// heatCell resolves one lane cell: a rung glyph for a non-zero bucket, the track
+// mark for a bucket that exists and is zero, and rune 0 - draw nothing at all -
+// for a MISSING bucket, so an outage is an explicit hole in the track rather
+// than an indistinguishable zero.
+func heatCell(c Ctx, base lipgloss.Style, pts []canvas.Float64Point,
+	tx, reach, peak float64) (rune, lipgloss.Style) {
+	v, ok := nearestValue(pts, tx, reach)
+	if !ok {
+		return 0, base
+	}
+	if v <= 0 || peak <= 0 {
+		return heatTrack, c.Faint
+	}
+	rung := heatRamp[heatRungFor(v/peak)]
+	s := base
+	if rung.faint {
+		s = s.Faint(true)
+	}
+	if rung.bold {
+		s = s.Bold(true)
+	}
+	return rung.glyph, s
+}
+
+// writeHeatHeader draws one lane's rule directly onto the canvas: glyph, name,
+// hairline, and the lane's own peak in the SCALE vocabulary. It is written cell
+// by cell because a canvas holds one style per cell and the parts are styled
+// differently; lipgloss cannot hand a multi-styled string to a cell grid.
+func writeHeatHeader(c Ctx, m *timeserieslinechart.Model, g paneGeom, row int, s CompSpec, peak float64) {
+	if row < 0 || row >= g.gh {
+		return
+	}
+	x := g.startX
+	m.Canvas.SetStringWithStyle(canvas.Point{X: x, Y: row}, s.Glyph, c.compStyle(s))
+	x += len([]rune(s.Glyph)) + 1
+	m.Canvas.SetStringWithStyle(canvas.Point{X: x, Y: row}, s.Label, c.StatLabel)
+	x += len([]rune(s.Label)) + 1
+
+	tail := ""
+	if h := detentHuman(c, int64(peak)); h != "" {
+		tail = "max " + h
+	}
+	end := g.startX + g.gw
+	if tail != "" {
+		end -= len([]rune(tail)) + 1
+	}
+	if end > x {
+		m.Canvas.SetStringWithStyle(canvas.Point{X: x, Y: row},
+			strings.Repeat(string(runes.LineHorizontal), end-x), c.Faint)
+	}
+	if tail != "" && end >= x {
+		m.Canvas.SetStringWithStyle(canvas.Point{X: end + 1, Y: row}, tail, c.Subtle)
 	}
 }

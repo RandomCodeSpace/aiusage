@@ -480,6 +480,15 @@ func buildDecadeLogFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim s
 // centerline, so its detent is picked against HALF the pane and its ring labels
 // read as distance from that centerline.
 func buildTwoPaneFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int, lock *detentLock) (*heroFrame, bool) {
+	// Candidate D is the one treatment that replaces the pane layout instead of
+	// only its ink, so it is resolved before the split is computed. A pane too
+	// short for three lanes falls through to the layout below, where D draws as
+	// the shipped renderer rather than not at all.
+	if c.Trend == TrendHeat {
+		if f, ok := buildHeatFrame(c, buckets, times, dim, w, h); ok {
+			return f, true
+		}
+	}
 	freshSpecs, cacheSpecs := heroPaneSeries(c)
 	if len(freshSpecs) == 0 || len(cacheSpecs) == 0 {
 		return nil, false
@@ -594,6 +603,43 @@ func drawCurrentBraille(tslc *timeserieslinechart.Model, specs []CompSpec,
 		}
 	}
 	tslc.DrawBrailleDataSets(order)
+}
+
+// buildHeatFrame builds candidate D: ONE widget carrying the shared time axis,
+// with three self-scaled heat lanes written into its plot rectangle.
+//
+// It asks for no Y gutter (yStep 0), so the lanes run the full width and the
+// pane owns every row above the axis. Everything the other treatments get from
+// ntcharts still applies: the x axis and its labels are drawn by the widget, the
+// scrub crosshair and the now column stay a canvas post-pass, and the render
+// memo retains it exactly as it retains a braille pane.
+func buildHeatFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim string, w, h int) (*heroFrame, bool) {
+	if len(c.Comp) == 0 {
+		return nil, false
+	}
+	minT, maxT := times[0], times[len(times)-1]
+	if !maxT.After(minT) {
+		maxT = minT.Add(bucketStep(dim))
+	}
+	axis := lipgloss.NewStyle().Foreground(c.FaintColor)
+	label := lipgloss.NewStyle().Foreground(c.FaintColor)
+	tslc := timeserieslinechart.New(w, h,
+		timeserieslinechart.WithTimeRange(minT, maxT),
+		timeserieslinechart.WithYRange(0, 1),
+		timeserieslinechart.WithXYSteps(heroXSteps, 0),
+		timeserieslinechart.WithAxesStyles(axis, label),
+		timeserieslinechart.WithXLabelFormatter(xLabelFormatter(dim)),
+	)
+	if !drawHeatLanes(c, &tslc, c.Comp, buckets, times, dim) {
+		return nil, false
+	}
+	// The lane rules carry their own glyphs, names and peaks, so this frame needs
+	// no pane header of its own; an empty header claims no row.
+	return &heroFrame{
+		panes: []heroPane{{model: &tslc, h: h}},
+		times: times,
+		h:     h,
+	}, true
 }
 
 // ridgePane builds candidate C's fresh pane: the same detented widget, with the
