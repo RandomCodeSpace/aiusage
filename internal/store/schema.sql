@@ -14,6 +14,11 @@
 -- usage_rollup is a MUTABLE DERIVED summary of usage_events. It is not
 -- history either: every row is reproducible from the ledger, and it may be
 -- dropped and rebuilt at any time.
+--
+-- activity_events is a SECOND append-only ledger, of agent ACTIVITY rather than
+-- tokens: which tool was called, which skill was invoked, which hook fired. It
+-- is a sibling of usage_events, never a part of it, and it stores names and
+-- counts ONLY — no tool inputs and no raw payload of any kind.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -115,6 +120,70 @@ CREATE TABLE IF NOT EXISTS usage_rollup (
   unpriced_events       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (bucket_start_unix, tool, model, project)
 ) WITHOUT ROWID;
+
+-- Agent activity ledger (v5): one row per observed tool call, skill invocation
+-- or hook firing. Append-only on the same terms as usage_events (UNIQUE
+-- dedup_key + no-UPDATE/no-DELETE triggers), and deliberately a SEPARATE table:
+-- activity is not token accounting, and a call that cost nothing has no
+-- business in the ledger that answers "what did this cost".
+--
+-- PRIVACY BY CONSTRUCTION: there is no column for a tool's input and no raw
+-- column, so a command string, a file path or a prompt has nowhere to land even
+-- if an adapter tried. The only value read out of a call's input anywhere in
+-- this project is the skill NAME of a Skill call, which is the recorded fact.
+--
+-- COST ATTRIBUTION: no token columns. usage_dedup_key references the
+-- usage_events row whose provider record contained this call, and calls_in_turn
+-- records how many calls shared that one usage object. Tokens and cost are
+-- derived on READ by joining the ledger and dividing by calls_in_turn. One
+-- assistant turn commonly emits several tool_use blocks against a SINGLE usage
+-- object, so copying the turn's tokens onto each row would multiply the real
+-- cost by the number of calls in the turn; keeping the number where it already
+-- lives makes that inflation structurally impossible.
+--
+-- usage_dedup_key is NOT a foreign key on purpose. A call is an observed fact
+-- even when its usage row was skipped (poison row, unparseable model) or simply
+-- predates activity collection, and some sources give no join at all (codex
+-- records function calls and token counts in unrelated records; hooks carry no
+-- usage). Those rows store '' and the read path left-joins, so a missing
+-- partner contributes no cost rather than losing the call.
+CREATE TABLE IF NOT EXISTS activity_events (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key          TEXT    NOT NULL UNIQUE,
+  tool               TEXT    NOT NULL,                 -- which agent CLI
+  kind               TEXT    NOT NULL,                 -- 'tool' | 'skill' | 'hook'
+  name               TEXT    NOT NULL,                 -- tool/skill/hook name, verbatim
+  session_id         TEXT    NOT NULL DEFAULT '',
+  project            TEXT    NOT NULL DEFAULT '',      -- workspace / cwd
+  model              TEXT    NOT NULL DEFAULT '',      -- model of the turn, when named
+  event_time_unix    INTEGER NOT NULL,                 -- UTC seconds; when the call happened
+  observed_time_unix INTEGER NOT NULL,                 -- UTC seconds; when daemon stored it
+  usage_dedup_key    TEXT    NOT NULL DEFAULT '',      -- join handle to usage_events.dedup_key; '' = no cost join
+  message_id         TEXT    NOT NULL DEFAULT '',
+  request_id         TEXT    NOT NULL DEFAULT '',
+  turn_seq           INTEGER NOT NULL DEFAULT 0,       -- 0-based index of this call within its turn
+  calls_in_turn      INTEGER NOT NULL DEFAULT 1,       -- calls sharing the turn's usage object
+  source_path        TEXT    NOT NULL DEFAULT '',
+  CHECK (kind IN ('tool','skill','hook')),
+  CHECK (name <> ''),
+  CHECK (turn_seq >= 0 AND calls_in_turn >= 1 AND turn_seq < calls_in_turn)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_event_time ON activity_events(event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_activity_tool_name  ON activity_events(tool, name);
+CREATE INDEX IF NOT EXISTS idx_activity_name_time  ON activity_events(name, event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_activity_kind_time  ON activity_events(kind, event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_activity_session    ON activity_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_activity_usage_key  ON activity_events(usage_dedup_key);
+
+-- Immutability: same terms as usage_events.
+CREATE TRIGGER IF NOT EXISTS trg_activity_no_update
+BEFORE UPDATE ON activity_events
+BEGIN SELECT RAISE(ABORT, 'activity_events is append-only: UPDATE forbidden'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_activity_no_delete
+BEFORE DELETE ON activity_events
+BEGIN SELECT RAISE(ABORT, 'activity_events is append-only: DELETE forbidden'); END;
 
 -- Mutable accumulator state: latest observed counters per growing cell.
 CREATE TABLE IF NOT EXISTS aggregate_state (

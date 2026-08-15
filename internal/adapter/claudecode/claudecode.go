@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,29 @@ const usageMarker = `"usage":{`
 // usageMarkerBytes lets the scanner loop probe with bytes.Contains instead of
 // copying every line to a string first.
 var usageMarkerBytes = []byte(usageMarker)
+
+// hookMarkerBytes fast-skips to the hook records. They are type=="system"
+// lines that carry no usage block at all, so the usage marker alone would skip
+// every one of them.
+var hookMarkerBytes = []byte(hookSummarySubtype)
+
+// hookSummarySubtype is the only hook record Claude Code writes to a
+// transcript. Verified over 1264 local transcripts: the type=="system" subtypes
+// present are stop_hook_summary, turn_duration, local_command,
+// scheduled_task_fire, compact_boundary, bridge_status, informational and the
+// model-fallback pair — no PreToolUse/PostToolUse/SessionStart record exists in
+// this format at all, so Stop is the only hook event observable here.
+const hookSummarySubtype = "stop_hook_summary"
+
+// hookEventName is what a hook row is NAMED. The transcript does not carry a
+// hook name: each element of hookInfos identifies its hook only by the raw
+// shell COMMAND it ran, which is exactly the tool-input content activity
+// collection refuses to store. So the recorded name is the hook EVENT, which is
+// the part that is a name rather than content, and the per-hook identity is
+// deliberately dropped rather than smuggled in as a command string or a hash of
+// one (a hash would be an identifier no human could read and no query could
+// group by usefully).
+const hookEventName = "Stop"
 
 // syntheticModel is dropped per the parsing spec.
 const syntheticModel = "<synthetic>"
@@ -211,7 +235,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	parseErr := false
 	for _, e := range files {
 		if ctx.Err() != nil {
-			return adapter.Observation{Events: d.events()}, ctx.Err()
+			return adapter.Observation{Events: d.events(), Activity: d.activity()}, ctx.Err()
 		}
 		if err := parseFile(e.path, e.segment, d); err != nil {
 			// A failed or partial parse must not land in the manifest: the gate
@@ -221,7 +245,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		}
 	}
 
-	obs := adapter.Observation{Events: d.events()}
+	obs := adapter.Observation{Events: d.events(), Activity: d.activity()}
 	if statErr || parseErr {
 		return obs, nil
 	}
@@ -288,12 +312,16 @@ func parseFile(path, segment string, d *deduper) error {
 
 	for sc.Scan() {
 		line := sc.Bytes()
-		if !bytes.Contains(line, usageMarkerBytes) {
+		if bytes.Contains(line, usageMarkerBytes) {
+			cand, ok := parseLine(line, path, segment, sessionFromName)
+			if ok {
+				d.add(cand)
+			}
 			continue
 		}
-		cand, ok := parseLine(line, path, segment, sessionFromName)
-		if ok {
-			d.add(cand)
+		// Hook records carry no usage block, so they only reach here.
+		if bytes.Contains(line, hookMarkerBytes) {
+			d.addHooks(parseHookLine(line, path, segment, sessionFromName))
 		}
 	}
 	return sc.Err()
@@ -341,6 +369,31 @@ type message struct {
 	ID    nullable[string] `json:"id"`
 	Model nullable[string] `json:"model"`
 	Usage *usage           `json:"usage"`
+	// Content carries the assistant's content blocks, decoded ONLY far enough
+	// to see which tools were called — see contentBlock.
+	Content []contentBlock `json:"content"`
+}
+
+// contentBlock is one element of message.content, decoded as an explicit
+// ALLOW-LIST of the fields activity collection needs. It is the same discipline
+// the audit payload follows, applied to a second fact type.
+//
+// Input is the part that matters. A tool_use block's input is the tool's
+// arguments — the Bash command, the file path, the prompt — and none of it may
+// reach the ledger. Decoding it into a struct with a single Skill field means
+// encoding/json DISCARDS every other key as it parses: the content is not
+// stripped after the fact, it never becomes a value in this process at all. A
+// new field appears in a tool's input the day the format grows one, and this
+// shape ignores it without being told to.
+type contentBlock struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Input holds the ONE input field that is a name rather than content: which
+	// skill a Skill call invoked.
+	Input struct {
+		Skill string `json:"skill"`
+	} `json:"input"`
 }
 
 type usage struct {
@@ -396,6 +449,12 @@ type candidate struct {
 	hasSpeed    bool
 	cost        float64
 	total       int64
+	// activity is the tool/skill calls this same record contained. It rides the
+	// candidate rather than being emitted directly so it is deduplicated by
+	// exactly the rule the usage event is: a sidechain replay repeats the whole
+	// record, tool_use blocks included, and emitting those separately would
+	// count every replayed call a second time.
+	activity []model.ActivityEvent
 }
 
 // parseLine decodes one transcript line into a candidate. It returns ok=false
@@ -501,7 +560,165 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		hasSpeed:    u.Speed.Present,
 		cost:        rl.CostUSD.Value,
 		total:       total,
+		activity:    callActivity(msg.Content, ev, requestID),
 	}, true
+}
+
+// callActivity turns an assistant record's tool_use blocks into activity rows
+// attributed to that record's own usage event.
+//
+// This is the exact join the whole design rests on: Claude Code puts the
+// tool_use blocks and the usage object in the SAME record, so a call's cost is
+// a fact about the record rather than a guess about which nearby turn paid for
+// it. UsageDedupKey is that event's dedup key and CallsInTurn is the number of
+// calls sharing it, which is what lets the read path divide instead of
+// multiply. Multi-call turns are rare in practice (9 of 59,622 local records
+// carry two blocks, none carry three) but they are the case that would inflate
+// every headline if this counted wrong, so the count is taken from the blocks
+// rather than assumed to be one.
+//
+// EventTime is copied from the usage event so both ledgers place the call in
+// the same instant, which is what makes a windowed comparison of the two mean
+// anything.
+//
+// Records this adapter rejects as usage — a guarded JSON null, a <synthetic>
+// model — produce no activity either. That is deliberate: a call attributed to
+// a usage event that was never stored would be a call whose cost is silently
+// unattributable, and the honest place to draw the line is the record the
+// ledger accepted.
+func callActivity(blocks []contentBlock, ev model.UsageEvent, requestID string) []model.ActivityEvent {
+	var calls []contentBlock
+	for _, b := range blocks {
+		if b.Type == "tool_use" && strings.TrimSpace(b.Name) != "" {
+			calls = append(calls, b)
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+
+	out := make([]model.ActivityEvent, 0, len(calls))
+	for i, b := range calls {
+		kind := model.ActivityTool
+		name := strings.TrimSpace(b.Name)
+		// A Skill call names a tool ("Skill") that is never the interesting
+		// fact; the skill it invoked is. Record the skill under kind=skill so
+		// "which skill" is a group-by rather than a parse at read time. A Skill
+		// call with no skill in its input stays a plain tool call rather than
+		// becoming a nameless skill row.
+		if name == "Skill" {
+			if s := strings.TrimSpace(b.Input.Skill); s != "" {
+				kind, name = model.ActivitySkill, s
+			}
+		}
+		// The block's own id is the provider's identity for this call and is
+		// stable across the sidechain replays that repeat the whole record.
+		// Without one, the event's dedup key plus the position in the turn is
+		// still stable across re-reads of the same line.
+		dedup := ev.DedupKey + "|act|" + strconv.Itoa(i)
+		if b.ID != "" {
+			dedup = model.ToolClaudeCode + "|call|" + b.ID
+		}
+		out = append(out, model.ActivityEvent{
+			Tool:          model.ToolClaudeCode,
+			Kind:          kind,
+			Name:          name,
+			SessionID:     ev.SessionID,
+			Project:       ev.Project,
+			Model:         ev.Model,
+			EventTime:     ev.EventTime,
+			UsageDedupKey: ev.DedupKey,
+			MessageID:     ev.MessageID,
+			RequestID:     requestID,
+			TurnSeq:       i,
+			CallsInTurn:   len(calls),
+			SourcePath:    ev.SourcePath,
+			DedupKey:      dedup,
+		})
+	}
+	return out
+}
+
+// hookLine is the ALLOW-LIST decode of a type=="system" hook record.
+//
+// HookInfos is the point of the shape. Each element identifies its hook only by
+// the raw shell command it ran, so it is decoded as a slice of EMPTY structs:
+// that yields the NUMBER of hooks that fired while making it impossible for a
+// command string to become a value in this process. The count is the fact;
+// the command is content.
+type hookLine struct {
+	Type      string     `json:"type"`
+	Subtype   string     `json:"subtype"`
+	UUID      string     `json:"uuid"`
+	Timestamp string     `json:"timestamp"`
+	SessionID string     `json:"sessionId"`
+	CWD       string     `json:"cwd"`
+	HookCount int        `json:"hookCount"`
+	HookInfos []struct{} `json:"hookInfos"`
+}
+
+// parseHookLine decodes one hook record into activity rows — one per hook that
+// actually fired, so the count reflects hooks rather than summaries.
+//
+// Hook rows carry no UsageDedupKey: a hook runs outside any assistant turn and
+// the record holds no usage block, so there is no cost to attribute and none is
+// invented. They are reported as unattributed calls, never as free ones.
+func parseHookLine(line []byte, path, segment, sessionFromName string) []model.ActivityEvent {
+	var hl hookLine
+	if err := json.Unmarshal(line, &hl); err != nil {
+		return nil
+	}
+	if hl.Type != "system" || hl.Subtype != hookSummarySubtype {
+		return nil
+	}
+
+	n := len(hl.HookInfos)
+	if n == 0 {
+		n = hl.HookCount
+	}
+	if n <= 0 {
+		return nil // a summary that reports no hook is not a firing
+	}
+
+	var eventTime time.Time
+	if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(hl.Timestamp)); err == nil {
+		eventTime = t.UTC()
+	} else {
+		return nil // a row that cannot be windowed is worse than no row
+	}
+
+	session := sessionFromName
+	if strings.TrimSpace(hl.SessionID) != "" {
+		session = hl.SessionID
+	}
+	project := segment
+	if strings.TrimSpace(hl.CWD) != "" {
+		project = hl.CWD
+	}
+	// The record uuid is unique per line, so a re-read of the same transcript
+	// re-derives the same keys and inserts nothing.
+	base := model.ToolClaudeCode + "|hook|" + hl.UUID
+	if hl.UUID == "" {
+		sum := sha1.Sum(line)
+		base = fmt.Sprintf("%s|hook|%s|%x", model.ToolClaudeCode, path, sum)
+	}
+
+	out := make([]model.ActivityEvent, 0, n)
+	for i := range n {
+		out = append(out, model.ActivityEvent{
+			Tool:        model.ToolClaudeCode,
+			Kind:        model.ActivityHook,
+			Name:        hookEventName,
+			SessionID:   session,
+			Project:     project,
+			EventTime:   eventTime,
+			TurnSeq:     i,
+			CallsInTurn: n,
+			SourcePath:  path,
+			DedupKey:    base + "|" + strconv.Itoa(i),
+		})
+	}
+	return out
 }
 
 // hasGuardedNull reports whether any guarded key — id, cwd, model, speed,

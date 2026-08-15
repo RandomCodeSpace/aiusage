@@ -18,6 +18,11 @@ type deduper struct {
 	byMessage map[string]primaryKey     // messageID -> resident primary key
 	noID      []candidate               // never-deduped (no message id)
 	order     []primaryKey              // stable emission order for deduped ones
+	// hooks are activity rows that belong to no usage candidate: hook records
+	// carry no message id and no usage block, so none of the dedup rules above
+	// apply to them. Their own dedup keys (the record uuid) make a re-read
+	// idempotent at the store instead.
+	hooks []model.ActivityEvent
 }
 
 type primaryKey struct {
@@ -91,6 +96,11 @@ func better(a, b candidate) bool {
 	return false
 }
 
+// addHooks records activity rows that stand outside the usage dedup rules.
+func (d *deduper) addHooks(a []model.ActivityEvent) {
+	d.hooks = append(d.hooks, a...)
+}
+
 // events returns the surviving usage events: deduped records in first-seen
 // order followed by never-deduped (no-id) records in file order.
 func (d *deduper) events() []model.UsageEvent {
@@ -104,4 +114,24 @@ func (d *deduper) events() []model.UsageEvent {
 		out = append(out, c.event)
 	}
 	return out
+}
+
+// activity returns the surviving activity rows in the same order and from the
+// same winners events() emits, plus the hook rows.
+//
+// Taking the calls from the WINNING candidate is what keeps the two ledgers
+// consistent: a sidechain replay repeats the record's tool_use blocks, and
+// emitting the loser's copies too would attribute the same turn's cost twice
+// and count every replayed call a second time.
+func (d *deduper) activity() []model.ActivityEvent {
+	out := make([]model.ActivityEvent, 0, len(d.hooks))
+	for _, pk := range d.order {
+		if c := d.primary[pk]; c != nil {
+			out = append(out, c.activity...)
+		}
+	}
+	for _, c := range d.noID {
+		out = append(out, c.activity...)
+	}
+	return append(out, d.hooks...)
 }

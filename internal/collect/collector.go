@@ -73,6 +73,14 @@ type CycleStats struct {
 	Snapshots      int      // aggregate snapshots observed
 	Errors         []string // non-fatal per-adapter / per-source errors
 
+	// ActivitySeen counts observed tool/skill/hook invocations (pre-dedup) and
+	// ActivityInserted the new activity dedup keys actually written. They are
+	// kept apart from the event counts because they measure a different ledger:
+	// a cycle that inserts no events can still insert activity, and reading one
+	// as the other would misreport both.
+	ActivitySeen     int
+	ActivityInserted int
+
 	// RollupRebuilt reports that the pass found the derived rollup out
 	// of step with the ledger and rebuilt it before collecting. Expected once,
 	// on the first pass after the v4 migration; anywhere else it means a write
@@ -176,15 +184,21 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				evCp = nil
 			}
 
-			// ApplyEvents commits per-row: a non-nil error may accompany a
-			// partial insert (skipped poison rows), so n counts regardless.
-			n, sErr := storeEvents(ctx, st, obs.Events, observedAt, evCp, o.pricer)
+			// ApplyObservation commits per-row: a non-nil error may accompany a
+			// partial insert (skipped poison rows), so the counts hold
+			// regardless. Events and activity ride ONE transaction with the
+			// checkpoint, so the checkpoint can never advance past activity
+			// that did not land.
+			applied, sErr := storeObservation(ctx, st, obs.Events, obs.Activity, observedAt, evCp, o.pricer)
 			stats.EventsSeen += len(obs.Events)
-			stats.EventsInserted += n
+			stats.EventsInserted += applied.Events
+			stats.ActivitySeen += len(obs.Activity)
+			stats.ActivityInserted += applied.Activity
 			if sErr != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("insert events %s %s: %v", ad.ID(), src.Path, sErr))
 			}
-			if n > 0 || (sErr == nil && len(obs.Events) > 0) {
+			if applied.Events > 0 || applied.Activity > 0 ||
+				(sErr == nil && (len(obs.Events) > 0 || len(obs.Activity) > 0)) {
 				progressed = true
 			}
 
@@ -221,9 +235,15 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 	return stats, nil
 }
 
-// stripRaw clears every audit payload an observation carries. Snapshots are
-// cleared before the baseline comparison in storeSnapshot, so a cell whose
-// stored state still holds a payload from before the switch counts as changed
+// stripRaw clears every audit payload an observation carries.
+//
+// Activity is absent from it on purpose and not by oversight:
+// model.ActivityEvent has no raw field and activity_events has no raw column,
+// so a tool's input has nowhere to be dropped FROM. privacy.no_raw is satisfied
+// there by construction rather than by a switch someone has to remember.
+//
+// Snapshots are cleared before the baseline comparison in storeSnapshot, so a
+// cell whose stored state still holds a payload from before the switch counts as changed
 // once and is rewritten without it — aggregate_state is mutable, so the switch
 // is retroactive there. usage_events is not: rows already appended keep what
 // they were written with.
@@ -252,12 +272,17 @@ func collectSource(ctx context.Context, ad adapter.Adapter, st store.Store, src 
 	return inc.CollectIncremental(ctx, src, cp)
 }
 
-// storeEvents stamps ObservedTime and cost on event-level records that lack
-// one, then appends them idempotently together with the source checkpoint (one
-// transaction). Returns the number of new dedup keys inserted.
-func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (int, error) {
-	if len(events) == 0 && cp == nil {
-		return 0, nil
+// storeObservation stamps ObservedTime and cost on event-level records that
+// lack one, stamps ObservedTime on activity rows, then appends both ledgers
+// idempotently together with the source checkpoint in ONE transaction.
+//
+// Activity is deliberately NOT priced here. An activity row carries no cost
+// column at all: its cost is derived on read by joining the usage row it names,
+// so there is exactly one stamped cost per turn and no second copy to keep in
+// step with the ladder.
+func storeObservation(ctx context.Context, st store.Store, events []model.UsageEvent, activity []model.ActivityEvent, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
+	if len(events) == 0 && len(activity) == 0 && cp == nil {
+		return store.Applied{}, nil
 	}
 	stamped := make([]model.UsageEvent, len(events))
 	for i, e := range events {
@@ -267,7 +292,14 @@ func storeEvents(ctx context.Context, st store.Store, events []model.UsageEvent,
 		stampCost(p, &e)
 		stamped[i] = e
 	}
-	return st.ApplyEvents(ctx, stamped, cp)
+	acts := make([]model.ActivityEvent, len(activity))
+	for i, a := range activity {
+		if a.ObservedTime.IsZero() {
+			a.ObservedTime = observedAt
+		}
+		acts[i] = a
+	}
+	return st.ApplyObservation(ctx, stamped, acts, cp)
 }
 
 // stampCost prices an event at the table in effect right now. A model no rung

@@ -26,7 +26,7 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // SQLite is the concrete append-only store backed by modernc.org/sqlite.
 type SQLite struct {
@@ -342,31 +342,52 @@ func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, s
 // re-read cannot fix, so holding the checkpoint back would only re-parse
 // them forever.
 func (s *SQLite) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
-	if len(events) == 0 && cp == nil {
-		return 0, nil
+	res, err := s.ApplyObservation(ctx, events, nil, cp)
+	return res.Events, err
+}
+
+// ApplyObservation appends usage events AND activity rows and upserts the
+// source checkpoint in ONE transaction — see Store.ApplyObservation. Events go
+// in first so an activity row's usage_dedup_key names a row that is already
+// present in the same transaction.
+func (s *SQLite) ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error) {
+	if len(events) == 0 && len(activity) == 0 && cp == nil {
+		return Applied{}, nil
 	}
 	if err := s.writable(); err != nil {
-		return 0, err
+		return Applied{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("store: begin tx: %w", err)
+		return Applied{}, fmt.Errorf("store: begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
+	var out Applied
 	inserted, skipErr, err := insertEventsTx(ctx, tx, events)
+	out.Events = inserted
 	if err != nil {
-		return inserted, err
+		return out, err
+	}
+	actInserted, actSkipErr, err := insertActivityTx(ctx, tx, activity)
+	out.Activity = actInserted
+	if err != nil {
+		return out, err
 	}
 	if cp != nil {
 		if err := upsertCheckpoint(ctx, tx, *cp); err != nil {
-			return inserted, err
+			return out, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return inserted, fmt.Errorf("store: commit: %w", err)
+		return out, fmt.Errorf("store: commit: %w", err)
 	}
-	return inserted, skipErr
+	// A usage skip is reported ahead of an activity skip: the ledger is the
+	// authoritative half, and a caller that logs one line should see that one.
+	if skipErr != nil {
+		return out, skipErr
+	}
+	return out, actSkipErr
 }
 
 // Checkpoint returns the stored incremental state for (tool, sourcePath), or

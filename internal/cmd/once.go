@@ -72,8 +72,11 @@ func printCycleStats(c *cobra.Command, s collect.CycleStats) {
 	if s.RollupRebuilt {
 		fmt.Fprintln(out, "rebuilt the derived rollup from the ledger")
 	}
-	fmt.Fprintf(out, "adapters=%d sources=%d seen=%d inserted=%d snapshots=%d errors=%d\n",
-		s.Adapters, s.Sources, s.EventsSeen, s.EventsInserted, s.Snapshots, len(s.Errors))
+	// activity is reported separately from inserted: they count different
+	// ledgers, and a pass that appended tens of thousands of tool calls while
+	// reporting only its event count would be describing half the work it did.
+	fmt.Fprintf(out, "adapters=%d sources=%d seen=%d inserted=%d activity=%d snapshots=%d errors=%d\n",
+		s.Adapters, s.Sources, s.EventsSeen, s.EventsInserted, s.ActivityInserted, s.Snapshots, len(s.Errors))
 	for _, e := range s.Errors {
 		fmt.Fprintf(out, "  - %s\n", e)
 	}

@@ -145,7 +145,22 @@ func (a Adapter) scanRoot(ctx context.Context, root string, seen map[string]stru
 var (
 	markerTokenCount  = []byte(`token_count`)
 	markerTurnContext = []byte(`turn_context`)
+	// The two tool-call payload shapes. Their *_output counterparts contain the
+	// same substrings and so pass this gate too; the payload type check in
+	// parseCallLine rejects them, which is the cheap-probe/exact-check split the
+	// other markers already use.
+	markerFunctionCall = []byte(`function_call`)
+	markerCustomCall   = []byte(`custom_tool_call`)
 )
+
+// lineIsInteresting reports whether a raw line can carry anything this adapter
+// reads: token counts, the model carry-forward, or a tool call.
+func lineIsInteresting(raw []byte) bool {
+	return bytes.Contains(raw, markerTokenCount) ||
+		bytes.Contains(raw, markerTurnContext) ||
+		bytes.Contains(raw, markerFunctionCall) ||
+		bytes.Contains(raw, markerCustomCall)
+}
 
 // ckptState is the per-file parse state persisted in the checkpoint. The
 // cumulative baseline (Prev/HavePrev) is what makes tail reads correct: a
@@ -215,6 +230,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 
 	var (
 		events    []model.UsageEvent
+		activity  []model.ActivityEvent
 		curModel  = state.Model
 		prevTotal = rawTokens{
 			input: state.Input, cached: state.Cached, output: state.Output,
@@ -227,15 +243,14 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 
 	for {
 		if ctx.Err() != nil {
-			return adapter.Observation{Events: events}, ctx.Err()
+			return adapter.Observation{Events: events, Activity: activity}, ctx.Err()
 		}
 		raw, rerr := r.ReadBytes('\n')
 		terminated := rerr == nil
 		if rerr != nil && rerr != io.EOF {
 			break // unreadable remainder: keep what we have, checkpoint stops here
 		}
-		if len(bytes.TrimSpace(raw)) > 0 &&
-			(bytes.Contains(raw, markerTokenCount) || bytes.Contains(raw, markerTurnContext)) {
+		if len(bytes.TrimSpace(raw)) > 0 && lineIsInteresting(raw) {
 			var line map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &line); err != nil {
 				// Malformed line: skip it and keep parsing — one bad line must
@@ -248,6 +263,8 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			} else if ev, ok := parseUsageLine(line, mtime, session, src.Path,
 				&curModel, &prevTotal, &havePrev); ok {
 				events = append(events, ev)
+			} else if a, ok := parseCallLine(line, mtime, session, src.Path, curModel); ok {
+				activity = append(activity, a)
 			}
 		}
 		if terminated {
@@ -266,10 +283,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		Reasoning: prevTotal.reasoning, Total: prevTotal.total,
 	})
 	if err != nil {
-		return adapter.Observation{Events: events}, nil // no checkpoint; next cycle re-reads
+		return adapter.Observation{Events: events, Activity: activity}, nil // no checkpoint; next cycle re-reads
 	}
 	return adapter.Observation{
-		Events: events,
+		Events:   events,
+		Activity: activity,
 		Checkpoint: &model.SourceCheckpoint{
 			Tool: model.ToolCodex, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed, State: string(newState),
@@ -337,6 +355,77 @@ func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, p
 	}
 
 	return buildEvent(tok, mdl, session, path, ts(line, mtime))
+}
+
+// parseCallLine turns one `response_item` tool-call record into an activity
+// row. Codex writes two call shapes — `function_call` (with an optional
+// `namespace` qualifying MCP and built-in tool groups) and `custom_tool_call`
+// (exec, apply_patch) — and both name the tool at payload.name.
+//
+// NO COST IS ATTRIBUTED, and that is a property of the source rather than a
+// shortcut. Codex records token counts in a completely separate `event_msg` /
+// `token_count` record, and those records carry no call id, no response id and
+// no turn id: verified over 261,938 local token_count records, of which zero
+// carry a turn_id, while every function_call and custom_tool_call does. There
+// is therefore no identity linking a call to the tokens it cost. The only
+// available attribution would be positional — bracket a turn by task_started /
+// task_complete and blame the token_count events that fall between — which is a
+// guess dressed as a join, and one that would silently start over-attributing
+// the moment codex interleaved anything. So UsageDedupKey is left empty and
+// these rows are reported as unattributed calls, which is what they are.
+func parseCallLine(line map[string]json.RawMessage, mtime time.Time, session, path, curModel string) (model.ActivityEvent, bool) {
+	if typeOf(line["type"]) != "response_item" {
+		return model.ActivityEvent{}, false
+	}
+	payload := objOf(line["payload"])
+	if payload == nil {
+		return model.ActivityEvent{}, false
+	}
+	switch typeOf(payload["type"]) {
+	case "function_call", "custom_tool_call":
+	default:
+		// The *_output counterparts land here, as do reasoning and message
+		// items: they passed the byte marker but are not calls.
+		return model.ActivityEvent{}, false
+	}
+
+	name := strOf(payload["name"])
+	if name == "" {
+		return model.ActivityEvent{}, false
+	}
+	// A namespace qualifies the name ("agents", "mcp__context7", "web"), and it
+	// has to be kept: spawn_agent exists under both `agents` and
+	// `collaboration`, so collapsing to the bare name would merge two different
+	// tools into one row. The separator is this adapter's own — codex names no
+	// canonical qualified form — and the whole string is a NAME, never content.
+	if ns := strOf(payload["namespace"]); ns != "" {
+		name = ns + "/" + name
+	}
+
+	// call_id pairs the call with its output record and is the provider's own
+	// identity for it; payload.id (fc_… / ctc_…) is the fallback. Excluding the
+	// session from the key matches what the usage dedup key does, so a
+	// branch-copied history counts its calls once.
+	id := strOf(payload["call_id"])
+	if id == "" {
+		id = strOf(payload["id"])
+	}
+	if id == "" {
+		return model.ActivityEvent{}, false // nothing stable to deduplicate on
+	}
+
+	return model.ActivityEvent{
+		Tool:        model.ToolCodex,
+		Kind:        model.ActivityTool,
+		Name:        name,
+		SessionID:   session,
+		Model:       curModel,
+		EventTime:   ts(line, mtime),
+		TurnSeq:     0,
+		CallsInTurn: 1,
+		SourcePath:  path,
+		DedupKey:    model.ToolCodex + "|call|" + id,
+	}, true
 }
 
 // sessionID computes the session as the file path relative to its sessions root,

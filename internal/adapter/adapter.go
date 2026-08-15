@@ -28,6 +28,22 @@ type Source struct {
 type Observation struct {
 	Events    []model.UsageEvent
 	Snapshots []model.AggregateSnapshot
+	// Activity is the agent ACTIVITY observed in the same read: which tool was
+	// called, which skill was invoked, which hook fired. It is a second,
+	// independent output stream, not a derivative of Events — a source may
+	// report calls it reports no usage for, and vice versa.
+	//
+	// An adapter that can tie a call to the usage record it rode in on MUST set
+	// ActivityEvent.UsageDedupKey to that event's DedupKey and CallsInTurn to
+	// the number of calls sharing it; that pairing is the whole cost
+	// attribution, and it is only sound when both come from the SAME provider
+	// record. An adapter that cannot must leave the key empty rather than
+	// guess: a timestamp-nearest match would invent an attribution the source
+	// does not support.
+	//
+	// PRIVACY: names and counts only. Never put a tool's input anywhere in
+	// here — model.ActivityEvent has no field that would hold one.
+	Activity []model.ActivityEvent
 	// Checkpoint, when non-nil, is the source's new incremental state and MUST
 	// only be set once the read completed (a partial read that advances the
 	// checkpoint would skip the unread remainder forever). The collector

@@ -145,6 +145,14 @@ func WithRaw() ListOption {
 	return func(o *listOptions) { o.includeRaw = true }
 }
 
+// Applied reports what one ApplyObservation actually wrote: new dedup keys in
+// each of the two append-only ledgers. Rows that collided on an existing dedup
+// key count in neither.
+type Applied struct {
+	Events   int
+	Activity int
+}
+
 // SourceStat summarises stored usage per tool for the `sources` command.
 type SourceStat struct {
 	Tool         string
@@ -215,6 +223,22 @@ type Store interface {
 	// with a non-nil cp writes just the checkpoint.
 	ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error)
 
+	// ApplyObservation appends usage events, appends agent activity rows, and
+	// upserts the source checkpoint — all in ONE transaction. It is what a
+	// collection cycle calls; ApplyEvents is the events-only shorthand for it.
+	//
+	// The single transaction is the point. Activity rows reference usage rows
+	// by dedup key, and the checkpoint gates the re-read of both: splitting
+	// them across transactions would let a crash advance the checkpoint past
+	// activity that never landed, losing it permanently, or leave a call
+	// pointing at a usage row that rolled back. Activity is appended AFTER the
+	// events so the row it names already exists.
+	//
+	// Activity has the same idempotence as events (ON CONFLICT(dedup_key) DO
+	// NOTHING) and the same per-row skip behaviour, so the returned counts stay
+	// meaningful when the error is non-nil.
+	ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error)
+
 	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
 	Summarize(ctx context.Context, f Filter) (*Summary, error)
 
@@ -248,6 +272,21 @@ type Store interface {
 	// row id. The projection names its columns and EXCLUDES raw; pass WithRaw
 	// to include it (export --include-raw only). Used by export.
 	ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error)
+
+	// SummarizeActivity aggregates agent activity (tool calls, skill
+	// invocations, hook firings) matching ActivityFilter, grouped per its
+	// GroupBy, with tokens and cost ATTRIBUTED from the ledger: each call takes
+	// its joined usage row's counts divided by the number of calls that shared
+	// that turn. The division is integer and every operand non-negative, so the
+	// attributed total over any window is at most the same window's
+	// usage_events total — the split can understate, never inflate.
+	SummarizeActivity(ctx context.Context, f ActivityFilter) (*ActivitySummary, error)
+
+	// TopActivity ranks SummarizeActivity's buckets by one metric and caps them
+	// at limit (0 = uncapped), ordering and limiting in SQL. It answers "which
+	// skill is expensive" in one query. It needs at least one GroupBy
+	// dimension: ranking a single grand-total bucket is not a ranking.
+	TopActivity(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]ActivityBucket, error)
 
 	// SourceStats returns per-tool stored stats.
 	SourceStats(ctx context.Context) ([]SourceStat, error)

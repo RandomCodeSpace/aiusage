@@ -31,6 +31,8 @@ type migration struct {
 //	v2 — source_checkpoints table (incremental collection, issue #5)
 //	v3 — cost/provider/tier columns on usage_events (issues #9, #16)
 //	v4 — usage_rollup derived rollup table, 15-minute UTC buckets (issue #59)
+//	v5 — activity_events ledger: tool/skill/hook invocations, joined to
+//	     usage_events by dedup key for cost attribution
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -60,6 +62,13 @@ var migrations = []migration{
 	// rollup against the ledger watermark on its next pass and rebuilds it
 	// there (EnsureRollup), where the cost is visible and non-fatal.
 	{version: 4, statements: []string{rollupTableDDL}},
+	// v5 creates the activity ledger EMPTY, and there is nothing to backfill
+	// into it: activity is not derivable from usage_events (the ledger records
+	// what a turn cost, never which tools it called), so the rows can only come
+	// from re-reading the sources. Collection picks them up from wherever each
+	// adapter's checkpoint sits — see the adapters' own notes on what that
+	// means for history.
+	{version: 5, statements: activityV5Statements()},
 }
 
 // ensureSchema reads the recorded schema version before touching anything and

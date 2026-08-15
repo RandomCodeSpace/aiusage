@@ -67,6 +67,52 @@ still holds whole transcript lines, which is why export gates raw behind
 --include-raw. aggregate_state is mutable, so its rows shrink on the next
 snapshot cycle.
 
+**activity_events is a second ledger, and it stores no tokens** (schema v5). It
+records agent ACTIVITY — which tool was called, which skill was invoked, which
+hook fired — one append-only row per invocation, on the same terms as
+usage_events (UNIQUE dedup_key, no-UPDATE/no-DELETE triggers, ON
+CONFLICT(dedup_key) DO NOTHING). It is deliberately a SEPARATE table: activity
+is not token accounting, and a call that cost nothing has no business in the
+ledger that answers "what did this cost". It is also NOT in usage_rollup, which
+stays a token summary.
+
+Cost is attributed by REFERENCE, never by copy. A row carries
+`usage_dedup_key` (the usage_events row whose provider record contained the
+call) and `calls_in_turn` (how many calls shared that one usage object); tokens
+and cost are derived on READ by joining the ledger and dividing
+(store.SummarizeActivity, store.TopActivity). One assistant turn commonly emits
+several tool_use blocks against a SINGLE usage object, so copying the turn's
+tokens onto each row would multiply the real cost by the number of calls in it —
+measured on this machine's corpus, the undivided query overstates by 25% (8.56bn
+vs 6.85bn tokens), with turns of up to 25 calls. Keeping the number where it
+already lives makes that inflation structurally impossible rather than a rule
+someone has to keep remembering, and integer division means the split can only
+ever UNDERSTATE. `usage_dedup_key` is NOT a foreign key: a call is an observed
+fact even when its usage row was skipped or predates activity collection, and
+the read path left-joins so a missing partner contributes no cost instead of
+losing the call. Rows with no join are reported as `UnattributedCalls`, never as
+free.
+
+**Activity is names and counts ONLY.** There is no column for a tool's input and
+no raw column, so a command string, a file path or a prompt has nowhere to land;
+`privacy.no_raw` is satisfied by construction rather than by a switch. The
+adapters enforce it at the decode: claude-code's `contentBlock.Input` is a
+struct with a single `Skill` field, so encoding/json DISCARDS every other input
+key as it parses — the content never becomes a value in the process. MCP tool
+names are names, not content, and are kept verbatim. Claude Code's hook records
+carry NO hook name — each `hookInfos` element identifies its hook only by the
+raw shell command it ran — so hook rows are named for the EVENT (`Stop`) and
+`hookInfos` is decoded as `[]struct{}` to take its length and nothing else.
+
+What each adapter captures: claude-code joins exactly (tool_use blocks and
+`.message.usage` are in the SAME record) and rides the existing deduper, so a
+sidechain replay cannot count a call twice; opencode joins exactly via
+`part.message_id` -> `message.id`, the id its usage dedup key is already built
+from; codex NEVER attributes, because its `token_count` records share no
+identity with its `function_call`/`custom_tool_call` records (verified: zero of
+261,938 local token_count records carry a turn_id, while every call does), and a
+positional guess is not on offer.
+
 **Adapters are strictly observational.** They read files/DBs the agent CLIs
 have already produced, nothing more: no writes, no write locks, no rotation.
 SQLite sources open read-only (mode=ro; immutable=1 only when the source is

@@ -332,6 +332,12 @@ ALTER TABLE usage_events ADD COLUMN service_tier TEXT NOT NULL DEFAULT '';
 ALTER TABLE usage_events ADD COLUMN cost_micro_usd INTEGER;
 ALTER TABLE usage_events ADD COLUMN price_source TEXT NOT NULL DEFAULT '';`
 
+// legacyRollupDDL is the derived rollup exactly as the v4 migration created it,
+// building a v4 database on top of the v3 one. It reuses the migration's own
+// DDL: a v4 file IS what that statement produces, so a copy here could only
+// ever be a way to test against a v4 that never existed.
+const legacyRollupDDL = "\n" + rollupTableDDL + ";"
+
 // legacyDB writes a database at the given historical schema version, holding
 // one usage row, and returns its path. It never goes through Open, so the file
 // is exactly what the older binary would have left behind.
@@ -346,6 +352,9 @@ func legacyDB(t *testing.T, version int) string {
 	}
 	if version >= 3 {
 		ddl += legacyCostDDL
+	}
+	if version >= 4 {
+		ddl += legacyRollupDDL
 	}
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatalf("create v%d schema: %v", version, err)

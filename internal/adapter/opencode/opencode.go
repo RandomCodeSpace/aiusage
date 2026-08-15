@@ -269,6 +269,9 @@ func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoi
 	}
 
 	obs := adapter.Observation{Events: events}
+	if consumed > watermark {
+		obs.Activity = collectActivity(ctx, db, src, events, watermark, consumed)
+	}
 	if consumed > watermark || (cp == nil && clean) {
 		obs.Checkpoint = &model.SourceCheckpoint{
 			Tool: model.ToolOpenCode, SourcePath: src.Path, Watermark: consumed,
@@ -276,6 +279,136 @@ func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoi
 	}
 	// rows.Err() is intentionally non-fatal: keep best-effort results.
 	return obs, nil
+}
+
+// toolPart is one tool-call row of the `part` table, reduced to the three
+// fields activity needs. The tool INPUT (state.input) and its output
+// (state.output) are never selected: activity is names and counts only.
+type toolPart struct {
+	messageID string
+	partID    string
+	createdMS int64
+	name      string
+}
+
+// collectActivity reads the tool calls of exactly the messages this cycle
+// consumed — message rowids in (fromRowid, toRowid] — and turns them into
+// activity rows joined to those messages' usage events.
+//
+// Scoping to the message range, rather than giving `part` a watermark of its
+// own, is what makes the per-turn call count trustworthy. calls_in_turn is the
+// divisor the read path attributes cost with, so it must equal the number of
+// rows actually emitted for that turn: if a turn's calls could arrive across
+// two cycles, each batch would divide by its own partial count and the turn's
+// cost would be attributed twice. Here the count and the rows come from ONE
+// query, so they agree by construction whatever the timing.
+//
+// The residual limitation is an UNDERcount, which is the safe direction: a part
+// written after its message row was consumed is never picked up, because the
+// message watermark has moved past it. In practice tool parts are written
+// during the turn and the message row carrying the final token counts settles
+// at or after the end of it, so the message is consumed last.
+//
+// Cost note: the type discriminator lives inside `part.data`, so this
+// json_extract touches every part row in range. `data` embeds full tool OUTPUT
+// (hundreds of MiB across the table, tens of MiB in the largest single row), so
+// the first pass over an established database is measured in seconds; every
+// pass after it sees only the new messages. Deliberately no
+// `data LIKE '{"type":"tool"%'` prefilter: it would depend on opencode's JSON
+// key ORDER, and the day that changed the adapter would silently collect
+// nothing at all rather than run slowly.
+//
+// Errors are swallowed on purpose: activity is a secondary observation, and it
+// must never cost the cycle its usage events.
+func collectActivity(ctx context.Context, db *sql.DB, src adapter.Source, events []model.UsageEvent, fromRowid, toRowid int64) []model.ActivityEvent {
+	rows, err := db.QueryContext(ctx, `
+		SELECT p.message_id, p.id, p.time_created, json_extract(p.data,'$.tool')
+		FROM part p
+		JOIN message m ON m.id = p.message_id
+		WHERE m.rowid > ? AND m.rowid <= ?
+		  AND json_extract(p.data,'$.type') = 'tool'
+		ORDER BY p.message_id, p.id`, fromRowid, toRowid)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var (
+		parts  []toolPart
+		byMsg  = map[string]int{}
+		scanOK = true
+	)
+	for rows.Next() {
+		if ctx.Err() != nil {
+			return nil
+		}
+		var (
+			msgID, partID sql.NullString
+			created       sql.NullInt64
+			name          sql.NullString
+		)
+		if err := rows.Scan(&msgID, &partID, &created, &name); err != nil {
+			scanOK = false
+			continue
+		}
+		n := strings.TrimSpace(name.String)
+		if partID.String == "" || n == "" {
+			continue // no stable identity or no name: nothing worth recording
+		}
+		parts = append(parts, toolPart{
+			messageID: msgID.String, partID: partID.String,
+			createdMS: created.Int64, name: n,
+		})
+		byMsg[msgID.String]++
+	}
+	if rows.Err() != nil || !scanOK {
+		// A partial read would give some turns a divisor smaller than their real
+		// call count. Dropping the batch keeps the attribution honest; the rows
+		// are not lost forever only if the message range is retried, which it is
+		// not — so this is a deliberate trade of completeness for correctness.
+		return nil
+	}
+
+	// Attributes come from the message's own usage event, so an activity row and
+	// the row it is attributed to always agree on time, session, project and
+	// model. Agreeing on TIME is what makes a windowed comparison of the two
+	// ledgers meaningful at all.
+	usage := make(map[string]*model.UsageEvent, len(events))
+	for i := range events {
+		usage[events[i].MessageID] = &events[i]
+	}
+
+	seq := map[string]int{}
+	out := make([]model.ActivityEvent, 0, len(parts))
+	for _, p := range parts {
+		a := model.ActivityEvent{
+			Tool:        model.ToolOpenCode,
+			Kind:        model.ActivityTool,
+			Name:        p.name,
+			MessageID:   p.messageID,
+			TurnSeq:     seq[p.messageID],
+			CallsInTurn: byMsg[p.messageID],
+			SourcePath:  src.Path,
+			DedupKey:    "opencode|part|" + p.partID,
+		}
+		seq[p.messageID]++
+		if u, ok := usage[p.messageID]; ok {
+			a.UsageDedupKey = u.DedupKey
+			a.SessionID = u.SessionID
+			a.Project = u.Project
+			a.Model = u.Model
+			a.EventTime = u.EventTime
+		} else if p.createdMS > 0 {
+			// No usage event for this message (zero tokens, unparseable model).
+			// The call still happened; it simply has no cost to be attributed.
+			a.EventTime = time.UnixMilli(p.createdMS).UTC()
+		}
+		if a.EventTime.IsZero() {
+			continue // no defensible timestamp: a row that cannot be windowed
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // collectJSON walks storage/message/**/*.json read-only, parsing each as a

@@ -32,22 +32,25 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeStore struct {
-	mu          sync.Mutex
-	dedup       map[string]struct{}
-	events      []model.UsageEvent
-	state       map[string]model.AggregateSnapshot // key: tool|key
-	checkpoints map[string]model.SourceCheckpoint  // key: tool|sourcePath
-	upserts     int                                // standalone UpsertState calls (snapshot path must not use it)
-	ensureCalls int                                // EnsureRollup calls (one per cycle)
+	mu            sync.Mutex
+	dedup         map[string]struct{}
+	events        []model.UsageEvent
+	activityDedup map[string]struct{}
+	activity      []model.ActivityEvent
+	state         map[string]model.AggregateSnapshot // key: tool|key
+	checkpoints   map[string]model.SourceCheckpoint  // key: tool|sourcePath
+	upserts       int                                // standalone UpsertState calls (snapshot path must not use it)
+	ensureCalls   int                                // EnsureRollup calls (one per cycle)
 }
 
 var _ store.Store = (*fakeStore)(nil)
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		dedup:       map[string]struct{}{},
-		state:       map[string]model.AggregateSnapshot{},
-		checkpoints: map[string]model.SourceCheckpoint{},
+		dedup:         map[string]struct{}{},
+		activityDedup: map[string]struct{}{},
+		state:         map[string]model.AggregateSnapshot{},
+		checkpoints:   map[string]model.SourceCheckpoint{},
 	}
 }
 
@@ -111,17 +114,88 @@ func (s *fakeStore) ApplySnapshot(_ context.Context, events []model.UsageEvent, 
 }
 
 // ApplyEvents mirrors the SQLite contract: events and checkpoint land together.
-func (s *fakeStore) ApplyEvents(_ context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
+// Like the real store it is the events-only shorthand for ApplyObservation, so
+// the two can never drift.
+func (s *fakeStore) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
+	res, err := s.ApplyObservation(ctx, events, nil, cp)
+	return res.Events, err
+}
+
+// ApplyObservation mirrors the SQLite contract: both ledgers and the checkpoint
+// land together, activity deduped on its own key.
+func (s *fakeStore) ApplyObservation(_ context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (store.Applied, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var out store.Applied
 	inserted, err := s.insertLocked(events)
+	out.Events = inserted
 	if err != nil {
-		return inserted, err
+		return out, err
+	}
+	for _, a := range activity {
+		if a.DedupKey == "" {
+			return out, errors.New("empty activity dedup key")
+		}
+		if _, ok := s.activityDedup[a.DedupKey]; ok {
+			continue
+		}
+		s.activityDedup[a.DedupKey] = struct{}{}
+		s.activity = append(s.activity, a)
+		out.Activity++
 	}
 	if cp != nil {
 		s.checkpoints[cp.Tool+"|"+cp.SourcePath] = *cp
 	}
-	return inserted, nil
+	return out, nil
+}
+
+// SummarizeActivity reproduces the real store's attribution: each call takes
+// its joined usage row's counts divided by the calls that shared the turn, so a
+// multi-call turn is never counted more than once. The collector never calls
+// it; it exists so the fake still satisfies store.Store, and so a collect-level
+// test can assert the non-inflation invariant without SQLite.
+func (s *fakeStore) SummarizeActivity(_ context.Context, f store.ActivityFilter) (*store.ActivitySummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	byKey := map[string]model.UsageEvent{}
+	for _, e := range s.events {
+		byKey[e.DedupKey] = e
+	}
+	var b store.ActivityBucket
+	for _, a := range s.activity {
+		if !f.Since.IsZero() && a.EventTime.Before(f.Since) {
+			continue
+		}
+		if !f.Until.IsZero() && !a.EventTime.Before(f.Until) {
+			continue
+		}
+		b.Calls++
+		u, ok := byKey[a.UsageDedupKey]
+		if !ok {
+			b.UnattributedCalls++
+			continue
+		}
+		n := int64(a.CallsInTurn)
+		if n < 1 {
+			n = 1
+		}
+		b.AttributedInput += u.InputTokens / n
+		b.AttributedOutput += u.OutputTokens / n
+		b.AttributedTotal += u.TotalTokens / n
+		if c, priced := u.Cost(); priced {
+			b.AttributedCostMicroUSD += c / n
+		} else {
+			b.UnpricedCalls++
+		}
+	}
+	return &store.ActivitySummary{GroupBy: f.GroupBy, Totals: b}, nil
+}
+
+// TopActivity is unreachable through the collector; the fake does no ranking.
+// It exists so the fake still satisfies store.Store.
+func (s *fakeStore) TopActivity(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.ActivityBucket, error) {
+	return nil, nil
 }
 
 func (s *fakeStore) Checkpoint(_ context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error) {
