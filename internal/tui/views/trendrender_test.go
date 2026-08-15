@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas/runes"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
@@ -66,9 +67,9 @@ func spikeIdleBuckets() []store.Bucket {
 		{4, 0, 0},
 		{5, 3_200_000, 620_000_000},
 		{6, 0, 40_000_000},
-		// Deliberately tiny: under one band row of the lane's peak at every
-		// geometry the tests render, so it exercises the eighth-block cap and the
-		// smallest-honest-mark rule on the height channel.
+		// Deliberately tiny: a few percent of the lane's peak, so it lands on the
+		// bottom rung of the intensity ramp. It is the smallest-honest-mark case -
+		// an active bucket that must never paint as an idle one.
 		{7, 120_000, 150_000_000},
 		// days 8 and 9 are absent: an outage wider than 1.5 bucket steps.
 		{10, 5_000_000, 300_000_000},
@@ -294,11 +295,22 @@ func TestOwnershipKeepsCoincidentSeriesVisible(t *testing.T) {
 // ansiFor is the SGR prefix one series' style emits, used to count the cells a
 // series actually owns in a rendered frame.
 func ansiFor(s CompSpec) string {
-	r := s.Style().Render("X")
+	if p := sgrPrefix(s.Style()); p != "" {
+		return p
+	}
+	return s.Style().Render("X")
+}
+
+// sgrPrefix is the escape sequence a style writes ahead of its content. It is
+// how a canvas cell's ATTRIBUTES are compared without reaching into lipgloss
+// internals, which matters where two ramp rungs share a glyph and differ only
+// in faint or bold.
+func sgrPrefix(s lipgloss.Style) string {
+	r := s.Render("X")
 	if i := strings.Index(r, "X"); i > 0 {
 		return r[:i]
 	}
-	return r
+	return ""
 }
 
 // heatLanesFor builds candidate D and returns its single pane, the pane
@@ -325,157 +337,154 @@ func heatColOf(g paneGeom, ts time.Time) int {
 	return int(math.Round((x - g.minX) / (g.maxX - g.minX) * float64(g.gw-1)))
 }
 
-// isHeatInk reports whether r is ink a column can be built from — a ramp shade
-// or an eighth-block cap — and not the idle track or the blank left by a hole.
+// isHeatInk reports whether r is a rung of the intensity ramp, and not the idle
+// track or the blank left by a hole.
 func isHeatInk(r rune) bool {
 	for _, rung := range heatRamp {
 		if rung.glyph == r {
 			return true
 		}
 	}
-	return r >= runes.LowerBlockOne && r <= runes.FullBlock
+	return false
 }
 
-// heatColumnTop returns the topmost band row of lane li carrying column ink at
-// plot column x, and the rune there. row = -1 when the column is empty.
-func heatColumnTop(m *timeserieslinechart.Model, g paneGeom, hg heatGeom, li, x int) (int, rune) {
+// heatSlab returns lane li's painted column at plot column x, one cell per band
+// row, top row first. A bucket owns its whole band, so this is the entire mark
+// the treatment makes for it.
+func heatSlab(m *timeserieslinechart.Model, g paneGeom, hg heatGeom, li, x int) []canvas.Cell {
+	out := make([]canvas.Cell, 0, hg.bandH)
 	for row := hg.heatRow(li); row <= hg.baseRow(li); row++ {
-		r := m.Canvas.Cell(canvas.Point{X: g.startX + x, Y: row}).Rune
-		if isHeatInk(r) {
-			return row, r
+		out = append(out, m.Canvas.Cell(canvas.Point{X: g.startX + x, Y: row}))
+	}
+	return out
+}
+
+// cellInk is a cell's whole visible identity: its glyph plus the attributes it
+// is drawn with. Two rungs of the ramp share the '█' glyph and differ only in
+// bold, so a rune-only comparison would call them the same ink.
+func cellInk(c canvas.Cell) string { return string(c.Rune) + sgrPrefix(c.Style) }
+
+// TestHeatSlabsAreUniform is the rework's contract, and the difference between a
+// heat map and the bar chart it replaced: a bucket paints every row of its band
+// with the SAME ink. Nothing in a column's shape carries information — no
+// silhouette to measure, no tip to read — so the value has nowhere to live but
+// the intensity. The assertion covers every plot column, holes and idle buckets
+// included: a lane is uniform everywhere or it is not a band.
+func TestHeatSlabsAreUniform(t *testing.T) {
+	m, g, hg, specs := heatLanesFor(t, 100, 24)
+	if !hg.tall || hg.bandH < heatMinTallBand {
+		t.Fatalf("expected tall bands at 100x24, got tall=%v bandH=%d", hg.tall, hg.bandH)
+	}
+	for li := range specs {
+		for x := 0; x < g.gw; x++ {
+			slab := heatSlab(m, g, hg, li, x)
+			want := cellInk(slab[0])
+			for row, cell := range slab {
+				if got := cellInk(cell); got != want {
+					t.Fatalf("lane %d column %d: band row %d inks %q, row 0 inks %q — the slab is not uniform",
+						li, x, row, got, want)
+				}
+			}
 		}
 	}
-	return -1, 0
 }
 
-// heatColumnCells is a column's height in whole-cell units at plot column x:
-// how many band rows it reaches. Used to compare two buckets' heights.
-func heatColumnCells(m *timeserieslinechart.Model, g paneGeom, hg heatGeom, li, x int) int {
-	top, _ := heatColumnTop(m, g, hg, li, x)
-	if top < 0 {
-		return 0
-	}
-	return hg.baseRow(li) - top + 1
-}
-
-// TestHeatMarksEveryNonZeroBucket: every bucket that carries tokens must carry a
-// mark on its lane baseline. The smallest-honest-mark rule says a non-zero
-// bucket may never render as an idle one, and an idle one may never render as a
-// hole. The baseline is where the assertion lives now that a column's height is
-// the value: it is the one row every non-empty column occupies.
+// TestHeatMarksEveryNonZeroBucket: every bucket that carries tokens paints its
+// whole band in ramp ink, and every idle bucket paints its whole band with the
+// track mark. The smallest-honest-mark rule says a non-zero bucket may never
+// render as an idle one, and an idle one may never render as a hole.
 func TestHeatMarksEveryNonZeroBucket(t *testing.T) {
 	m, g, hg, specs := heatLanesFor(t, 100, 24)
 	if !hg.tall {
-		t.Fatalf("expected height-modulated lanes at 100x24, got a flat band of %d", hg.bandH)
+		t.Fatalf("expected tall lanes at 100x24, got a band of %d", hg.bandH)
 	}
 	buckets := spikeIdleBuckets()
 	times := bucketTimes(buckets, "day")
 	for li, s := range specs {
 		for i, b := range buckets {
-			p := canvas.Point{X: g.startX + heatColOf(g, times[i]), Y: hg.baseRow(li)}
-			got := m.Canvas.Cell(p).Rune
-			if v := s.Pick(Split(b)); v > 0 {
-				if !isHeatInk(got) {
-					t.Errorf("lane %s bucket %s (%d tokens): baseline holds %q, want column ink",
-						s.Key, b.Keys["day"], v, string(got))
+			v := s.Pick(Split(b))
+			for row, cell := range heatSlab(m, g, hg, li, heatColOf(g, times[i])) {
+				if v > 0 {
+					if !isHeatInk(cell.Rune) {
+						t.Errorf("lane %s bucket %s (%d tokens): band row %d holds %q, want ramp ink",
+							s.Key, b.Keys["day"], v, row, string(cell.Rune))
+					}
+					continue
 				}
-				continue
-			}
-			if got != heatTrack {
-				t.Errorf("lane %s bucket %s (idle): baseline holds %q, want the track mark %q",
-					s.Key, b.Keys["day"], string(got), string(heatTrack))
+				if cell.Rune != heatTrack {
+					t.Errorf("lane %s bucket %s (idle): band row %d holds %q, want the track mark %q",
+						s.Key, b.Keys["day"], row, string(cell.Rune), string(heatTrack))
+				}
 			}
 		}
 	}
 }
 
-// TestHeatColumnHeightTracksValue is the rework's contract: within a lane the
-// vertical space carries the number. A lane's peak bucket must fill its band to
-// the top row, and a materially smaller bucket must render materially shorter —
-// the ordering of heights must match the ordering of values.
-func TestHeatColumnHeightTracksValue(t *testing.T) {
+// TestHeatInkTracksValue: the intensity is the value. Every bucket must paint
+// the rung its own fraction of the lane peak maps to, which is what makes the
+// picture readable against the "max" printed on the lane rule.
+func TestHeatInkTracksValue(t *testing.T) {
 	m, g, hg, specs := heatLanesFor(t, 100, 24)
-	if !hg.tall || hg.bandH < heatMinTallBand {
-		t.Fatalf("expected a tall band at 100x24, got tall=%v bandH=%d", hg.tall, hg.bandH)
-	}
 	buckets := spikeIdleBuckets()
 	times := bucketTimes(buckets, "day")
-
 	for li, s := range specs {
-		type sample struct {
-			v    int64
-			cols int
+		var peak int64
+		for _, b := range buckets {
+			if v := s.Pick(Split(b)); v > peak {
+				peak = v
+			}
 		}
-		var peak sample
-		var rest []sample
+		if peak == 0 {
+			t.Fatalf("lane %s has no non-zero bucket", s.Key)
+		}
 		for i, b := range buckets {
 			v := s.Pick(Split(b))
 			if v <= 0 {
 				continue
 			}
-			n := heatColumnCells(m, g, hg, li, heatColOf(g, times[i]))
-			if v > peak.v {
-				if peak.v > 0 {
-					rest = append(rest, peak)
-				}
-				peak = sample{v, n}
-				continue
-			}
-			rest = append(rest, sample{v, n})
-		}
-		if peak.v == 0 {
-			t.Fatalf("lane %s has no non-zero bucket", s.Key)
-		}
-		// The peak fills the band: its top cell is the band's top row.
-		if peak.cols != hg.bandH {
-			t.Errorf("lane %s peak (%d tokens) is %d of %d band rows, want the full band",
-				s.Key, peak.v, peak.cols, hg.bandH)
-		}
-		for _, r := range rest {
-			if r.cols > peak.cols {
-				t.Errorf("lane %s: %d tokens renders %d rows, taller than the peak %d tokens at %d",
-					s.Key, r.v, r.cols, peak.v, peak.cols)
-			}
-			// A bucket under half the peak must not fill the band.
-			if 2*r.v < peak.v && r.cols >= hg.bandH {
-				t.Errorf("lane %s: %d tokens (under half of %d) still fills all %d rows",
-					s.Key, r.v, peak.v, hg.bandH)
+			want := heatRamp[heatRungFor(float64(v)/float64(peak))]
+			got := heatSlab(m, g, hg, li, heatColOf(g, times[i]))[0]
+			if got.Rune != want.glyph {
+				t.Errorf("lane %s bucket %s (%d of %d) inks %q, want the rung glyph %q",
+					s.Key, b.Keys["day"], v, peak, string(got.Rune), string(want.glyph))
 			}
 		}
 	}
 }
 
-// TestHeatSubRowPrecision: a value too small for a whole band row still renders,
-// as an eighth-block cap on the baseline. That is the smallest honest mark and
-// the reason the height channel does not quantize small buckets to nothing.
-func TestHeatSubRowPrecision(t *testing.T) {
-	m, g, hg, specs := heatLanesFor(t, 100, 24)
-	buckets := spikeIdleBuckets()
-	times := bucketTimes(buckets, "day")
-	// Lane 0 is input; day 7 (900K) is well under one band row of the 5M peak.
-	li := 0
-	var small, peak int64
-	for _, b := range buckets {
-		if v := specs[li].Pick(Split(b)); v > peak {
-			peak = v
+// TestHeatRungIsMonotone pins the ramp itself, where the ordering contract now
+// lives: more tokens never means less ink, any non-zero fraction reaches the
+// first rung, and the peak reaches the last. Zero is not on the ramp at all —
+// it is the track mark, so heatRungFor reports no rung for it.
+func TestHeatRungIsMonotone(t *testing.T) {
+	if r := heatRungFor(0); r != -1 {
+		t.Errorf("heatRungFor(0) = %d, want -1 (no rung: zero is the track mark)", r)
+	}
+	if r := heatRungFor(1e-9); r != 0 {
+		t.Errorf("heatRungFor(1e-9) = %d, want the bottom rung 0", r)
+	}
+	if r := heatRungFor(1); r != len(heatRamp)-1 {
+		t.Errorf("heatRungFor(1) = %d, want the top rung %d", r, len(heatRamp)-1)
+	}
+	if r := heatRungFor(5); r != len(heatRamp)-1 {
+		t.Errorf("heatRungFor(5) = %d, want the top rung %d clamped", r, len(heatRamp)-1)
+	}
+	prev := heatRungFor(0)
+	for i := 0; i <= 10_000; i++ {
+		f := float64(i) / 10_000
+		r := heatRungFor(f)
+		if r < prev {
+			t.Fatalf("heatRungFor(%g) = %d, below the rung of a smaller fraction (%d)", f, r, prev)
 		}
-	}
-	small = specs[li].Pick(Split(buckets[7]))
-	if small == 0 || float64(small)/float64(peak)*float64(hg.bandH) >= 1 {
-		t.Fatalf("fixture bucket 7 (%d of %d) is not a sub-row value at bandH=%d", small, peak, hg.bandH)
-	}
-	row, r := heatColumnTop(m, g, hg, li, heatColOf(g, times[7]))
-	if row != hg.baseRow(li) {
-		t.Errorf("sub-row bucket tops at row %d, want the baseline %d", row, hg.baseRow(li))
-	}
-	if r < runes.LowerBlockOne || r > runes.FullBlock {
-		t.Errorf("sub-row bucket renders %q, want an eighth-block cap", string(r))
+		prev = r
 	}
 }
 
-// TestHeatDegradesToFlatBands pins the ladder: height modulation needs bands of
-// at least heatMinTallBand rows, and below that the lanes degrade to the flat
-// 2-row then 1-row strips before the pane fallback takes over entirely.
+// TestHeatDegradesToFlatBands pins the ladder: bands grow to fill the pane while
+// they can be at least heatMinTallBand rows tall, and below that the lanes fall
+// back to fixed 2-row then 1-row strips before the pane fallback takes over
+// entirely. The encoding is the same at every rung of that ladder — only the
+// thickness of the band changes.
 func TestHeatDegradesToFlatBands(t *testing.T) {
 	const lanes = 3
 	for _, tc := range []struct {
@@ -564,19 +573,20 @@ func TestHeatGapIsAHoleNotAZero(t *testing.T) {
 	}
 	mid := (lo + hi) / 2
 	for li := range specs {
-		got := m.Canvas.Cell(canvas.Point{X: g.startX + mid, Y: hg.heatRow(li)}).Rune
-		if got != 0 && got != ' ' {
-			t.Errorf("lane %d: outage column %d holds %q, want an explicit hole",
-				li, mid, string(got))
+		for row, cell := range heatSlab(m, g, hg, li, mid) {
+			if cell.Rune != 0 && cell.Rune != ' ' {
+				t.Errorf("lane %d: outage column %d band row %d holds %q, want an explicit hole",
+					li, mid, row, string(cell.Rune))
+			}
 		}
 	}
 }
 
 // TestHeatLanesSelfScale is the point of the treatment: each lane is scaled
-// against its OWN peak, so every lane's largest bucket reaches BOTH the top of
-// its band and the top rung of the ramp even though cache runs about 100x fresh.
-// On one shared scale the two fresh lanes would sit flat on the baseline — the
-// same data fact that forced the two-pane split.
+// against its OWN peak, so every lane's largest bucket reaches the top rung of
+// the ramp even though cache runs about 100x fresh. On one shared scale the two
+// fresh lanes would sit on the bottom rung throughout — the same data fact that
+// forced the two-pane split.
 func TestHeatLanesSelfScale(t *testing.T) {
 	m, g, hg, specs := heatLanesFor(t, 100, 24)
 	buckets := spikeIdleBuckets()
@@ -594,15 +604,11 @@ func TestHeatLanesSelfScale(t *testing.T) {
 		if peaks[li] == 0 {
 			t.Fatalf("lane %s has no non-zero bucket to peak on", s.Key)
 		}
-		x := heatColOf(g, times[at])
-		row, r := heatColumnTop(m, g, hg, li, x)
-		if row != hg.heatRow(li) {
-			t.Errorf("lane %s peak (%d tokens) tops at row %d, want the band top %d",
-				s.Key, peaks[li], row, hg.heatRow(li))
-		}
-		if r != top {
-			t.Errorf("lane %s peak (%d tokens) inks %q, want the top rung %q",
-				s.Key, peaks[li], string(r), string(top))
+		for row, cell := range heatSlab(m, g, hg, li, heatColOf(g, times[at])) {
+			if cell.Rune != top {
+				t.Errorf("lane %s peak (%d tokens) inks %q on band row %d, want the top rung %q",
+					s.Key, peaks[li], string(cell.Rune), row, string(top))
+			}
 		}
 	}
 	// And the spread the treatment exists to absorb is really there.
