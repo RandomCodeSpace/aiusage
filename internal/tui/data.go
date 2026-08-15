@@ -393,8 +393,15 @@ func (d *Data) cachedSummary(f store.Filter) (*store.Summary, bool) {
 	return s, ok
 }
 
-// summarize runs a cached Summarize.
-func (d *Data) summarize(f store.Filter) (*store.Summary, error) {
+// summarize runs a cached Summarize under ctx: the load generation's
+// cancellation signal (Model.qctx). A cache hit is served whatever ctx says —
+// it costs nothing and a superseded flight's warm answers are still correct —
+// but a MISS on a cancelled context returns immediately instead of opening a
+// full-ledger aggregation whose result is already destined for the bin. That
+// check is the stage boundary a superseded flight bails at even when the source
+// itself ignores cancellation; a source that honours it (the real store, via
+// sqlite3_interrupt) also aborts the query already running.
+func (d *Data) summarize(ctx context.Context, f store.Filter) (*store.Summary, error) {
 	k := cacheKey(f)
 	d.mu.Lock()
 	cache := d.cache
@@ -403,7 +410,10 @@ func (d *Data) summarize(f store.Filter) (*store.Summary, error) {
 	if ok {
 		return s, nil
 	}
-	s, err := d.src.Summarize(context.Background(), f)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s, err := d.src.Summarize(ctx, f)
 	if err != nil {
 		return nil, err
 	}
@@ -418,8 +428,8 @@ func (d *Data) summarize(f store.Filter) (*store.Summary, error) {
 }
 
 // Totals returns the grand-total bucket for the current range and drill stack.
-func (d *Data) Totals(now time.Time, sp Span, crumbs []Crumb) (store.Bucket, error) {
-	s, err := d.summarize(d.filterFor(now, sp, crumbs, nil))
+func (d *Data) Totals(ctx context.Context, now time.Time, sp Span, crumbs []Crumb) (store.Bucket, error) {
+	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, nil))
 	if err != nil {
 		return store.Bucket{}, err
 	}
@@ -437,8 +447,8 @@ func (d *Data) TotalsCached(now time.Time, sp Span, crumbs []Crumb) (store.Bucke
 
 // GroupBy returns the summary grouped by a single dimension under the current
 // range and drill stack, sorted per the sort mode.
-func (d *Data) GroupBy(now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, error) {
-	s, err := d.summarize(d.filterFor(now, sp, crumbs, []string{dim}))
+func (d *Data) GroupBy(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, error) {
+	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, []string{dim}))
 	if err != nil {
 		return nil, err
 	}
@@ -461,8 +471,8 @@ func (d *Data) GroupByCached(now time.Time, sp Span, crumbs []Crumb, dim string,
 // GroupByDims returns the summary grouped by multiple dimensions under the
 // current range and drill stack, in the store's key order. One grouped query
 // replaces a per-key N+1 (model owners, per-bucket scrub compositions).
-func (d *Data) GroupByDims(now time.Time, sp Span, crumbs []Crumb, dims []string) (*store.Summary, error) {
-	s, err := d.summarize(d.filterFor(now, sp, crumbs, dims))
+func (d *Data) GroupByDims(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dims []string) (*store.Summary, error) {
+	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, dims))
 	if err != nil {
 		return nil, err
 	}
@@ -495,9 +505,9 @@ func sortTimeline(b []store.Bucket, dim string) {
 
 // Timeline returns per-day (or per-hour for short ranges) buckets across the
 // current range, ascending by time.
-func (d *Data) Timeline(now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, error) {
+func (d *Data) Timeline(ctx context.Context, now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, error) {
 	dim := timelineDim(sp.R)
-	s, err := d.summarize(d.filterFor(now, sp, crumbs, []string{dim}))
+	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, []string{dim}))
 	if err != nil {
 		return nil, dim, err
 	}
@@ -533,8 +543,8 @@ func windowTotalsFilter(since, until time.Time, crumbs []Crumb) store.Filter {
 // window (the previous-period delta chips): one ungrouped Summarize whose
 // Totals is the store-level aggregate — no in-memory summing of grouped rows,
 // and Sessions is the real COUNT(DISTINCT) instead of a zero placeholder.
-func (d *Data) WindowTotals(since, until time.Time, crumbs []Crumb) (store.Bucket, error) {
-	s, err := d.summarize(windowTotalsFilter(since, until, crumbs))
+func (d *Data) WindowTotals(ctx context.Context, since, until time.Time, crumbs []Crumb) (store.Bucket, error) {
+	s, err := d.summarize(ctx, windowTotalsFilter(since, until, crumbs))
 	if err != nil {
 		return store.Bucket{}, err
 	}

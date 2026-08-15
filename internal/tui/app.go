@@ -6,6 +6,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"time"
 
@@ -120,6 +121,16 @@ type Model struct {
 	loadNow    time.Time // clock of the current generation; all its queries key off this
 	dataGen    uint64    // generation whose data is APPLIED to the views (render-memo key)
 
+	// flight and detail hold the cancellation signal of the newest background
+	// load of each kind, so dispatching one aborts the flight it supersedes
+	// instead of letting it finish work nobody will read (live.go). Pointers:
+	// the runtime copies Model by value and every copy must share one gate.
+	flight *flightGate
+	detail *flightGate
+	// loadCtx is the flight context on a background model copy, nil on the live
+	// model. Read through qctx(), never directly.
+	loadCtx context.Context
+
 	// sources is the startup adapter-discovery count per tool id (Options.Sources).
 	// Static for the life of the process — discovery is a fact about the machine,
 	// not about the loaded range.
@@ -232,6 +243,8 @@ func NewModel(src DataSource, opt Options) Model {
 
 	mdl := Model{
 		data:          NewData(src),
+		flight:        &flightGate{},
+		detail:        &flightGate{},
 		keys:          DefaultKeyMap(),
 		th:            th,
 		vctx:          vctx,

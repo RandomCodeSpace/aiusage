@@ -83,6 +83,10 @@ func (m Model) handleDetailDebounce(msg detailDebounceMsg) (Model, tea.Cmd) {
 func (m Model) detailLoadCmd() tea.Cmd {
 	mc := m
 	gen, seq := m.loadGen, m.detailSeq
+	// Same gate contract as loadCmd: taken on the UI thread at dispatch, so the
+	// detail flight this one replaces stops instead of finishing a query whose
+	// result handleDetailLoaded would drop on the sequence check.
+	mc.loadCtx = m.detail.next()
 	return func() tea.Msg {
 		mc.loadDetail()
 		return detailLoadedMsg{gen: gen, seq: seq, failed: mc.detailFailed()}

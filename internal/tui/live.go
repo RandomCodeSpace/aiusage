@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"context"
 	"os"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -30,6 +32,24 @@ import (
 // (superseded by a navigation, refresh or invalidation) are dropped, so they
 // can neither roll back view state nor advance lastMTime. The generation is
 // also the identity of the on-screen dataset: render memoization keys on it.
+//
+// Dropping a stale flight's RESULT is not the same as not paying for it.
+// Superseded flights used to run their full query set to completion against a
+// several-hundred-thousand-row ledger and have every answer discarded, so a
+// burst of `t` presses stacked concurrent full-ledger aggregations — measured
+// at 2.9x the CPU of the same presses served one at a time, all of it inside
+// SQLite. Each dispatch therefore also takes a cancellable context from a
+// flightGate, and taking one cancels the flight it supersedes.
+//
+// The deliberate trade: a burst no longer LOADS the windows it merely passes
+// through, so coming back to one costs a flight instead of hitting a cache the
+// wasted work had incidentally warmed. That is the right way round — a revisit
+// is one background load behind the "◐ sync" chip with the previous picture
+// still up, while the speculative warming cost every intermediate window a full
+// aggregation whether or not the reader ever stopped on it. Windows actually
+// LOADED stay memoized across toggles exactly as before: the summary cache
+// (data.go) keys on the quantized window, so a revisit to a range that was read
+// rather than flicked past still runs zero queries.
 //
 // Idle cost: once loaded, the spinner stops ticking and the ONLY recurring
 // command is a single os.Stat per 10s. No time.Sleep, no busy loop. A reload
@@ -67,16 +87,74 @@ func refreshTickCmd() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return refreshTickMsg{} })
 }
 
+// flightGate owns the cancellation signal of the newest background flight of
+// one kind (the main load, the detail load). next() hands out a fresh context
+// and cancels the one it replaces, which is the whole mechanism: a superseded
+// flight stops at its next stage boundary and, against a source that honours
+// cancellation, has its running query interrupted mid-aggregation.
+//
+// It is a pointer field on Model precisely because Model is a value the Bubble
+// Tea runtime copies freely — the gate has to be the SAME object in every copy,
+// or a cancel would land on a private duplicate. A nil gate is inert (models
+// built without NewModel), so the field is never a construction requirement.
+type flightGate struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+// next opens a context for a new flight and cancels the previous one. The old
+// cancel runs OUTSIDE the lock: it wakes the superseded goroutine, and holding
+// the gate across that would serialise dispatch behind it.
+func (g *flightGate) next() context.Context {
+	if g == nil {
+		return context.Background()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	g.mu.Lock()
+	prev := g.cancel
+	g.cancel = cancel
+	g.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+	return ctx
+}
+
+// stop cancels the current flight without opening a new one. Used when a load
+// supersedes a DIFFERENT kind of flight: a navigation makes the in-flight
+// detail query moot (handleDetailLoaded would drop its result on the generation
+// check anyway), so there is no reason to keep paying for it.
+func (g *flightGate) stop() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	prev := g.cancel
+	g.cancel = nil
+	g.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+}
+
 // loadCmd runs the queries the current view needs OFF the UI thread, warming
 // the shared *Data cache, then returns a dataLoadedMsg. It reuses reload() on a
 // throwaway copy of the model: that copy shares the *Data pointer (so the cache
 // it warms is the live one) but owns value copies of every view struct, so its
 // mutations never touch the live model. The real reload() on dataLoadedMsg then
 // hits the warm cache and does no SQLite work on the UI thread.
+//
+// The flight's context is taken HERE, on the UI thread at dispatch time, not
+// inside the returned closure: taking it is what cancels the previous flight,
+// and that has to happen when the supersession happens, not whenever the
+// runtime gets around to scheduling the goroutine. Doing it in loadCmd rather
+// than startLoad covers Init's first load too, which has no startLoad.
 func (m Model) loadCmd() tea.Cmd {
 	mc := m
 	dbPath := m.dbPath
 	gen := m.loadGen
+	mc.loadCtx = m.flight.next()
+	m.detail.stop() // a navigation moots the detail query under the old selection
 	return func() tea.Msg {
 		// Stat BEFORE querying: a daemon write landing between the queries and a
 		// trailing stat would be credited to lastMTime while being absent from
@@ -151,6 +229,19 @@ func (m *Model) qnow() time.Time {
 		return m.loadNow
 	}
 	return m.data.now()
+}
+
+// qctx returns the context this model's queries run under: the flight's
+// cancellable one on a background copy, and an uncancellable one everywhere
+// else. The live model deliberately never carries a flight context — the
+// apply-side reload runs to completion on the UI thread, where nothing can
+// supersede it mid-run, and it must be free to fall back to a real query if the
+// warm handoff ever misses.
+func (m *Model) qctx() context.Context {
+	if m.loadCtx != nil {
+		return m.loadCtx
+	}
+	return context.Background()
 }
 
 // handleRefreshTick stats the db; if its mtime advanced since the last load it

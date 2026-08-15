@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -135,6 +136,86 @@ func TestStaleFlightDropped(t *testing.T) {
 	}
 }
 
+// TestSupersededFlightRunsNoQueries is the cost half of the generation
+// contract: dropping a stale flight's RESULT is not enough, it must also stop
+// paying for it. Superseding a flight cancels its context, so when the doomed
+// goroutine finally runs it issues zero queries and reports the cancellation —
+// while the current generation still applies normally.
+func TestSupersededFlightRunsNoQueries(t *testing.T) {
+	f := &fakeData{}
+	m := newTestModel(t, f)
+
+	// Two range cycles: both land on windows the startup load never warmed, so
+	// the flights have real queries to run and cancellation has something to
+	// prevent.
+	tm, cmdA := m.Update(keyMsg("t")) // gen G: context taken
+	m = tm.(Model)
+	tm, cmdB := m.Update(keyMsg("t")) // gen G+1 supersedes it: G's context cancelled
+	m = tm.(Model)
+
+	var msgA tea.Msg
+	n := queriesDuring(f, func() { msgA = cmdA() })
+	if n != 0 {
+		t.Fatalf("superseded flight ran %d queries, want 0", n)
+	}
+	if !errors.Is(msgA.(dataLoadedMsg).err, context.Canceled) {
+		t.Fatalf("superseded flight err = %v, want context.Canceled", msgA.(dataLoadedMsg).err)
+	}
+
+	m = send(m, msgA) // still dropped on the generation check, cancelled or not
+	if m.fresh != FreshCutIn {
+		t.Fatalf("superseded flight changed freshness to %v, want cutIn", m.fresh)
+	}
+	m = send(m, cmdB()) // the surviving generation is unaffected
+	if m.fresh != FreshLive {
+		t.Fatalf("current-generation apply freshness = %v, want live", m.fresh)
+	}
+	if len(m.overview.ByTool) == 0 {
+		t.Fatal("current-generation apply produced no overview data")
+	}
+}
+
+// blockingSource blocks every Summarize until its context is cancelled, so a
+// test can hold a flight mid-query and prove the cancellation reaches the
+// DataSource itself (what interrupts a real SQLite aggregation).
+type blockingSource struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingSource) Summarize(ctx context.Context, _ store.Filter) (*store.Summary, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestSupersededFlightCancelsRunningQuery proves the flight context reaches the
+// DataSource: a query already executing when the next generation dispatches is
+// cancelled mid-run, not merely ignored on arrival.
+func TestSupersededFlightCancelsRunningQuery(t *testing.T) {
+	src := &blockingSource{entered: make(chan struct{})}
+	m := NewModel(src, Options{DBPath: "/tmp/usage.db"})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = tm.(Model)
+
+	tm, cmdA := m.Update(keyMsg("2"))
+	m = tm.(Model)
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmdA() }()
+	<-src.entered // the flight is inside Summarize
+
+	m.Update(keyMsg("3")) // supersede: this must cancel the running query
+
+	select {
+	case msg := <-done:
+		if !errors.Is(msg.(dataLoadedMsg).err, context.Canceled) {
+			t.Fatalf("interrupted flight err = %v, want context.Canceled", msg.(dataLoadedMsg).err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("superseding a flight did not cancel the query it was running")
+	}
+}
+
 // TestRefreshTickWhileLoadingStillDispatches: the mtime poll no longer defers
 // to an in-flight load. An advanced mtime supersedes it with a new generation;
 // an unchanged mtime still dispatches nothing.
@@ -198,7 +279,7 @@ func TestInFlightLoadDoesNotRepolluteInvalidatedCache(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = d.Totals(now, Span{R: RangeAll}, nil)
+		_, _ = d.Totals(context.Background(), now, Span{R: RangeAll}, nil)
 	}()
 	for g.calls.Load() == 0 { // wait until the query is in flight
 		time.Sleep(time.Millisecond)
@@ -207,7 +288,7 @@ func TestInFlightLoadDoesNotRepolluteInvalidatedCache(t *testing.T) {
 	close(g.release)
 	<-done
 
-	if _, err := d.Totals(now, Span{R: RangeAll}, nil); err != nil {
+	if _, err := d.Totals(context.Background(), now, Span{R: RangeAll}, nil); err != nil {
 		t.Fatalf("Totals: %v", err)
 	}
 	if got := g.calls.Load(); got != 2 {
@@ -296,15 +377,15 @@ func TestCacheKeysStableWithinDay(t *testing.T) {
 	late := time.Date(2026, 8, 9, 23, 59, 59, 0, time.Local)
 
 	for _, r := range []Range{RangeToday, Range7d, Range30d} {
-		if _, err := d.Totals(early, Span{R: r}, nil); err != nil {
+		if _, err := d.Totals(context.Background(), early, Span{R: r}, nil); err != nil {
 			t.Fatalf("Totals(%s): %v", r.Label(), err)
 		}
-		if _, _, err := d.Timeline(early, Span{R: r}, nil); err != nil {
+		if _, _, err := d.Timeline(context.Background(), early, Span{R: r}, nil); err != nil {
 			t.Fatalf("Timeline(%s): %v", r.Label(), err)
 		}
 		n := queriesDuring(f, func() {
-			_, _ = d.Totals(late, Span{R: r}, nil)
-			_, _, _ = d.Timeline(late, Span{R: r}, nil)
+			_, _ = d.Totals(context.Background(), late, Span{R: r}, nil)
+			_, _, _ = d.Timeline(context.Background(), late, Span{R: r}, nil)
 		})
 		if n != 0 {
 			t.Errorf("%s: same-day clock drift caused %d re-queries, want 0", r.Label(), n)
@@ -312,7 +393,7 @@ func TestCacheKeysStableWithinDay(t *testing.T) {
 	}
 
 	nextDay := late.AddDate(0, 0, 1)
-	n := queriesDuring(f, func() { _, _ = d.Totals(nextDay, Span{R: Range7d}, nil) })
+	n := queriesDuring(f, func() { _, _ = d.Totals(context.Background(), nextDay, Span{R: Range7d}, nil) })
 	if n == 0 {
 		t.Error("crossing midnight did not re-key the 7d window")
 	}
