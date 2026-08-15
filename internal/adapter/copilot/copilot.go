@@ -12,6 +12,10 @@
 // highest-priority record per shared traceId / gen_ai.response.id and suppress
 // the rest so a single call is counted once.
 //
+// ACTIVITY (tool calls) comes from `execute_tool` SPANS only, never from the
+// metric records that share the file — see activity.go, which explains why the
+// difference is a 226x one.
+//
 // CRITICAL: strictly read-only. Files are opened O_RDONLY; nothing under the
 // agent's directories is created, locked, or modified.
 package copilot
@@ -182,18 +186,27 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	traceModels, traceSessions := collectTraceContexts(records)
 
 	cands := make([]*candidate, 0, len(records))
+	var activity []model.ActivityEvent
 	for i, rec := range records {
 		if ctx.Err() != nil {
 			// Partial parse: no checkpoint, so the next cycle re-reads in full.
-			return adapter.Observation{Events: candidatesToEvents(filterEmitted(cands), src.Path)}, ctx.Err()
+			return adapter.Observation{
+				Events:   candidatesToEvents(filterEmitted(cands), src.Path),
+				Activity: activity,
+			}, ctx.Err()
 		}
 		if c := toCandidate(rec, i, fallbackTS, traceModels, traceSessions); c != nil {
 			cands = append(cands, c)
+			continue // a usage record is never a tool-call span
+		}
+		if a, ok := toolCallActivity(rec, fallbackTS, traceSessions, src.Path); ok {
+			activity = append(activity, a)
 		}
 	}
 
 	return adapter.Observation{
 		Events:     candidatesToEvents(filterEmitted(cands), src.Path),
+		Activity:   activity,
 		Checkpoint: newCp,
 	}, nil
 }
@@ -402,19 +415,7 @@ func toCandidate(rec *otelRecord, index int, fallbackTS time.Time, traceModels, 
 		mdl = "unknown"
 	}
 
-	session := ""
-	if sid, _, ok := bestSessionAttr(attrs); ok {
-		session = sid
-	}
-	if session == "" && hasTrace {
-		session = traceSessions[trace]
-	}
-	if session == "" {
-		session = trace
-	}
-	if session == "" {
-		session = "unknown-session"
-	}
+	session := sessionFor(attrs, trace, hasTrace, traceSessions)
 
 	ts, hasTS := rec.ts, rec.hasTS
 	if !hasTS {
@@ -800,6 +801,27 @@ func firstNonEmptyAttr(attrs map[string]json.RawMessage, keys []string) string {
 		}
 	}
 	return ""
+}
+
+// sessionFor resolves a record's session: its own highest-priority session
+// attribute, else the per-trace fallback, else the trace id itself. Usage and
+// activity rows share it so both ledgers place a call and its conversation
+// under the same session id.
+func sessionFor(attrs map[string]json.RawMessage, trace string, hasTrace bool, traceSessions map[string]string) string {
+	session := ""
+	if sid, _, ok := bestSessionAttr(attrs); ok {
+		session = sid
+	}
+	if session == "" && hasTrace {
+		session = traceSessions[trace]
+	}
+	if session == "" {
+		session = trace
+	}
+	if session == "" {
+		session = "unknown-session"
+	}
+	return session
 }
 
 // bestSessionAttr returns the highest-priority present session attribute.

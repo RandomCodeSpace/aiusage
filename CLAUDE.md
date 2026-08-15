@@ -111,7 +111,26 @@ sidechain replay cannot count a call twice; opencode joins exactly via
 from; codex NEVER attributes, because its `token_count` records share no
 identity with its `function_call`/`custom_tool_call` records (verified: zero of
 261,938 local token_count records carry a turn_id, while every call does), and a
-positional guess is not on offer.
+positional guess is not on offer; copilot never attributes either, for the same
+reason from a different shape — its `execute_tool` span's parent is the
+`invoke_agent` span, which makes it a SIBLING of the `chat` spans the usage rows
+are built from, its `gen_ai.tool.call.id` occurs exactly once in the whole
+export, and the only handle it shares with usage is the traceId, which covers
+every turn of a conversation rather than one of them.
+
+**Copilot activity comes from SPANS, never from metric dataPoints.** One OTEL
+file carries both shapes and only one of them counts anything. A span is written
+once per operation, so one `execute_tool` span is one tool call.
+`github.copilot.tool.call.count` (and `agent.turn.count`,
+`invoke_agent.tool_calls`, ...) is a CUMULATIVE counter re-exported on the
+exporter's timer: measured on a live export, a session that made exactly ONE
+tool call had produced 226 dataPoints, every one of them value 1 under an
+identical attribute set. Counting or summing dataPoints reports that call once
+per export interval — a 226x inflation of a single `view`. The export names no
+skill and no hook: the skill list on `invoke_agent` is what was AVAILABLE, and an
+invoked skill arrives as a tool call named `skill` whose skill name lives in
+arguments the exporter does not write. So copilot emits kind='tool' rows and
+nothing else.
 
 **Skill cost is a property of the TURN, and lives in its own table** (schema v6,
 usage_skill_context). An activity row of kind='skill' records the turn that
