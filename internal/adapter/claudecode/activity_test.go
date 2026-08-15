@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -268,6 +269,135 @@ func TestSidechainReplayDoesNotDoubleCountCalls(t *testing.T) {
 	}
 	if obs.Activity[0].UsageDedupKey != obs.Events[0].DedupKey {
 		t.Error("the surviving call does not name the surviving usage event")
+	}
+}
+
+// TestStreamedTurnCountsCallsAcrossItsRecords is the regression test for the
+// bug that cost this ledger a third of its rows.
+//
+// Claude Code streams ONE API response across SEVERAL transcript records that
+// share a message id: 102,733 assistant records with usage collapse to 50,696
+// message ids locally, and 7,953 of those ids have more than one call-carrying
+// record. Those records are ONE turn — persistedKey deliberately keys usage on
+// the message id — so the deduper keeps one of them as the usage row. It also
+// used to keep only that one record's tool_use blocks, discarding every other
+// record's: 41,150 of 60,832 calls reached the ledger, and non-uniformly, so
+// the "most used tool" ranking was wrong rather than merely low.
+//
+// Every call of the message must therefore produce a row, all of them naming
+// the ONE surviving usage event, with turn_seq unique across the whole message
+// (not restarting per record) and calls_in_turn equal to the total — it is the
+// cost divisor, so a value that counts one record's calls attributes a multiple
+// of the turn's real tokens.
+func TestStreamedTurnCountsCallsAcrossItsRecords(t *testing.T) {
+	root := t.TempDir()
+	// One message id, one request id, three records. The middle record wins the
+	// keep-best ordering on token total, so the winner is deliberately NOT the
+	// record the first call was read in.
+	rec := func(uuid, blocks string, out int64) string {
+		return `{"type":"assistant","uuid":"` + uuid + `","timestamp":"2026-05-29T17:14:22.354Z",` +
+			`"sessionId":"sess-1","cwd":"/home/dev/proj","requestId":"req-1",` +
+			`"message":{"id":"msg-1","model":"claude-sonnet-4-6",` +
+			`"content":[` + blocks + `],` +
+			`"usage":{"input_tokens":100,"output_tokens":` + strconv.FormatInt(out, 10) + `}}}`
+	}
+	writeFixture(t, root, "proj", "sess-1", []string{
+		rec("u-1", toolBlock("toolu_1", "Bash"), 10),
+		rec("u-2", toolBlock("toolu_2", "Read")+","+toolBlock("toolu_3", "Edit"), 99),
+		rec("u-3", toolBlock("toolu_4", "WebFetch"), 20),
+	})
+
+	obs := collectObs(t, root)
+	if len(obs.Events) != 1 {
+		t.Fatalf("want 1 usage event (one streamed response), got %d", len(obs.Events))
+	}
+	if len(obs.Activity) != 4 {
+		t.Fatalf("want 4 activity rows, one per tool call across all three records, got %d",
+			len(obs.Activity))
+	}
+
+	wantNames := []string{"Bash", "Read", "Edit", "WebFetch"}
+	seen := make(map[string]bool, len(obs.Activity))
+	for i, a := range obs.Activity {
+		if a.Name != wantNames[i] {
+			t.Errorf("row %d name = %q, want %q (calls keep transcript order)", i, a.Name, wantNames[i])
+		}
+		if a.CallsInTurn != 4 {
+			t.Errorf("row %d (%s): calls_in_turn = %d, want 4 — this is the cost divisor, "+
+				"and counting one record's calls attributes the turn several times over",
+				i, a.Name, a.CallsInTurn)
+		}
+		if a.TurnSeq != i {
+			t.Errorf("row %d (%s): turn_seq = %d, want %d — a per-record index restarts at 0 "+
+				"in every record of the message", i, a.Name, a.TurnSeq, i)
+		}
+		if a.UsageDedupKey != obs.Events[0].DedupKey {
+			t.Errorf("row %d (%s) names usage key %q, want the one surviving event %q",
+				i, a.Name, a.UsageDedupKey, obs.Events[0].DedupKey)
+		}
+		if !a.EventTime.Equal(obs.Events[0].EventTime) {
+			t.Errorf("row %d (%s) is timed apart from the usage event it divides", i, a.Name)
+		}
+		if seen[a.DedupKey] {
+			t.Errorf("row %d (%s): duplicate dedup key %q — colliding keys are exactly how "+
+				"the calls were lost", i, a.Name, a.DedupKey)
+		}
+		seen[a.DedupKey] = true
+	}
+
+	// The whole point of a stable key: a re-read inserts nothing further.
+	again := collectObs(t, root)
+	if len(again.Activity) != len(obs.Activity) {
+		t.Fatalf("re-read produced %d rows, first read %d", len(again.Activity), len(obs.Activity))
+	}
+	for i := range obs.Activity {
+		if obs.Activity[i] != again.Activity[i] {
+			t.Errorf("row %d differs between reads:\n first: %+v\nsecond: %+v",
+				i, obs.Activity[i], again.Activity[i])
+		}
+	}
+}
+
+// TestStreamedTurnKeysIdlessCallsWithoutColliding covers the fallback. Every
+// tool_use block observed locally carries an id (60,832 of 60,832), so this is
+// the path no real transcript exercises — which is precisely why it needs a
+// test: a bare within-record index collides across the records of one message,
+// and a key minted from read position would recount the call every poll.
+func TestStreamedTurnKeysIdlessCallsWithoutColliding(t *testing.T) {
+	root := t.TempDir()
+	idless := func(uuid, name string, out int64) string {
+		return `{"type":"assistant","uuid":"` + uuid + `","timestamp":"2026-05-29T17:14:22.354Z",` +
+			`"sessionId":"sess-1","requestId":"req-1",` +
+			`"message":{"id":"msg-1","model":"claude-sonnet-4-6",` +
+			`"content":[{"type":"tool_use","name":"` + name + `","input":{}}],` +
+			`"usage":{"input_tokens":100,"output_tokens":` + strconv.FormatInt(out, 10) + `}}}`
+	}
+	writeFixture(t, root, "proj", "sess-1", []string{
+		idless("u-1", "Bash", 10),
+		idless("u-2", "Read", 20),
+	})
+
+	obs := collectObs(t, root)
+	if len(obs.Activity) != 2 {
+		t.Fatalf("want 2 activity rows for two id-less calls in one message, got %d", len(obs.Activity))
+	}
+	a, b := obs.Activity[0], obs.Activity[1]
+	if a.DedupKey == b.DedupKey {
+		t.Fatalf("both id-less calls minted the same key %q", a.DedupKey)
+	}
+	if a.CallsInTurn != 2 || b.CallsInTurn != 2 {
+		t.Errorf("calls_in_turn = %d and %d, want 2 each", a.CallsInTurn, b.CallsInTurn)
+	}
+	if a.TurnSeq != 0 || b.TurnSeq != 1 {
+		t.Errorf("turn_seq = %d and %d, want 0 and 1", a.TurnSeq, b.TurnSeq)
+	}
+	again := collectObs(t, root)
+	for i := range obs.Activity {
+		if obs.Activity[i].DedupKey != again.Activity[i].DedupKey {
+			t.Errorf("row %d key changed between reads: %q then %q — an unstable key "+
+				"recounts the call on every poll",
+				i, obs.Activity[i].DedupKey, again.Activity[i].DedupKey)
+		}
 	}
 }
 

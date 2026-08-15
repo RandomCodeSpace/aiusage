@@ -127,6 +127,91 @@ func TestActivityAttributionNeverExceedsLedger(t *testing.T) {
 	}
 }
 
+// TestAttributionSurvivesAStaleCallsInTurnStamp is the invariant re-stated for
+// the case an append-only table cannot fix by rewriting: a row whose
+// calls_in_turn is WRONG and can never be corrected.
+//
+// It is not hypothetical. Claude Code streams one response across several
+// transcript records, and the claudecode adapter used to emit one row per turn
+// stamped calls_in_turn=1 for turns that had three calls. Appending the missing
+// two is the recovery — their keys never collided with the stored one — but the
+// row already in the table keeps its 1 forever. Dividing by the STAMP would
+// then give one turn's tokens out as 1/1 + 1/3 + 1/3, i.e. 167% of what it
+// cost: an overstatement, which is the one direction this table promises never
+// to go. Counting the rows that share the usage key removes the possibility.
+//
+// This seeds exactly that shape — one stale row, two correct siblings — and
+// asserts the turn is attributed AT MOST once, not one and two thirds.
+func TestAttributionSurvivesAStaleCallsInTurnStamp(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	const total = int64(900)
+	e := ev("u-streamed", model.ToolClaudeCode, base, total)
+	e.InputTokens = total
+	e.SetCost(total*10, "test")
+
+	// The row written before the union fix: it believed it was the turn's only
+	// call. Its stamp is a lie the table cannot be told to forget.
+	stale := act("a-stale", "Bash", model.ActivityTool, base, "u-streamed", 0, 1)
+	// The rows the re-read appends once the adapter counts across records.
+	rest := []model.ActivityEvent{
+		act("a-new-1", "Read", model.ActivityTool, base, "u-streamed", 1, 3),
+		act("a-new-2", "Edit", model.ActivityTool, base, "u-streamed", 2, 3),
+	}
+
+	if _, err := st.ApplyObservation(ctx, []model.UsageEvent{e},
+		append([]model.ActivityEvent{stale}, rest...), nil); err != nil {
+		t.Fatalf("ApplyObservation: %v", err)
+	}
+
+	window := Filter{Since: base.Add(-time.Hour), Until: base.Add(time.Hour)}
+	sum, err := st.Summarize(ctx, window)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	asum, err := st.SummarizeActivity(ctx, ActivityFilter{Since: window.Since, Until: window.Until})
+	if err != nil {
+		t.Fatalf("SummarizeActivity: %v", err)
+	}
+
+	if asum.Totals.Calls != 3 {
+		t.Fatalf("calls = %d, want 3", asum.Totals.Calls)
+	}
+	if asum.Totals.AttributedTotal > sum.Totals.Total {
+		t.Fatalf("attributed tokens %d EXCEED the ledger's %d: a stale calls_in_turn stamp "+
+			"is being trusted over the rows that actually share the usage row",
+			asum.Totals.AttributedTotal, sum.Totals.Total)
+	}
+	if asum.Totals.AttributedCostMicroUSD > sum.Totals.CostMicroUSD {
+		t.Fatalf("attributed cost %d EXCEEDS the ledger's %d", asum.Totals.AttributedCostMicroUSD,
+			sum.Totals.CostMicroUSD)
+	}
+	// Three rows share the usage row, so each takes a third whatever it was
+	// stamped with — and the shares add back up to the turn.
+	if want := (total / 3) * 3; asum.Totals.AttributedTotal != want {
+		t.Fatalf("attributed tokens = %d, want %d (an equal third to each of the three rows)",
+			asum.Totals.AttributedTotal, want)
+	}
+
+	// Per-name, the stale row must not out-earn its siblings either: a ranking
+	// built on the stamp would show Bash at three times Read and Edit.
+	top, err := st.TopActivity(ctx, ActivityFilter{
+		Since: window.Since, Until: window.Until, GroupBy: []string{"name"},
+	}, ActivityByTokens, 10)
+	if err != nil {
+		t.Fatalf("TopActivity: %v", err)
+	}
+	for _, b := range top {
+		if got, want := b.AttributedTotal, total/3; got != want {
+			t.Errorf("name %q attributed %d tokens, want %d — every call of the turn takes "+
+				"the same share regardless of what it was stamped with",
+				b.Keys["name"], got, want)
+		}
+	}
+}
+
 // TestActivityUnjoinedCallsCostNothing pins the other half of the invariant: a
 // call whose source gives no usage join (codex function calls, hooks) is still
 // counted as a call, contributes no tokens, and is reported as unattributed

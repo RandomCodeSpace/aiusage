@@ -78,9 +78,9 @@ stays a token summary.
 
 Cost is attributed by REFERENCE, never by copy. A row carries
 `usage_dedup_key` (the usage_events row whose provider record contained the
-call) and `calls_in_turn` (how many calls shared that one usage object); tokens
-and cost are derived on READ by joining the ledger and dividing
-(store.SummarizeActivity, store.TopActivity). One assistant turn commonly emits
+call); tokens and cost are derived on READ by joining the ledger and dividing by
+the number of rows that name that key (store.activityDivisorSQL, used by
+SummarizeActivity and TopActivity). One assistant turn commonly emits
 several tool_use blocks against a SINGLE usage object, so copying the turn's
 tokens onto each row would multiply the real cost by the number of calls in it —
 measured on this machine's corpus, the undivided query overstates by 25% (8.56bn
@@ -92,6 +92,45 @@ fact even when its usage row was skipped or predates activity collection, and
 the read path left-joins so a missing partner contributes no cost instead of
 losing the call. Rows with no join are reported as `UnattributedCalls`, never as
 free.
+
+**The cost divisor is COUNTED in the table, never read from `calls_in_turn`.**
+The column is what an adapter believed when it wrote the row, and an append-only
+table cannot correct a belief that later turns out to be low. Claude Code
+streams ONE API response across SEVERAL transcript records sharing a message id
+(102,793 assistant records with usage collapse to 50,729 message ids locally,
+7,957 ids spanning more than one call-carrying record), and until the deduper
+unioned them the adapter emitted one row stamped `calls_in_turn=1` for turns
+that had three. The missing rows append cleanly — their dedup keys never
+collided — but the row already stored keeps its 1 forever, so dividing by the
+STAMP hands one turn's tokens out as 1/1 + 1/3 + 1/3. Measured on the recovered
+ledger: 6,602 usage keys carry rows that disagree about `calls_in_turn`, and the
+stamp attributes 6.862bn tokens against a ceiling of 6.607bn — a 255M-token
+OVERSTATEMENT, the one direction this table promises never to go. Counting
+`(SELECT COUNT(*) ... WHERE s.usage_dedup_key = a.usage_dedup_key)` makes the
+divisor exactly the number of rows sharing the row being divided, so integer
+division bounds the shares by the turn's real total by construction — whatever
+any adapter stamped, in whatever order the rows landed, however many passes it
+took. Same rule as usage_rollup: derived on read, never authoritative on disk.
+`calls_in_turn` stays as what the source reported, which is a different and
+still-worth-keeping claim. Cost measured on 63k rows: +37ms over the whole
+history, 7ms over a day.
+
+**One usage identity can span several source RECORDS, and the activity key must
+survive that.** It is the bug class this ledger is most exposed to, and it is
+per adapter: claude-code streams a response across records that share a
+message.id and PARTITION its tool_use blocks between them (the usage rows
+collapse keep-best, the calls union — see `deduper.addCalls`), so both the key
+and the divisor have to be settled per MESSAGE, never per record. The key is the
+`tool_use` block's own `id`, which is the provider's identity for the call and
+globally unique (60,869 blocks, 60,869 distinct ids, none repeated, none
+absent); an id-less block falls back to a hash of its record's CONTENT plus its
+position among that record's blocks, never to a read position — the adapter
+re-reads every transcript in full whenever any file under the root changes, so a
+key minted from a file offset or line number would recount the call on every
+poll. opencode is already per-message (`opencode|part|<part.id>`, divisor from
+one query over the whole message range); codex and copilot mint one row per
+call from a span/call id and attribute nothing at all, so they have no divisor
+to get wrong.
 
 **Activity is names and counts ONLY.** There is no column for a tool's input and
 no raw column, so a command string, a file path or a prompt has nowhere to land;
@@ -105,7 +144,7 @@ raw shell command it ran — so hook rows are named for the EVENT (`Stop`) and
 `hookInfos` is decoded as `[]struct{}` to take its length and nothing else.
 
 What each adapter captures: claude-code joins exactly (tool_use blocks and
-`.message.usage` are in the SAME record) and rides the existing deduper, so a
+`.message.usage` are in the SAME message) and rides the existing deduper, so a
 sidechain replay cannot count a call twice; opencode joins exactly via
 `part.message_id` -> `message.id`, the id its usage dedup key is already built
 from; codex NEVER attributes, because its `token_count` records share no

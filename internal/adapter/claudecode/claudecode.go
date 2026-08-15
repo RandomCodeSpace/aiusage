@@ -469,12 +469,11 @@ type candidate struct {
 	hasSpeed    bool
 	cost        float64
 	total       int64
-	// activity is the tool/skill calls this same record contained. It rides the
-	// candidate rather than being emitted directly so it is deduplicated by
-	// exactly the rule the usage event is: a sidechain replay repeats the whole
-	// record, tool_use blocks included, and emitting those separately would
-	// count every replayed call a second time.
-	activity []model.ActivityEvent
+	// calls is the tool/skill calls this record contained, as identities and
+	// names rather than finished activity rows. They ride the candidate because
+	// the turn a call belongs to is NOT knowable from the record it was read in:
+	// see toolCall.
+	calls []toolCall
 	// skill is the skill this record was produced inside, or "" for none. It
 	// rides the candidate for the same reason activity does: a sidechain replay
 	// repeats the attribution too, and only the winner's copy may reach the
@@ -586,48 +585,83 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		hasSpeed:    u.Speed.Present,
 		cost:        rl.CostUSD.Value,
 		total:       total,
-		activity:    callActivity(msg.Content, ev, requestID),
+		calls:       recordCalls(msg.Content, line),
 		skill:       strings.TrimSpace(string(rl.AttributionSkill)),
 	}, true
 }
 
-// callActivity turns an assistant record's tool_use blocks into activity rows
-// attributed to that record's own usage event.
+// toolCall is one tool_use block reduced to the identity and the two names the
+// activity ledger needs.
 //
-// This is the exact join the whole design rests on: Claude Code puts the
-// tool_use blocks and the usage object in the SAME record, so a call's cost is
-// a fact about the record rather than a guess about which nearby turn paid for
-// it. UsageDedupKey is that event's dedup key and CallsInTurn is the number of
-// calls sharing it, which is what lets the read path divide instead of
-// multiply. Multi-call turns are rare in practice (9 of 59,622 local records
-// carry two blocks, none carry three) but they are the case that would inflate
-// every headline if this counted wrong, so the count is taken from the blocks
-// rather than assumed to be one.
-//
-// EventTime is copied from the usage event so both ledgers place the call in
-// the same instant, which is what makes a windowed comparison of the two mean
-// anything.
-//
-// Records this adapter rejects as usage — a guarded JSON null, a <synthetic>
-// model — produce no activity either. That is deliberate: a call attributed to
-// a usage event that was never stored would be a call whose cost is silently
-// unattributable, and the honest place to draw the line is the record the
-// ledger accepted.
-func callActivity(blocks []contentBlock, ev model.UsageEvent, requestID string) []model.ActivityEvent {
-	var calls []contentBlock
-	for _, b := range blocks {
-		if b.Type == "tool_use" && strings.TrimSpace(b.Name) != "" {
-			calls = append(calls, b)
-		}
-	}
-	if len(calls) == 0 {
-		return nil
-	}
+// A record's blocks are carried as calls rather than as finished activity rows
+// because THE TURN A CALL BELONGS TO IS NOT A FACT ABOUT THE RECORD IT WAS READ
+// IN. Claude Code streams one API response across SEVERAL transcript records
+// that share a single message.id (measured locally: 102,733 assistant records
+// with usage collapse to 50,696 message ids, and 7,953 of those ids have more
+// than one call-carrying record). Those records are one usage event — that is
+// what persistedKey keys on — so their tool_use blocks are calls of ONE turn.
+// Counting them per record made every such turn report calls_in_turn=1 for a
+// turn that had several, and, worse, the deduper kept only the winning record's
+// blocks and dropped the rest: 41,150 of 60,832 calls reached the ledger.
+// Settling both the sequence and the divisor therefore has to wait until every
+// record of the message has been seen, which is what the deduper does.
+type toolCall struct {
+	// id is the provider's tool_use id ("toolu_..."). It is globally unique per
+	// call — 60,832 blocks locally, 60,832 distinct ids, none repeated — and it
+	// is stable across the sidechain replays that repeat a whole record, which
+	// is what makes it both the cross-poll dedup key and the identity the union
+	// of a message's records is deduplicated on.
+	id string
+	// fallback identifies a block that carries no id at all (0 of 60,832
+	// locally) by the CONTENT of its record plus its position among that
+	// record's blocks. It is deliberately not derived from read position: the
+	// adapter re-reads every transcript in full on every poll, so a key minted
+	// from a file offset or a line number would mint a fresh one each pass and
+	// recount the call forever. Two records of one message hash differently, so
+	// id-less blocks no longer collide across the message the way a bare
+	// within-record index did; a byte-identical replay hashes the same and
+	// collapses. The residual: a replay that differs only in a field outside
+	// this shape would count an id-less block twice.
+	fallback string
+	kind     model.ActivityKind
+	name     string
+}
 
-	out := make([]model.ActivityEvent, 0, len(calls))
-	for i, b := range calls {
-		kind := model.ActivityTool
+// identity is what deduplicates a call within one message's union of records.
+func (c toolCall) identity() string {
+	if c.id != "" {
+		return "id:" + c.id
+	}
+	return "raw:" + c.fallback
+}
+
+// dedupKey is the cross-poll key stored in activity_events. The id form is
+// unchanged from the first release of this ledger, which is what lets the
+// re-read that recovers the dropped calls insert them ALONGSIDE the rows
+// already stored instead of duplicating them.
+func (c toolCall) dedupKey() string {
+	if c.id != "" {
+		return model.ToolClaudeCode + "|call|" + c.id
+	}
+	return model.ToolClaudeCode + "|act|" + c.fallback
+}
+
+// recordCalls extracts one record's tool_use blocks. line is hashed only when a
+// block turns out to carry no id, so the common path costs nothing.
+func recordCalls(blocks []contentBlock, line []byte) []toolCall {
+	var (
+		out    []toolCall
+		digest string
+	)
+	for i, b := range blocks {
+		if b.Type != "tool_use" {
+			continue
+		}
 		name := strings.TrimSpace(b.Name)
+		if name == "" {
+			continue
+		}
+		kind := model.ActivityTool
 		// A Skill call names a tool ("Skill") that is never the interesting
 		// fact; the skill it invoked is. Record the skill under kind=skill so
 		// "which skill" is a group-by rather than a parse at read time. A Skill
@@ -638,18 +672,51 @@ func callActivity(blocks []contentBlock, ev model.UsageEvent, requestID string) 
 				kind, name = model.ActivitySkill, s
 			}
 		}
-		// The block's own id is the provider's identity for this call and is
-		// stable across the sidechain replays that repeat the whole record.
-		// Without one, the event's dedup key plus the position in the turn is
-		// still stable across re-reads of the same line.
-		dedup := ev.DedupKey + "|act|" + strconv.Itoa(i)
-		if b.ID != "" {
-			dedup = model.ToolClaudeCode + "|call|" + b.ID
+		c := toolCall{id: b.ID, kind: kind, name: name}
+		if b.ID == "" {
+			if digest == "" {
+				digest = fmt.Sprintf("%x", sha1.Sum(line))
+			}
+			c.fallback = digest + "|" + strconv.Itoa(i)
 		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// mintActivity turns one turn's whole set of calls into activity rows
+// attributed to that turn's usage event.
+//
+// This is the exact join the whole design rests on: Claude Code puts the
+// tool_use blocks and the usage object in the same message, so a call's cost is
+// a fact about the response rather than a guess about which nearby turn paid
+// for it. UsageDedupKey is that event's dedup key and CallsInTurn is the number
+// of calls sharing it, which is what lets the read path divide instead of
+// multiply. calls is the union across every record of the message, so the
+// divisor equals the number of rows that will exist for the key.
+//
+// EventTime is copied from the usage event, not from the record each block was
+// read in, so both ledgers place the call in the same instant. A streamed
+// response spans real time, so this deliberately collapses a turn's calls onto
+// the one timestamp its cost is stored under: a windowed comparison of the two
+// ledgers is only meaningful if a call and the tokens it is attributed a share
+// of land in the same window.
+//
+// Records this adapter rejects as usage — a guarded JSON null, a <synthetic>
+// model — produce no activity either. That is deliberate: a call attributed to
+// a usage event that was never stored would be a call whose cost is silently
+// unattributable, and the honest place to draw the line is the record the
+// ledger accepted.
+func mintActivity(calls []toolCall, ev model.UsageEvent, requestID string) []model.ActivityEvent {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]model.ActivityEvent, 0, len(calls))
+	for i, c := range calls {
 		out = append(out, model.ActivityEvent{
 			Tool:          model.ToolClaudeCode,
-			Kind:          kind,
-			Name:          name,
+			Kind:          c.kind,
+			Name:          c.name,
 			SessionID:     ev.SessionID,
 			Project:       ev.Project,
 			Model:         ev.Model,
@@ -660,7 +727,7 @@ func callActivity(blocks []contentBlock, ev model.UsageEvent, requestID string) 
 			TurnSeq:       i,
 			CallsInTurn:   len(calls),
 			SourcePath:    ev.SourcePath,
-			DedupKey:      dedup,
+			DedupKey:      c.dedupKey(),
 		})
 	}
 	return out

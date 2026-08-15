@@ -4,10 +4,11 @@
 //
 // The two are joined, never merged. An activity row stores no token counts at
 // all: it names the usage_events row whose provider record contained the call
-// (usage_dedup_key) and how many calls shared that one usage object
-// (calls_in_turn), and the read path below derives tokens and cost from the
-// ledger by dividing. See model.ActivityEvent for why that shape is the honest
-// one.
+// (usage_dedup_key), and the read path below derives tokens and cost from the
+// ledger by dividing that row's total between the calls that share it. See
+// model.ActivityEvent for why that shape is the honest one, and
+// activityDivisorSQL for why the divisor is counted in the table rather than
+// read from the calls_in_turn each adapter stamped.
 package store
 
 import (
@@ -110,10 +111,11 @@ type ActivityFilter struct {
 // ActivityBucket is one grouped row of summarised activity.
 //
 // The Attributed* fields are this call's SHARE of the tokens its turn actually
-// cost, taken from usage_events and divided by calls_in_turn. The division is
-// integer, so a turn's shares sum to at most the turn's real total — the split
-// can only ever UNDERSTATE, never inflate, which is the direction an
-// attribution guess is allowed to be wrong in.
+// cost, taken from usage_events and divided between the calls that name it (see
+// activityDivisorSQL). The division is integer, so a turn's shares sum to at
+// most the turn's real total — the split can only ever UNDERSTATE, never
+// inflate, which is the direction an attribution guess is allowed to be wrong
+// in.
 type ActivityBucket struct {
 	// Keys maps each GroupBy dimension to its value for this bucket
 	// (e.g. {"name":"Bash","tool":"claude-code"}). Ordered via OrderedKeys.
@@ -186,21 +188,49 @@ func (o ActivityOrder) orderExpr() (string, error) {
 	}
 }
 
+// activityDivisorSQL is the cost split's denominator: how many activity rows
+// actually share this call's usage row, COUNTED IN THE LEDGER rather than read
+// from the calls_in_turn stamp the adapter wrote.
+//
+// The stamp is what an adapter believed at insert time, and an append-only
+// table cannot correct a belief that later turns out to be low. Claude Code
+// streams one response across several transcript records, and until the union
+// in the claudecode deduper each of those records contributed a row stamped
+// calls_in_turn=1 for a turn that had three; the missing rows can be appended
+// afterwards, but the rows already stored keep their 1 forever. Reading the
+// stamp would then divide one turn's tokens by 1, 3 and 3 and attribute 167% of
+// it — an OVERSTATEMENT, the one direction this table promises never to go.
+//
+// Counting the rows removes the possibility instead of documenting it. The
+// divisor is always exactly the number of rows summing over that usage row, so
+// integer division makes the shares sum to AT MOST the turn's real total by
+// construction, whatever any adapter stamped, in whatever order the rows
+// landed, however many passes it took. It is the same rule the rollup lives
+// under: derived on read, never authoritative on disk. calls_in_turn stays in
+// the table as what the source reported, which is worth keeping and is not the
+// same claim.
+//
+// The ” case never joins a usage row (LEFT JOIN gives NULL and the sums skip
+// it), so it short-circuits to 1 rather than counting every unattributed row in
+// the table. idx_activity_usage_key serves the lookup.
+const activityDivisorSQL = `(CASE WHEN a.usage_dedup_key = '' THEN 1 ELSE
+	(SELECT COUNT(*) FROM activity_events s WHERE s.usage_dedup_key = a.usage_dedup_key) END)`
+
 // The attribution expressions, in one place so SummarizeActivity and
 // TopActivity can never disagree about what "attributed" means. Integer
 // division floors (every operand is non-negative), so a turn's shares sum to
 // at most its real total.
 const (
-	activityCostSQL   = `COALESCE(SUM(u.cost_micro_usd / a.calls_in_turn),0)`
-	activityTokensSQL = `COALESCE(SUM(u.total_tokens / a.calls_in_turn),0)`
+	activityCostSQL   = `COALESCE(SUM(u.cost_micro_usd / ` + activityDivisorSQL + `),0)`
+	activityTokensSQL = `COALESCE(SUM(u.total_tokens / ` + activityDivisorSQL + `),0)`
 )
 
 // activitySelectSQL is the metric half of both queries' select list, in the
 // order scanActivityBucket reads it.
 const activitySelectSQL = `COUNT(*),
 	COUNT(DISTINCT CASE WHEN a.session_id <> '' THEN a.session_id END),
-	COALESCE(SUM(u.input_tokens / a.calls_in_turn),0),
-	COALESCE(SUM(u.output_tokens / a.calls_in_turn),0),
+	COALESCE(SUM(u.input_tokens / ` + activityDivisorSQL + `),0),
+	COALESCE(SUM(u.output_tokens / ` + activityDivisorSQL + `),0),
 	` + activityTokensSQL + `,
 	` + activityCostSQL + `,
 	COALESCE(SUM(CASE WHEN u.dedup_key IS NULL THEN 1 ELSE 0 END),0),
