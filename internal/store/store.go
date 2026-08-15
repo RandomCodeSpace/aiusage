@@ -151,23 +151,27 @@ func WithRaw() ListOption {
 type Applied struct {
 	Events   int
 	Activity int
-	// SkillContexts counts new usage_skill_context rows: turns newly recorded as
-	// having run inside a skill. A turn already carrying a context counts here
-	// no more than a duplicate event counts in Events.
-	SkillContexts int
+	// TurnContexts counts new usage_turn_context rows: (turn, dimension) pairs
+	// newly recorded as having run under something. ONE turn can contribute up
+	// to five of them, one per dimension, so this counts rows and not turns. A
+	// pair already carrying a context counts here no more than a duplicate event
+	// counts in Events.
+	TurnContexts int
 }
 
 // ObservationBatch is everything one read of one source commits together. It is
 // a struct rather than a parameter list because the set grows: activity joined
-// events in v5, skill contexts in v6, and each addition must land in the SAME
-// transaction as the checkpoint that gates its re-read, not in a second call
-// that a crash could separate from the first.
+// events in v5, skill contexts in v6, all five turn-context dimensions in v7,
+// and each addition must land in the SAME transaction as the checkpoint that
+// gates its re-read, not in a second call that a crash could separate from the
+// first.
 type ObservationBatch struct {
 	Events   []model.UsageEvent
 	Activity []model.ActivityEvent
-	// SkillContexts records which skill each usage event ran inside. At most one
-	// per event, keyed by its dedup key — see model.SkillContext.
-	SkillContexts []model.SkillContext
+	// TurnContexts records what each usage event ran UNDER: its subagent, its
+	// skill, its MCP tool and server, its plugin. At most one value per (event,
+	// dimension), keyed by the event's dedup key — see model.TurnContext.
+	TurnContexts []model.TurnContext
 	// Checkpoint, when non-nil, is upserted in the same transaction.
 	Checkpoint *model.SourceCheckpoint
 }
@@ -258,12 +262,12 @@ type Store interface {
 	// meaningful when the error is non-nil.
 	ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error)
 
-	// ApplyBatch is ApplyObservation plus the skill contexts, and is what a
+	// ApplyBatch is ApplyObservation plus the turn contexts, and is what a
 	// collection cycle actually calls; ApplyObservation is the shorthand that
 	// omits them. Same single transaction, same ordering (events first, so the
-	// rows naming them by dedup key find them present), same idempotence: a
-	// skill context conflicts on its usage dedup key and does nothing, which is
-	// what stops a re-read serving a turn's cost twice.
+	// rows naming them by dedup key find them present), same idempotence: a turn
+	// context conflicts on (usage dedup key, dimension) and does nothing, which
+	// is what stops a re-read serving a turn's cost twice.
 	ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error)
 
 	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
@@ -315,23 +319,40 @@ type Store interface {
 	// dimension: ranking a single grand-total bucket is not a ranking.
 	TopActivity(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]ActivityBucket, error)
 
-	// SummarizeSkillCost aggregates what the turns that ran INSIDE a skill
-	// actually cost, grouped per ActivityFilter.GroupBy (which accepts "skill"
-	// here, and refuses the call-level "kind"/"name"). This is the real answer
-	// to "which skill is expensive": TopActivity ranks the turn that INVOKED a
-	// skill, which is one call, while the skill's own work is every turn that
-	// followed under it.
+	// SummarizeTurnContext aggregates what the turns that ran UNDER each value of
+	// ONE dimension actually cost, grouped per ActivityFilter.GroupBy (which
+	// accepts "value" and the queried dimension's own name, and refuses the
+	// call-level "kind"/"name"). This is the real answer to "which skill/agent
+	// is expensive": TopActivity ranks the turn that INVOKED a skill, which is
+	// one call, while the skill's own work is every turn that followed under it,
+	// and for a subagent there is no invoking call in the ledger at all.
 	//
-	// Unlike the activity queries it does NOT divide. Each usage event has at
-	// most one skill context and the join is 1:1, so a bucket's cost is the full
-	// ledger cost of its turns and the buckets partition the window without
-	// overlap. It also counts turns that called no tool at all, which the
-	// activity ledger has no row for.
-	SummarizeSkillCost(ctx context.Context, f ActivityFilter) (*SkillCostSummary, error)
+	// Unlike the activity queries it does NOT divide. Within one dimension each
+	// usage event has at most one context and the join is 1:1, so a bucket's
+	// cost is the full ledger cost of its turns and the buckets partition the
+	// window without overlap. It also counts turns that called no tool at all,
+	// which the activity ledger has no row for.
+	//
+	// THE DIMENSION IS A REQUIRED ARGUMENT, NOT A FILTER. The five dimensions
+	// plus activity_events' tool-call attribution are SIX PARTITIONS OF THE SAME
+	// DOLLARS: a turn commonly carries three or four contexts at once, each
+	// naming its full cost, so a query spanning two of them reports the same
+	// tokens twice. An unknown dimension is refused, grouping by "dimension" is
+	// refused, and grouping by a dimension OTHER than the queried one is
+	// refused — the mixing is unexpressible rather than discouraged.
+	SummarizeTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter) (*TurnContextSummary, error)
 
-	// TopSkillCost ranks SummarizeSkillCost's buckets by one metric and caps
+	// TopTurnContext ranks SummarizeTurnContext's buckets by one metric and caps
 	// them at limit (0 = uncapped), ordering and limiting in SQL. It needs at
 	// least one GroupBy dimension. ActivityByCalls ranks by turns here.
+	TopTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter, by ActivityOrder, limit int) ([]TurnContextBucket, error)
+
+	// SummarizeSkillCost and TopSkillCost are the skill dimension's pre-existing
+	// spellings, delegating to the two above with model.DimensionSkill. They are
+	// kept because they read better at a call site that only wants skills; they
+	// are delegations rather than implementations, so there remains exactly one
+	// query builder and one table behind every per-skill number.
+	SummarizeSkillCost(ctx context.Context, f ActivityFilter) (*SkillCostSummary, error)
 	TopSkillCost(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]SkillCostBucket, error)
 
 	// SourceStats returns per-tool stored stats.

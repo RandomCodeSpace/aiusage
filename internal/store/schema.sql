@@ -185,52 +185,66 @@ CREATE TRIGGER IF NOT EXISTS trg_activity_no_delete
 BEFORE DELETE ON activity_events
 BEGIN SELECT RAISE(ABORT, 'activity_events is append-only: DELETE forbidden'); END;
 
--- usage_skill_context records which SKILL a turn was running inside, one row per
--- usage event. It answers "what did skill X cost", which activity_events cannot:
--- a kind='skill' row records the turn that INVOKED a skill, not the thousands of
--- turns the skill then spends.
+-- usage_turn_context records what a turn was running UNDER, one row per
+-- (usage event, dimension). It answers "what did skill X / agent Y / server Z
+-- cost", which activity_events cannot: a kind='skill' row records the turn that
+-- INVOKED a skill, not the thousands of turns the skill then spends, and there
+-- is no activity row at all for "this turn ran as workflow-subagent" (77.6% of
+-- all token-bearing turns on the machine this was measured on).
 --
--- Skill context is a property of the TURN, not a call within it, and that is why
--- this is its own table rather than another activity kind. usage_dedup_key is
--- the PRIMARY KEY, so a turn can carry at most one skill (which is also all the
--- source can express) and the join to usage_events is 1:1 in both directions.
--- Per-skill cost is therefore a plain SUM with NO divisor, and over-attribution
--- is unrepresentable rather than merely avoided.
+-- Turn context is a property of the TURN, not a call within it, and that is why
+-- this is its own table rather than another activity kind. (usage_dedup_key,
+-- dimension) is the PRIMARY KEY, so a turn can carry at most one value per axis
+-- (which is also all the source can express: every attribution field is a scalar
+-- string) and, once a query is pinned to one dimension, the join to usage_events
+-- is 1:1 in both directions. Per-value cost is therefore a plain SUM with NO
+-- divisor, and over-attribution WITHIN a dimension is unrepresentable rather
+-- than merely avoided.
 --
--- Keeping it out of activity_events is deliberate. Tool-call attribution splits
--- a turn's cost among its calls; skill-context attribution assigns the whole
--- turn to one skill. They are two partitions of the same dollars and are
--- meaningless added together, so they live in tables no single query joins.
--- Keying on the usage row rather than on a call also captures the turns that ran
--- under a skill and called no tool at all (41.8% of them, measured), which a
--- column on activity_events would have had nowhere to record.
-CREATE TABLE IF NOT EXISTS usage_skill_context (
-  usage_dedup_key    TEXT    NOT NULL PRIMARY KEY,       -- the usage_events row this describes; one turn, one skill
+-- ACROSS dimensions is the opposite and is the price of one table instead of
+-- five. A turn commonly carries three or four contexts at once, and each row
+-- names the turn's FULL cost because each answers a different question. These
+-- five plus activity_events' tool-call attribution are SIX PARTITIONS OF THE
+-- SAME DOLLARS: honest alone, double-counting added together. Every read in
+-- internal/store therefore takes the dimension as a required argument and pins
+-- it in the WHERE clause; nothing groups by `dimension`.
+--
+-- Keeping it out of activity_events is deliberate for the older reason too:
+-- keying on the usage row rather than on a call captures the turns that ran
+-- under a context and called no tool at all (41.8% of skill turns, measured),
+-- which a column on activity_events would have had nowhere to record.
+CREATE TABLE IF NOT EXISTS usage_turn_context (
+  usage_dedup_key    TEXT    NOT NULL,                   -- the usage_events row this describes
+  dimension          TEXT    NOT NULL,                   -- which axis: agent|skill|mcp_tool|mcp_server|plugin
+  value              TEXT    NOT NULL,                   -- the name, verbatim; never inputs
   tool               TEXT    NOT NULL,                   -- which agent CLI
-  skill              TEXT    NOT NULL,                   -- skill name, verbatim; never inputs
   session_id         TEXT    NOT NULL DEFAULT '',
   project            TEXT    NOT NULL DEFAULT '',        -- workspace / cwd
   model              TEXT    NOT NULL DEFAULT '',
   event_time_unix    INTEGER NOT NULL,                   -- UTC seconds; the usage event's own time
   observed_time_unix INTEGER NOT NULL,                   -- UTC seconds; when daemon stored it
   source_path        TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (usage_dedup_key, dimension),              -- one turn, one value per axis
   CHECK (usage_dedup_key <> ''),
-  CHECK (skill <> '')
+  CHECK (dimension IN ('agent','skill','mcp_tool','mcp_server','plugin')),
+  CHECK (value <> '')
 );
 
-CREATE INDEX IF NOT EXISTS idx_skillctx_skill_time ON usage_skill_context(skill, event_time_unix);
-CREATE INDEX IF NOT EXISTS idx_skillctx_event_time ON usage_skill_context(event_time_unix);
-CREATE INDEX IF NOT EXISTS idx_skillctx_session    ON usage_skill_context(session_id);
+-- Every index leads with dimension: every query is pinned to one, and a
+-- dimension-less index would be scanned across partitions it can never serve.
+CREATE INDEX IF NOT EXISTS idx_turnctx_dim_value_time ON usage_turn_context(dimension, value, event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_turnctx_dim_time       ON usage_turn_context(dimension, event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_turnctx_session        ON usage_turn_context(session_id);
 
--- Immutability: same terms as the two ledgers. A skill context is an observation
+-- Immutability: same terms as the two ledgers. A turn context is an observation
 -- of an immutable transcript line, not working state.
-CREATE TRIGGER IF NOT EXISTS trg_skillctx_no_update
-BEFORE UPDATE ON usage_skill_context
-BEGIN SELECT RAISE(ABORT, 'usage_skill_context is append-only: UPDATE forbidden'); END;
+CREATE TRIGGER IF NOT EXISTS trg_turnctx_no_update
+BEFORE UPDATE ON usage_turn_context
+BEGIN SELECT RAISE(ABORT, 'usage_turn_context is append-only: UPDATE forbidden'); END;
 
-CREATE TRIGGER IF NOT EXISTS trg_skillctx_no_delete
-BEFORE DELETE ON usage_skill_context
-BEGIN SELECT RAISE(ABORT, 'usage_skill_context is append-only: DELETE forbidden'); END;
+CREATE TRIGGER IF NOT EXISTS trg_turnctx_no_delete
+BEFORE DELETE ON usage_turn_context
+BEGIN SELECT RAISE(ABORT, 'usage_turn_context is append-only: DELETE forbidden'); END;
 
 -- Mutable accumulator state: latest observed counters per growing cell.
 CREATE TABLE IF NOT EXISTS aggregate_state (

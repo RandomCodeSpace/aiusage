@@ -35,6 +35,10 @@ type migration struct {
 //	     usage_events by dedup key for cost attribution
 //	v6 — usage_skill_context: the skill a turn ran under, one row per usage
 //	     event, for un-divided per-skill cost
+//	v7 — usage_turn_context: all FIVE turn-attribution axes (agent, skill,
+//	     mcp_tool, mcp_server, plugin) in one table keyed by (usage event,
+//	     dimension); retires usage_skill_context, which it subsumes, and clears
+//	     the claude-code checkpoint so the next pass re-derives both
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -83,6 +87,34 @@ var migrations = []migration{
 	// usage_events in full, and every total that does not group by skill is
 	// unaffected.
 	{version: 6, statements: skillContextV6Statements()},
+	// v7 generalises v6's one axis into five and is the only step so far that
+	// DROPS anything. Both halves of that need saying.
+	//
+	// The drop is safe because usage_skill_context is DERIVED. Every row of it
+	// is re-derived from the source transcript on the next collection pass, the
+	// way usage_rollup is re-derived from the ledger; nothing originates there,
+	// unlike usage_events, whose rows are the only copy of a fact the provider
+	// will never repeat. Its rows are exactly this table's dimension='skill'
+	// partition, and keeping both would leave two tables answering one question
+	// with nothing keeping them in step — the mistake this whole change exists
+	// to avoid at the schema level, not just in the query builder.
+	//
+	// The checkpoint reset is what makes "re-derived on the next pass" TRUE. The
+	// claude-code adapter gates a root on a size+mtime manifest and opens no
+	// file when nothing changed, so without this an idle machine would keep an
+	// empty table and never see the four new dimensions at all. Clearing the
+	// checkpoint costs one full re-parse, once; it cannot double-count anything,
+	// because usage and activity rows re-derive their existing dedup keys and
+	// conflict-skip. source_checkpoints is mutable working state (no
+	// append-only triggers) and this is the one table where a DELETE is a
+	// re-read rather than a loss.
+	//
+	// Like every step before it, the new table is created EMPTY and nothing
+	// backfills it from usage_events: the facts exist only on the source
+	// transcripts, and the no-UPDATE trigger forbids adding them to stored rows
+	// regardless. Rows land only where a re-read of the sources reaches — which
+	// is now the whole claude-code corpus, because of the line above.
+	{version: 7, statements: turnContextV7Statements()},
 }
 
 // ensureSchema reads the recorded schema version before touching anything and

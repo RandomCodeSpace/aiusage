@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -37,8 +38,8 @@ type fakeStore struct {
 	events        []model.UsageEvent
 	activityDedup map[string]struct{}
 	activity      []model.ActivityEvent
-	skillDedup    map[string]struct{} // key: the USAGE dedup key, one skill per turn
-	skillContexts []model.SkillContext
+	ctxDedup      map[string]struct{} // key: usage dedup key + dimension, one value per axis
+	turnContexts  []model.TurnContext
 	state         map[string]model.AggregateSnapshot // key: tool|key
 	checkpoints   map[string]model.SourceCheckpoint  // key: tool|sourcePath
 	upserts       int                                // standalone UpsertState calls (snapshot path must not use it)
@@ -51,7 +52,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		dedup:         map[string]struct{}{},
 		activityDedup: map[string]struct{}{},
-		skillDedup:    map[string]struct{}{},
+		ctxDedup:      map[string]struct{}{},
 		state:         map[string]model.AggregateSnapshot{},
 		checkpoints:   map[string]model.SourceCheckpoint{},
 	}
@@ -154,19 +155,26 @@ func (s *fakeStore) ApplyBatch(_ context.Context, b store.ObservationBatch) (sto
 		s.activity = append(s.activity, a)
 		out.Activity++
 	}
-	for _, c := range b.SkillContexts {
+	for _, c := range b.TurnContexts {
 		if c.UsageDedupKey == "" {
-			return out, errors.New("empty skill context usage dedup key")
+			return out, errors.New("empty turn context usage dedup key")
 		}
-		if c.Skill == "" {
-			return out, errors.New("empty skill name")
+		if c.Value == "" {
+			return out, errors.New("empty turn context value")
 		}
-		if _, ok := s.skillDedup[c.UsageDedupKey]; ok {
+		if !c.Dimension.Valid() {
+			return out, fmt.Errorf("unknown turn context dimension %q", c.Dimension)
+		}
+		// Keyed by (usage row, dimension), exactly as the real table's composite
+		// primary key is: a second value on one axis is absorbed, a value on
+		// another axis still lands.
+		k := c.UsageDedupKey + "|" + string(c.Dimension)
+		if _, ok := s.ctxDedup[k]; ok {
 			continue
 		}
-		s.skillDedup[c.UsageDedupKey] = struct{}{}
-		s.skillContexts = append(s.skillContexts, c)
-		out.SkillContexts++
+		s.ctxDedup[k] = struct{}{}
+		s.turnContexts = append(s.turnContexts, c)
+		out.TurnContexts++
 	}
 	if b.Checkpoint != nil {
 		s.checkpoints[b.Checkpoint.Tool+"|"+b.Checkpoint.SourcePath] = *b.Checkpoint
@@ -223,15 +231,29 @@ func (s *fakeStore) TopActivity(context.Context, store.ActivityFilter, store.Act
 	return nil, nil
 }
 
-// SummarizeSkillCost reproduces the real store's skill attribution, which is
-// the interesting half: NO division. Each context names one usage row and each
-// usage row has at most one context (the fake's skillDedup is keyed by the usage
-// key, exactly as the real table's primary key is), so a turn's full cost is
-// added once and the whole thing is bounded by the ledger without a divisor
-// anywhere. The collector never calls it; it exists so the fake satisfies
-// store.Store and so a collect-level test can assert that skill and tool
-// attribution together stay inside the real total.
-func (s *fakeStore) SummarizeSkillCost(_ context.Context, f store.ActivityFilter) (*store.SkillCostSummary, error) {
+// SummarizeTurnContext reproduces the real store's turn attribution, which is
+// the interesting half: NO division, and ONE dimension per query. Each context
+// names one usage row and each usage row has at most one value per dimension
+// (the fake's ctxDedup is keyed by (usage key, dimension), exactly as the real
+// table's composite primary key is), so a turn's full cost is added once per
+// query and the whole thing is bounded by the ledger without a divisor
+// anywhere. Pinning the dimension is what keeps that true: without it a turn
+// carrying four contexts would be counted four times, which is the mistake the
+// required argument exists to prevent.
+//
+// The collector never calls it; it exists so the fake satisfies store.Store and
+// so a collect-level test can assert that every attribution stays inside the
+// real total.
+func (s *fakeStore) SummarizeTurnContext(_ context.Context, dim model.TurnDimension, f store.ActivityFilter) (*store.TurnContextSummary, error) {
+	if !dim.Valid() {
+		return nil, fmt.Errorf("unknown turn-context dimension %q", dim)
+	}
+	if len(f.Kinds) > 0 || len(f.Names) > 0 {
+		return nil, errors.New("turn contexts cannot be restricted by activity kinds or names")
+	}
+	if len(f.Skills) > 0 && dim != model.DimensionSkill {
+		return nil, fmt.Errorf("Skills cannot restrict the %q dimension", dim)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -239,15 +261,21 @@ func (s *fakeStore) SummarizeSkillCost(_ context.Context, f store.ActivityFilter
 	for _, e := range s.events {
 		byKey[e.DedupKey] = e
 	}
-	var b store.SkillCostBucket
-	for _, c := range s.skillContexts {
+	var b store.TurnContextBucket
+	for _, c := range s.turnContexts {
+		if c.Dimension != dim {
+			continue
+		}
 		if !f.Since.IsZero() && c.EventTime.Before(f.Since) {
 			continue
 		}
 		if !f.Until.IsZero() && !c.EventTime.Before(f.Until) {
 			continue
 		}
-		if len(f.Skills) > 0 && !containsStr(f.Skills, c.Skill) {
+		if len(f.Values) > 0 && !containsStr(f.Values, c.Value) {
+			continue
+		}
+		if len(f.Skills) > 0 && !containsStr(f.Skills, c.Value) {
 			continue
 		}
 		b.Turns++
@@ -265,12 +293,22 @@ func (s *fakeStore) SummarizeSkillCost(_ context.Context, f store.ActivityFilter
 			b.UnpricedTurns++
 		}
 	}
-	return &store.SkillCostSummary{GroupBy: f.GroupBy, Totals: b}, nil
+	return &store.TurnContextSummary{Dimension: dim, GroupBy: f.GroupBy, Totals: b}, nil
 }
 
-// TopSkillCost is unreachable through the collector; the fake does no ranking.
-func (s *fakeStore) TopSkillCost(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.SkillCostBucket, error) {
+// TopTurnContext is unreachable through the collector; the fake does no ranking.
+func (s *fakeStore) TopTurnContext(context.Context, model.TurnDimension, store.ActivityFilter, store.ActivityOrder, int) ([]store.TurnContextBucket, error) {
 	return nil, nil
+}
+
+// SummarizeSkillCost and TopSkillCost delegate exactly as the real store does,
+// so the fake cannot accidentally offer a second answer to the skill question.
+func (s *fakeStore) SummarizeSkillCost(ctx context.Context, f store.ActivityFilter) (*store.SkillCostSummary, error) {
+	return s.SummarizeTurnContext(ctx, model.DimensionSkill, f)
+}
+
+func (s *fakeStore) TopSkillCost(ctx context.Context, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.SkillCostBucket, error) {
+	return s.TopTurnContext(ctx, model.DimensionSkill, f, by, limit)
 }
 
 func containsStr(hay []string, needle string) bool {

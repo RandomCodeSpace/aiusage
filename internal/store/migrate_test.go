@@ -362,6 +362,12 @@ func legacyDB(t *testing.T, version int) string {
 		// the same DDL.
 		ddl += strings.Join(activityV5Statements(), ";\n") + ";\n"
 	}
+	if version >= 6 {
+		// Same rule as v5: the fixture for "a v6 database" is the v6 statements
+		// themselves, which is also what keeps this honest once v7 drops the
+		// table they create.
+		ddl += strings.Join(skillContextV6Statements(), ";\n") + ";\n"
+	}
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatalf("create v%d schema: %v", version, err)
 	}
@@ -371,6 +377,23 @@ func legacyDB(t *testing.T, version int) string {
 		VALUES ('legacy-1', ?, 'claude-sonnet-4-6', 1750000000, 1750000000, 10, 20, 30)`,
 		model.ToolClaudeCode); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
+	}
+	if version >= 6 {
+		// A populated skill-context table, so the v7 drop is exercised against
+		// rows rather than an empty shell, and a checkpoint, so the reset that
+		// makes the drop safe has something to clear.
+		if _, err := db.Exec(`
+			INSERT INTO usage_skill_context (usage_dedup_key, tool, skill, event_time_unix, observed_time_unix)
+			VALUES ('legacy-1', ?, 'legacy-skill', 1750000000, 1750000000)`,
+			model.ToolClaudeCode); err != nil {
+			t.Fatalf("seed legacy skill context: %v", err)
+		}
+		if _, err := db.Exec(`
+			INSERT INTO source_checkpoints (tool, source_path, state)
+			VALUES (?, '/home/x/.claude', '{"stale":1}')`,
+			model.ToolClaudeCode); err != nil {
+			t.Fatalf("seed legacy checkpoint: %v", err)
+		}
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta(key,value) VALUES('schema_version',?)`,
 		strconv.Itoa(version)); err != nil {

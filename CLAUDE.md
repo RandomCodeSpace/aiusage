@@ -171,37 +171,127 @@ invoked skill arrives as a tool call named `skill` whose skill name lives in
 arguments the exporter does not write. So copilot emits kind='tool' rows and
 nothing else.
 
-**Skill cost is a property of the TURN, and lives in its own table** (schema v6,
-usage_skill_context). An activity row of kind='skill' records the turn that
-INVOKED a skill — one call — not the thousands of turns the skill then spends;
-locally that is 44 invocation rows against 8,039 records of real work. The
-missing fact is Claude Code's top-level `attributionSkill`, a scalar string on
-every assistant record emitted while operating inside a skill. Because it is
-scalar, a usage row carries AT MOST ONE skill, and the table makes that a
-constraint rather than a hope: usage_dedup_key is its PRIMARY KEY, usage_events'
-dedup_key is UNIQUE, so the join is 1:1 and per-skill cost is a plain SUM with NO
-divisor — over-attribution is unrepresentable, not merely avoided.
+**Turn context is a property of the TURN, and five axes share ONE table**
+(schema v7, usage_turn_context). An activity row of kind='skill' records the turn
+that INVOKED a skill — one call — not the thousands of turns the skill then
+spends; locally that is 44 invocation rows against 8,039 records of real work.
+For subagents the gap is a chasm: 81,231 usage-bearing assistant records ran
+under `attributionAgent`, 77.9% of every token-bearing turn on this machine,
+described by 129 `Agent` call rows.
 
-It is deliberately NOT another activity_events kind. Tool-call attribution splits
-a turn's cost among the calls that shared it; skill-context attribution assigns
-the whole turn to one skill. They are two PARTITIONS of the same dollars —
-"which tool was called" and "which skill was running" — each honest alone and
-meaningless added together, and sharing a table would have put that mistake one
-forgotten WHERE clause away (SummarizeActivity grouped by tool, unfiltered by
-kind, would have counted every skill turn twice). Nor is it a column on
-activity_events: 41.8% of skill records (3,361 of 8,039) call no tool at all and
-emit no activity row to hang a column on. Keying on the usage row captures those
-for free. SummarizeSkillCost REFUSES ActivityFilter's Kinds/Names rather than
-ignoring them, because honouring them means joining activity_events, where a turn
-with two matching calls joins twice.
+The missing facts are Claude Code's FIVE top-level attribution strings —
+`attributionAgent`, `attributionSkill`, `attributionMcpTool`,
+`attributionMcpServer`, `attributionPlugin`. Each is a scalar string (verified:
+101,309 occurrences across the five, 100% of them JSON strings, none an array or
+object), so a usage row carries AT MOST ONE VALUE PER AXIS, and the table makes
+that a constraint rather than a hope: **(usage_dedup_key, dimension) is the
+PRIMARY KEY**, usage_events' dedup_key is UNIQUE, so once a query is pinned to
+one dimension the join is 1:1 and per-value cost is a plain SUM with NO divisor —
+over-attribution within a dimension is unrepresentable, not merely avoided.
+`mcp_tool` and `mcp_server` always co-occur (7,084 records each, over the same
+3,265 message ids, neither ever without the other) and are still two dimensions,
+because "what did the ruflo server cost" and "what did browser_eval cost" are
+different questions a composite string would answer neither of.
 
-NESTING is recorded shallowly because that is all the source offers: a skill may
-invoke another, and once the inner one runs the field names only the inner skill,
-so cost lands on the innermost active skill. **v6 cannot be backfilled.** The
-fact exists only on the source transcript — usage_events never carried it — and
-the no-UPDATE trigger forbids adding it to a stored row regardless. Usage already
-collected stays permanently unattributed to any skill; only the CONTEXT is lost,
-never the cost, and every total that does not group by skill is unaffected.
+ONE TABLE, NOT FIVE. The giveaway that a table per axis was wrong is that the
+second one would have been a verbatim copy of the first with a column renamed:
+same key, same 1:1 join, same absent divisor, same triggers, same indexes. The
+axis is a COLUMN, so a sixth attribution field is a new CHECK value rather than a
+migration plus a fifth query builder that can drift.
+
+**The six partitions, and the refusal that enforces them.** These five plus
+activity_events' tool-call attribution are SIX PARTITIONS OF THE SAME DOLLARS —
+each honest alone, meaningless summed, the way cost-by-region and
+cost-by-product are two views of one budget. A turn commonly carries several at
+once (locally 3,184 turns carry three, 19 carry four, 5 carry all five), and
+EVERY row names the turn's FULL cost because each answers a different question,
+so a dimension-blind join counts a turn once per context it holds. Measured on
+this machine's ledger: the blind query reports 6.213bn tokens and $6,023.52 for
+turns that actually cost 4.984bn and $4,700.90 — a **28.1% overstatement** from
+one missing predicate.
+
+So the dimension is a REQUIRED ARGUMENT of `SummarizeTurnContext` /
+`TopTurnContext`, never a filter field a caller could leave unset: it is
+validated against the closed vocabulary before any SQL is built, and
+`buildTurnContextWhere` writes `c.dimension = ?` unconditionally, so no argument
+and no combination of empty filters produces a statement without it. Grouping by
+`"dimension"` is refused by name — it is exactly the operation that
+concatenates two partitions — and so is grouping by any dimension OTHER than the
+one queried (`GroupBy: ["agent"]` on a skill query would label skill values as
+agents). `Kinds`/`Names` stay refused as before, since honouring them means
+joining activity_events where a turn with two matching calls joins twice.
+`Skills` is the pre-generalisation spelling of `Values` and is refused on any
+dimension but skill, rather than filtering agent names against a list of skills
+and returning an empty result that reads as "that agent cost nothing". No query
+in internal/store reads two dimensions, or both this table and activity_events,
+in one statement.
+
+It is deliberately NOT another activity_events kind, and not a column on it:
+41.8% of skill records (3,361 of 8,039) call no tool at all and emit no activity
+row to hang a column on, and call-less subagent turns are far more common still.
+Keying on the usage row captures those for free.
+
+**usage_skill_context was FOLDED IN AND DROPPED, because it was derived.** Its
+rows are exactly this table's `dimension='skill'` partition, and two tables
+answering one question with nothing keeping them in step is the mistake the whole
+change exists to avoid. The drop is safe on the same test usage_rollup passes:
+every row is re-derived from the source transcript on the next pass, nothing
+originates there, unlike usage_events whose rows are the only copy of a fact the
+provider will never repeat. Proof on the production copy — the 3,009 rows dropped
+came back as exactly 3,009 skill rows in one pass, alongside 41,055 agent, 3,265
+mcp_tool, 3,265 mcp_server and 1,317 plugin rows.
+
+v7 also **DELETEs the claude-code source_checkpoints row**, and that is what makes
+"re-derived on the next pass" true rather than aspirational: the adapter gates a
+root on a size+mtime manifest and opens no file when nothing changed, so an idle
+machine would otherwise keep an empty table and never see the four new dimensions
+at all. source_checkpoints is mutable working state (no append-only triggers) and
+this is the one table where a DELETE costs a re-read rather than a fact; the
+re-read is idempotent, since usage and activity rows re-derive their existing
+dedup keys and conflict-skip. Measured v6→v7 on a 273MB production copy: the
+migration is imperceptible against a 0.284s command, usage_events 366,946 →
+366,946, activity_events 63,931 → 63,931, usage_rollup 3,067 → 3,067,
+source_checkpoints 1,474 → 1,473 (exactly the one claude-code row), and the
+following collection landed 51,911 context rows over 42,780 turns with ZERO
+unjoined. The v6 step stays FROZEN in migrate.go and still creates the table v7
+drops one transaction later: a migration step defines what a version MEANS, and a
+database stopped at v6 must be what v6 produced.
+
+The table is created EMPTY and **cannot be backfilled**. The facts exist only on
+the source transcripts — usage_events never carried them — and the no-UPDATE
+trigger forbids adding them to a stored row regardless. Usage whose transcript is
+gone stays permanently unattributed; only the CONTEXT is lost, never the cost, and
+every total that does not group by a dimension is unaffected.
+
+**Turn context unions across a message's records; it never reads the winner's
+copy.** This is the named bug class — one usage identity spans several transcript
+records — applied to a third fact type. Claude Code streams one response across
+records sharing a message id, exactly one of which becomes the usage row, and
+`better` picks it on token total, cost and the presence of a speed field: metrics
+with NO relationship to attribution. A winner that happens not to carry the field
+would silently discard what its losing siblings recorded, which is precisely how
+19,682 of 60,832 tool calls went missing. `deduper.addContexts` therefore unions
+across every record of the message, first non-empty value winning per dimension,
+so the outcome is independent of which record wins. Measured over 1,275
+transcripts and 104,311 usage-bearing records, the source never disagrees and
+never partially agrees — for every dimension, every record of a message carries
+the same value or none carries the field, zero exceptions on all five — so today
+the union and the winner's copy give the same answer. That is a reason the rule
+is cheap, not a reason to skip it: it describes what one version of one CLI
+happens to write, and the failure mode if it changes is silent under-attribution
+that looks exactly like "that skill was cheap". The tie-break, should the source
+ever disagree, is FIRST SEEN, deterministic across passes because files are
+walked in lexical order and lines in file order.
+
+**Turn context is NAMES only.** The five fields are typed as strings in
+`rawLine`, so encoding/json can only ever put a name in them: a nested object of
+arguments, a prompt, a result has no field to land in and never becomes a value
+in this process. It is an ALLOW-LIST, not a prefix match — `recordContexts` reads
+exactly five named fields, so an `attributionSomethingElse` carrying content
+contributes nothing until this package is taught about it on purpose
+(TestTurnContextDecodeIsAnAllowList). model.TurnContext has no field for inputs
+and no raw column, so `privacy.no_raw` is satisfied by construction. The audit
+payload did not grow an attribution field either.
 
 **Adapters are strictly observational.** They read files/DBs the agent CLIs
 have already produced, nothing more: no writes, no write locks, no rotation.

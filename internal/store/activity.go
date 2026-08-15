@@ -95,11 +95,19 @@ type ActivityFilter struct {
 	Projects []string // restrict to these projects (empty = all)
 	Sessions []string // restrict to these sessions (empty = all)
 	Models   []string // restrict to these models (empty = all)
-	// Skills restricts the SKILL-COST queries to these skill contexts (empty =
-	// all). It is ignored by SummarizeActivity/TopActivity/ListActivity, which
-	// read activity_events and have no skill-context column: a skill context is
-	// a property of the turn, recorded in usage_skill_context. See
-	// SummarizeSkillCost and the skillcost.go package comment.
+	// Values restricts the TURN-CONTEXT queries to these context values (empty =
+	// all) — agent types, skill names, MCP server or tool names, plugin names,
+	// whichever dimension the query named. It is ignored by
+	// SummarizeActivity/TopActivity/ListActivity, which read activity_events and
+	// have no turn-context column: a turn context is a property of the turn,
+	// recorded in usage_turn_context. See SummarizeTurnContext and the
+	// turncontext.go package comment.
+	Values []string
+	// Skills is the pre-generalisation spelling of Values, kept for callers that
+	// predate the other four dimensions. It restricts the SKILL dimension and is
+	// REFUSED on any other, rather than quietly filtering agent names against a
+	// list of skills and returning an empty result that reads as "that agent
+	// cost nothing".
 	Skills []string
 
 	// GroupBy lists grouping dimensions, applied in order. Valid values:

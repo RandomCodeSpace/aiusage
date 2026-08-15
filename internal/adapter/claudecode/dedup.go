@@ -34,8 +34,13 @@ type deduper struct {
 	// record of the message rather than any one record's.
 	calls     map[primaryKey][]toolCall
 	seenCalls map[primaryKey]map[string]struct{}
-	noID      []candidate  // never-deduped (no message id)
-	order     []primaryKey // stable emission order for deduped ones
+	// contexts is the UNION of the turn attributions seen under a primary key,
+	// in first-seen dimension order, at most one value per dimension. It exists
+	// for the same reason calls does and is the same fix: see addContexts.
+	contexts map[primaryKey][]turnContext
+	seenDims map[primaryKey]map[model.TurnDimension]struct{}
+	noID     []candidate  // never-deduped (no message id)
+	order    []primaryKey // stable emission order for deduped ones
 	// hooks are activity rows that belong to no usage candidate: hook records
 	// carry no message id and no usage block, so none of the dedup rules above
 	// apply to them. Their own dedup keys (the record uuid) make a re-read
@@ -54,6 +59,8 @@ func newDeduper() *deduper {
 		byMessage: make(map[string]primaryKey),
 		calls:     make(map[primaryKey][]toolCall),
 		seenCalls: make(map[primaryKey]map[string]struct{}),
+		contexts:  make(map[primaryKey][]turnContext),
+		seenDims:  make(map[primaryKey]map[model.TurnDimension]struct{}),
 	}
 }
 
@@ -74,6 +81,7 @@ func (d *deduper) add(c candidate) {
 	// carries two request ids.
 	if existing, ok := d.primary[pk]; ok {
 		d.addCalls(pk, c.calls)
+		d.addContexts(pk, c.contexts)
 		if better(c, *existing) {
 			cp := c
 			d.primary[pk] = &cp
@@ -87,6 +95,7 @@ func (d *deduper) add(c candidate) {
 		resident := d.primary[residentKey]
 		if resident != nil && (resident.isSidechain || c.isSidechain) {
 			d.addCalls(residentKey, c.calls)
+			d.addContexts(residentKey, c.contexts)
 			if better(c, *resident) {
 				// Replace the resident in place under its existing primary key
 				// so emission order is preserved.
@@ -103,6 +112,7 @@ func (d *deduper) add(c candidate) {
 	d.byMessage[c.messageID] = pk
 	d.order = append(d.order, pk)
 	d.addCalls(pk, c.calls)
+	d.addContexts(pk, c.contexts)
 }
 
 // addCalls appends calls not already present under pk, preserving first-seen
@@ -124,6 +134,54 @@ func (d *deduper) addCalls(pk primaryKey, calls []toolCall) {
 		}
 		seen[id] = struct{}{}
 		d.calls[pk] = append(d.calls[pk], c)
+	}
+}
+
+// addContexts merges one record's turn attributions into the union under pk,
+// FIRST NON-EMPTY VALUE WINS PER DIMENSION.
+//
+// THE UNION IS THE POINT, AND IT IS THE NAMED BUG CLASS. One usage identity
+// spans several transcript records; exactly one of them survives as the usage
+// row, and `better` picks that one on token total, cost and the presence of a
+// speed field — metrics with no relationship whatsoever to attribution. Reading
+// the attribution off the WINNER means a winner that happens not to carry the
+// field silently discards a fact its losing siblings recorded, which is
+// precisely how the losing candidates' tool calls went missing: 19,682 of 60,832
+// calls, non-uniformly, until this same union landed for calls. Taking the union
+// makes the outcome independent of which record wins, so the bug is not fixed
+// here, it is not expressible here.
+//
+// WHAT THE SOURCE ACTUALLY DOES, measured over 1,275 local transcripts covering
+// 102,887 usage-bearing assistant records: the records of a message never
+// disagree and never partially agree. For every dimension, of the message ids
+// carrying it (agent 40,433, skill 3,009, mcp_tool 3,265, mcp_server 3,265,
+// plugin 1,317) EVERY record of that message carries it, and every record of
+// that message carries the SAME value — zero disagreements, zero partial
+// presence, on all five. So today the union and the winner's copy agree on every
+// row in the corpus.
+//
+// That measurement is a reason to be sure the rule is cheap, not a reason to
+// skip it. It describes what one version of one CLI happened to write; it is not
+// a guarantee the format offers, and the failure mode if it ever changes is
+// silent under-attribution that looks exactly like "that skill was cheap". The
+// tie-break, should the source ever disagree, is FIRST SEEN — deterministic
+// across passes because files are walked in lexical order and lines in file
+// order, so a re-read produces the same row rather than flapping between two.
+func (d *deduper) addContexts(pk primaryKey, ctxs []turnContext) {
+	if len(ctxs) == 0 {
+		return
+	}
+	seen, ok := d.seenDims[pk]
+	if !ok {
+		seen = make(map[model.TurnDimension]struct{}, len(ctxs))
+		d.seenDims[pk] = seen
+	}
+	for _, c := range ctxs {
+		if _, dup := seen[c.dim]; dup {
+			continue
+		}
+		seen[c.dim] = struct{}{}
+		d.contexts[pk] = append(d.contexts[pk], c)
 	}
 }
 
@@ -191,37 +249,48 @@ func (d *deduper) activity() []model.ActivityEvent {
 	return append(out, d.hooks...)
 }
 
-// skillContexts returns one row per surviving usage event that was produced
-// inside a skill, taken from the same winners events() emits and in the same
-// order.
+// turnContexts returns one row per (surviving usage event, dimension) the
+// transcripts attributed, taken from the same winners events() emits and in the
+// same order.
 //
-// Taking the winner's copy is what keeps the context aligned with the event it
-// describes: the row is keyed by the usage event's dedup key, and a loser's key
-// names a usage row that events() never emitted, so the context would join
-// nothing and the winning turn would show no skill at all. Hooks contribute
-// none — they carry no usage object to attribute.
-func (d *deduper) skillContexts() []model.SkillContext {
-	var out []model.SkillContext
-	add := func(c *candidate) {
-		if c == nil || c.skill == "" {
+// The VALUES come from the union across every record of the message
+// (addContexts); the usage event they are attributed to is the WINNER's, because
+// that is the only record of the message that becomes a usage row and a context
+// naming any other key would join nothing. That pairing — union for the fact,
+// winner for the key — is the same one activity() uses, and for the same reason.
+//
+// A turn contributes one row PER DIMENSION and each names the turn's full cost,
+// so these rows are partitions rather than shares: five rows for one turn is
+// five complete answers to five different questions, not five fifths of
+// anything. Hooks contribute none — they carry no usage object to attribute.
+func (d *deduper) turnContexts() []model.TurnContext {
+	var out []model.TurnContext
+	add := func(c *candidate, ctxs []turnContext) {
+		if c == nil {
 			return
 		}
-		out = append(out, model.SkillContext{
-			UsageDedupKey: c.event.DedupKey,
-			Tool:          model.ToolClaudeCode,
-			Skill:         c.skill,
-			SessionID:     c.event.SessionID,
-			Project:       c.event.Project,
-			Model:         c.event.Model,
-			EventTime:     c.event.EventTime,
-			SourcePath:    c.event.SourcePath,
-		})
+		for _, tc := range ctxs {
+			out = append(out, model.TurnContext{
+				UsageDedupKey: c.event.DedupKey,
+				Tool:          model.ToolClaudeCode,
+				Dimension:     tc.dim,
+				Value:         tc.value,
+				SessionID:     c.event.SessionID,
+				Project:       c.event.Project,
+				Model:         c.event.Model,
+				EventTime:     c.event.EventTime,
+				SourcePath:    c.event.SourcePath,
+			})
+		}
 	}
 	for _, pk := range d.order {
-		add(d.primary[pk])
+		add(d.primary[pk], d.contexts[pk])
 	}
+	// A record with no message id is never deduped, so it is its own turn and
+	// its own record's attributions are the whole union.
 	for i := range d.noID {
-		add(&d.noID[i])
+		c := &d.noID[i]
+		add(c, c.contexts)
 	}
 	return out
 }

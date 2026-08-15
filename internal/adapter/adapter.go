@@ -44,10 +44,17 @@ type Observation struct {
 	// PRIVACY: names and counts only. Never put a tool's input anywhere in
 	// here — model.ActivityEvent has no field that would hold one.
 	Activity []model.ActivityEvent
-	// SkillContexts records which SKILL each observed usage event was produced
-	// inside, when the source says so. It is a third independent stream and a
-	// property of the TURN, not of a call: at most one per usage event, keyed by
-	// that event's DedupKey, never divided among anything.
+	// TurnContexts records what each observed usage event was produced UNDER —
+	// which subagent, which skill, which MCP tool and server, which plugin. It
+	// is a third independent stream and a property of the TURN, not of a call:
+	// at most one value per (usage event, dimension), keyed by that event's
+	// DedupKey, never divided among anything.
+	//
+	// One usage event may appear here several times, once per DIMENSION, and
+	// each of those rows names the turn's FULL cost because each answers a
+	// different question. They are partitions, not shares. A consumer must pin
+	// exactly one dimension per query; summing across them counts the same
+	// tokens once per context the turn carried. See model.TurnContext.
 	//
 	// An adapter MUST only emit one for a usage event it is also emitting in
 	// Events, and must leave the stream empty when its source records no such
@@ -55,9 +62,10 @@ type Observation struct {
 	// call I saw" is a guess that would keep charging a skill long after it
 	// returned.
 	//
-	// PRIVACY: the skill NAME only. Never its inputs, arguments or content —
-	// model.SkillContext has no field that would hold one.
-	SkillContexts []model.SkillContext
+	// PRIVACY: the NAME only — agent type, skill, MCP server/tool, plugin.
+	// Never inputs, arguments, prompts or results; model.TurnContext has no
+	// field that would hold one.
+	TurnContexts []model.TurnContext
 	// Checkpoint, when non-nil, is the source's new incremental state and MUST
 	// only be set once the read completed (a partial read that advances the
 	// checkpoint would skip the unread remainder forever). The collector

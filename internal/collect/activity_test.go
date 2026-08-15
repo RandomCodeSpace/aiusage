@@ -64,38 +64,47 @@ func TestCycleStoresActivityAlongsideUsage(t *testing.T) {
 	}
 }
 
-// TestCycleStoresSkillContextsAndNeitherAttributionInflates is the pipeline-level
+// TestCycleStoresTurnContextsAndNoAttributionInflates is the pipeline-level
 // statement of the whole feature.
 //
 // It runs a cycle over turns that overlap in every awkward way — a multi-call
-// turn inside a skill, a turn inside a skill that calls nothing at all, and a
-// turn under no skill — and asserts BOTH attributions independently against the
-// ledger the same pass stored. Neither may exceed it, and neither may be zero,
-// which is the way a bound gets satisfied by attributing nothing.
-func TestCycleStoresSkillContextsAndNeitherAttributionInflates(t *testing.T) {
+// turn under two contexts at once, a turn under a context that calls nothing at
+// all, and a turn under nothing — and asserts EVERY attribution independently
+// against the ledger the same pass stored. None may exceed it, and none may be
+// zero, which is the way a bound gets satisfied by attributing nothing.
+//
+// The agent dimension is the load-bearing addition. u-1 carries both a skill and
+// an agent, so its cost appears in FULL under each — the partition rule — and a
+// query that forgot to pin the dimension would report 2500 tokens against a
+// 1800-token ledger.
+func TestCycleStoresTurnContextsAndNoAttributionInflates(t *testing.T) {
 	ctx := context.Background()
 	st := newFakeStore()
 	when := refDay.Add(time.Hour)
 
-	// u-1: 1000 tokens, 2 calls, skill "alpha"  -> calls take 500 each
-	// u-2:  500 tokens, 0 calls, skill "alpha"  -> invisible to activity
-	// u-3:  300 tokens, 1 call,  no skill
+	turnCtx := func(key string, dim model.TurnDimension, value string) model.TurnContext {
+		return model.TurnContext{
+			UsageDedupKey: key, Tool: model.ToolClaudeCode,
+			Dimension: dim, Value: value, SessionID: "s", EventTime: when,
+		}
+	}
+
+	// u-1: 1000 tokens, 2 calls, skill "alpha" AND agent "worker" -> calls take 500 each
+	// u-2:  500 tokens, 0 calls, skill "alpha"                    -> invisible to activity
+	// u-3:  300 tokens, 1 call,  no context at all
 	obs := activityObs("u-1", 1000, 2, when)
-	obs.SkillContexts = append(obs.SkillContexts, model.SkillContext{
-		UsageDedupKey: "u-1", Tool: model.ToolClaudeCode, Skill: "alpha",
-		SessionID: "s", EventTime: when,
-	})
+	obs.TurnContexts = append(obs.TurnContexts,
+		turnCtx("u-1", model.DimensionSkill, "alpha"),
+		turnCtx("u-1", model.DimensionAgent, "worker"),
+	)
 	ctxOnly := activityObs("u-2", 500, 0, when)
-	ctxOnly.SkillContexts = append(ctxOnly.SkillContexts, model.SkillContext{
-		UsageDedupKey: "u-2", Tool: model.ToolClaudeCode, Skill: "alpha",
-		SessionID: "s", EventTime: when,
-	})
+	ctxOnly.TurnContexts = append(ctxOnly.TurnContexts, turnCtx("u-2", model.DimensionSkill, "alpha"))
 	plain := activityObs("u-3", 300, 1, when)
 
 	obs.Events = append(obs.Events, ctxOnly.Events...)
 	obs.Events = append(obs.Events, plain.Events...)
 	obs.Activity = append(obs.Activity, plain.Activity...)
-	obs.SkillContexts = append(obs.SkillContexts, ctxOnly.SkillContexts...)
+	obs.TurnContexts = append(obs.TurnContexts, ctxOnly.TurnContexts...)
 
 	reg := adapter.NewRegistry(&fakeAdapter{
 		id: model.ToolClaudeCode, class: model.EventLevel,
@@ -106,9 +115,10 @@ func TestCycleStoresSkillContextsAndNeitherAttributionInflates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunCycle: %v", err)
 	}
-	if stats.SkillContextsSeen != 2 || stats.SkillContextsInserted != 2 {
-		t.Fatalf("skill contexts seen/inserted = %d/%d, want 2/2",
-			stats.SkillContextsSeen, stats.SkillContextsInserted)
+	// Three ROWS from two turns: the counters count (turn, dimension) pairs.
+	if stats.TurnContextsSeen != 3 || stats.TurnContextsInserted != 3 {
+		t.Fatalf("turn contexts seen/inserted = %d/%d, want 3/3",
+			stats.TurnContextsSeen, stats.TurnContextsInserted)
 	}
 	if stats.EventsInserted != 3 || stats.ActivityInserted != 3 {
 		t.Fatalf("events/activity inserted = %d/%d, want 3/3",
@@ -118,16 +128,31 @@ func TestCycleStoresSkillContextsAndNeitherAttributionInflates(t *testing.T) {
 	const ledger int64 = 1800 // 1000 + 500 + 300
 
 	window := store.ActivityFilter{Since: when.Add(-time.Hour), Until: when.Add(time.Hour)}
-	skills, err := st.SummarizeSkillCost(ctx, window)
-	if err != nil {
-		t.Fatalf("SummarizeSkillCost: %v", err)
-	}
-	// alpha owns u-1 and u-2 whole: 1500. u-3 belongs to no skill.
-	if skills.Totals.TotalTokens != 1500 {
-		t.Fatalf("skill-attributed tokens = %d, want 1500", skills.Totals.TotalTokens)
-	}
-	if skills.Totals.Turns != 2 {
-		t.Fatalf("skill turns = %d, want 2 (the tool-less turn must count)", skills.Totals.Turns)
+
+	got := map[string]int64{}
+	// alpha owns u-1 and u-2 whole: 1500. worker owns u-1 whole: 1000. u-3
+	// belongs to nothing. Note 1500 + 1000 = 2500 > 1800: two partitions of one
+	// budget, which is exactly why no query may span them.
+	for _, want := range []struct {
+		dim    model.TurnDimension
+		turns  int64
+		tokens int64
+	}{
+		{model.DimensionSkill, 2, 1500},
+		{model.DimensionAgent, 1, 1000},
+	} {
+		sum, err := st.SummarizeTurnContext(ctx, want.dim, window)
+		if err != nil {
+			t.Fatalf("SummarizeTurnContext(%s): %v", want.dim, err)
+		}
+		if sum.Totals.TotalTokens != want.tokens {
+			t.Fatalf("%s-attributed tokens = %d, want %d", want.dim, sum.Totals.TotalTokens, want.tokens)
+		}
+		if sum.Totals.Turns != want.turns {
+			t.Fatalf("%s turns = %d, want %d (the tool-less turn must count)",
+				want.dim, sum.Totals.Turns, want.turns)
+		}
+		got[string(want.dim)] = sum.Totals.TotalTokens
 	}
 
 	acts, err := st.SummarizeActivity(ctx, window)
@@ -138,30 +163,25 @@ func TestCycleStoresSkillContextsAndNeitherAttributionInflates(t *testing.T) {
 	if acts.Totals.AttributedTotal != 1300 {
 		t.Fatalf("call-attributed tokens = %d, want 1300", acts.Totals.AttributedTotal)
 	}
+	got["call"] = acts.Totals.AttributedTotal
 
-	for _, c := range []struct {
-		name string
-		got  int64
-	}{
-		{"skill", skills.Totals.TotalTokens},
-		{"call", acts.Totals.AttributedTotal},
-	} {
-		if c.got > ledger {
-			t.Fatalf("%s attribution %d exceeds the ledger's %d", c.name, c.got, ledger)
+	for name, n := range got {
+		if n > ledger {
+			t.Fatalf("%s attribution %d exceeds the ledger's %d", name, n, ledger)
 		}
-		if c.got == 0 {
-			t.Fatalf("%s attribution is zero; the bound would hold vacuously", c.name)
+		if n == 0 {
+			t.Fatalf("%s attribution is zero; the bound would hold vacuously", name)
 		}
 	}
 
-	// A second pass re-reads the same source: a turn's skill context is not
-	// recorded twice, so its cost is not served twice either.
+	// A second pass re-reads the same source: a turn's context is not recorded
+	// twice on any axis, so its cost is not served twice either.
 	stats2, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("second RunCycle: %v", err)
 	}
-	if stats2.SkillContextsInserted != 0 {
-		t.Fatalf("re-read inserted %d skill contexts, want 0", stats2.SkillContextsInserted)
+	if stats2.TurnContextsInserted != 0 {
+		t.Fatalf("re-read inserted %d turn contexts, want 0", stats2.TurnContextsInserted)
 	}
 }
 

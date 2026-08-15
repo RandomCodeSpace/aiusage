@@ -236,9 +236,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	for _, e := range files {
 		if ctx.Err() != nil {
 			return adapter.Observation{
-				Events:        d.events(),
-				Activity:      d.activity(),
-				SkillContexts: d.skillContexts(),
+				Events:       d.events(),
+				Activity:     d.activity(),
+				TurnContexts: d.turnContexts(),
 			}, ctx.Err()
 		}
 		if err := parseFile(e.path, e.segment, d); err != nil {
@@ -250,9 +250,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	}
 
 	obs := adapter.Observation{
-		Events:        d.events(),
-		Activity:      d.activity(),
-		SkillContexts: d.skillContexts(),
+		Events:       d.events(),
+		Activity:     d.activity(),
+		TurnContexts: d.turnContexts(),
 	}
 	if statErr || parseErr {
 		return obs, nil
@@ -367,22 +367,79 @@ type rawLine struct {
 	IsAPIErrorMessage nullable[bool]    `json:"isApiErrorMessage"`
 	Version           nullable[string]  `json:"version"`
 	CostUSD           nullable[float64] `json:"costUSD"`
-	// AttributionSkill names the skill this record was produced INSIDE, when the
-	// turn ran under one. It is a plain top-level string — not an object, not a
-	// list — so a record cannot carry two, which is what makes per-skill cost a
-	// sum with no divisor.
+	// The five turn-attribution fields. Each names what this record was produced
+	// UNDER along one axis: the subagent that ran, the skill that was active,
+	// the MCP tool and server being served, the plugin the code came from.
 	//
-	// It decodes leniently, and that is not cosmetic: it is enrichment, and a
+	// EVERY ONE IS A PLAIN TOP-LEVEL STRING — not an object, not a list. Verified
+	// over the whole local corpus: 99,894 occurrences across the five fields,
+	// 100% of them JSON strings. That is what makes per-value cost a sum with no
+	// divisor, and it is why the store can key on (usage row, dimension).
+	//
+	// THIS IS THE ENTIRE ALLOW-LIST, AND THE FIELD TYPES ARE THE ENFORCEMENT.
+	// Each is a string, so encoding/json can only ever put a name in it: a
+	// nested object of arguments, a prompt, a result has no field to land in and
+	// never becomes a value in this process. Adding a sixth attribution axis
+	// means adding a line here, which is the point — the shape does not widen on
+	// its own the day the transcript format grows a content field.
+	//
+	// They decode leniently, and that is not cosmetic: this is enrichment, and a
 	// field the ledger did without until now must never become a way to LOSE a
 	// usage row. A null, a number or an object yields the empty string and the
-	// record is stored exactly as it was before this field existed, with no skill
-	// context emitted. It is likewise NOT a guarded key — a record without it is
-	// the overwhelming majority (8,039 of 209,435 locally carry one).
-	AttributionSkill lenientString `json:"attributionSkill"`
-	Message          *message      `json:"message"`
-	Data             *struct {
+	// record is stored exactly as it was before these fields existed, with no
+	// turn context emitted. They are likewise NOT guarded keys — a record
+	// carrying none of them is entirely ordinary (17,684 of 120,571 assistant
+	// records locally carry no attribution at all).
+	AttributionAgent     lenientString `json:"attributionAgent"`
+	AttributionSkill     lenientString `json:"attributionSkill"`
+	AttributionMcpTool   lenientString `json:"attributionMcpTool"`
+	AttributionMcpServer lenientString `json:"attributionMcpServer"`
+	AttributionPlugin    lenientString `json:"attributionPlugin"`
+	Message              *message      `json:"message"`
+	Data                 *struct {
 		Message *message `json:"message"`
 	} `json:"data"`
+}
+
+// turnContext is one (dimension, value) pair read off a record, before it is
+// tied to the turn's surviving usage event.
+//
+// It rides the candidate rather than becoming a finished model.TurnContext at
+// parse time for the same reason a tool call does: THE TURN A CONTEXT BELONGS TO
+// IS NOT A FACT ABOUT THE RECORD IT WAS READ IN. Claude Code streams one API
+// response across several transcript records sharing a message.id, only one of
+// which becomes a usage row, and the winner is chosen on TOKEN metrics that have
+// nothing whatever to do with attribution. Taking only the winner's copy is the
+// exact shape of the bug that lost 31% of this ledger's tool calls, so the
+// deduper unions these across every record of the message — see
+// deduper.addContexts.
+type turnContext struct {
+	dim   model.TurnDimension
+	value string
+}
+
+// recordContexts reads the five attribution fields off one decoded record, in
+// the fixed dimension order, skipping the ones it does not carry. Order is fixed
+// rather than map-derived so a turn's rows land in the same sequence on every
+// pass and a diff of two collections is empty rather than reshuffled.
+func recordContexts(rl *rawLine) []turnContext {
+	pairs := [...]struct {
+		dim model.TurnDimension
+		raw lenientString
+	}{
+		{model.DimensionAgent, rl.AttributionAgent},
+		{model.DimensionSkill, rl.AttributionSkill},
+		{model.DimensionMCPTool, rl.AttributionMcpTool},
+		{model.DimensionMCPServer, rl.AttributionMcpServer},
+		{model.DimensionPlugin, rl.AttributionPlugin},
+	}
+	var out []turnContext
+	for _, p := range pairs {
+		if v := strings.TrimSpace(string(p.raw)); v != "" {
+			out = append(out, turnContext{dim: p.dim, value: v})
+		}
+	}
+	return out
 }
 
 type message struct {
@@ -474,12 +531,11 @@ type candidate struct {
 	// the turn a call belongs to is NOT knowable from the record it was read in:
 	// see toolCall.
 	calls []toolCall
-	// skill is the skill this record was produced inside, or "" for none. It
-	// rides the candidate for the same reason activity does: a sidechain replay
-	// repeats the attribution too, and only the winner's copy may reach the
-	// store — though here a duplicate would be absorbed anyway, since the usage
-	// dedup key is the context table's primary key.
-	skill string
+	// contexts is what this record says the turn was running under, at most one
+	// value per dimension. Like calls, it rides the candidate because the
+	// deduper has to union it across every record of the message before any of
+	// it can be attributed — see turnContext.
+	contexts []turnContext
 }
 
 // parseLine decodes one transcript line into a candidate. It returns ok=false
@@ -586,7 +642,7 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		cost:        rl.CostUSD.Value,
 		total:       total,
 		calls:       recordCalls(msg.Content, line),
-		skill:       strings.TrimSpace(string(rl.AttributionSkill)),
+		contexts:    recordContexts(&rl),
 	}, true
 }
 

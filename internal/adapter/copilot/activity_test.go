@@ -82,7 +82,7 @@ func collectObs(t *testing.T, home string) adapter.Observation {
 		}
 		out.Events = append(out.Events, obs.Events...)
 		out.Activity = append(out.Activity, obs.Activity...)
-		out.SkillContexts = append(out.SkillContexts, obs.SkillContexts...)
+		out.TurnContexts = append(out.TurnContexts, obs.TurnContexts...)
 	}
 	return out
 }
@@ -305,9 +305,11 @@ func TestActivityCarriesNoSpanContent(t *testing.T) {
 			}
 		}
 	}
-	// The skill and hook streams stay empty: the export records neither.
-	if len(obs.SkillContexts) != 0 {
-		t.Fatalf("want no skill contexts, got %d", len(obs.SkillContexts))
+	// The turn-context and hook streams stay empty: the export records neither.
+	// It names no skill, no agent and no plugin, and its MCP tool names arrive
+	// as ordinary tool calls rather than as turn attribution.
+	if len(obs.TurnContexts) != 0 {
+		t.Fatalf("want no turn contexts, got %d", len(obs.TurnContexts))
 	}
 	for _, act := range obs.Activity {
 		if act.Kind != model.ActivityTool {

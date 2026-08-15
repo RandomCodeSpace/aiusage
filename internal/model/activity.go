@@ -84,62 +84,149 @@ type ActivityEvent struct {
 	DedupKey   string // globally-unique stable key; inserts conflict-skip on this
 }
 
-// SkillContext records that ONE usage event was produced while the agent was
-// operating inside a skill. It answers "what did skill X cost", which the
-// activity ledger alone cannot: an ActivityEvent of kind=skill records the turn
-// that INVOKED a skill, not the thousands of turns the skill then went on to
-// spend. On this machine's transcripts those are 44 invocation rows against
-// 8,039 records of actual work.
+// TurnDimension names one axis of turn attribution: the kind of thing a turn
+// was running UNDER. The vocabulary is closed and enforced by a CHECK
+// constraint on usage_turn_context — a new dimension is a schema change, not a
+// string an adapter may invent.
 //
-// SKILL CONTEXT IS A PROPERTY OF THE TURN, NOT A CALL WITHIN IT. That single
+// THE SIX PARTITIONS. These five, plus the tool-call attribution in
+// activity_events, are SIX PARTITIONS OF THE SAME DOLLARS. Every one of them
+// divides one window's spend a different way — which agent ran, which skill was
+// active, which MCP server answered, which plugin supplied the code, which tool
+// was called — the way cost-by-region and cost-by-product are two views of one
+// budget. Each is honest alone. Any query that sums across two of them counts
+// the same tokens twice, and no amount of care at the call site is a substitute
+// for making that unexpressible, which is why the read API takes exactly one
+// dimension per query and refuses to group by "dimension" at all.
+type TurnDimension string
+
+const (
+	// DimensionAgent is the subagent type a turn ran as (claude-code's
+	// `attributionAgent`: "workflow-subagent", "general-purpose", "Explore").
+	// It is by far the largest of the five: measured over this machine's
+	// transcripts, 79,816 of 102,887 usage-bearing assistant records carry it,
+	// i.e. 77.6% of all token-bearing turns are subagent work that the tool-call
+	// ledger describes with a couple of hundred `Agent` rows.
+	DimensionAgent TurnDimension = "agent"
+	// DimensionSkill is the skill a turn ran inside (`attributionSkill`). An
+	// activity row of kind=skill records the turn that INVOKED a skill — one
+	// call — while this records every turn the skill then spent: 44 invocation
+	// rows against 8,039 records of actual work.
+	DimensionSkill TurnDimension = "skill"
+	// DimensionMCPTool is the MCP tool a turn was serving
+	// (`attributionMcpTool`).
+	DimensionMCPTool TurnDimension = "mcp_tool"
+	// DimensionMCPServer is the MCP server that tool belongs to
+	// (`attributionMcpServer`). Measured: it and DimensionMCPTool ALWAYS
+	// co-occur — 7,084 records each, over the same 3,265 message ids, with no
+	// record carrying one without the other. They are still two dimensions
+	// rather than one composite value, because "what did the ruflo server cost"
+	// and "what did browser_eval cost" are different questions and a composite
+	// string would answer neither without parsing.
+	DimensionMCPServer TurnDimension = "mcp_server"
+	// DimensionPlugin is the plugin a turn's skill or agent came from
+	// (`attributionPlugin`).
+	DimensionPlugin TurnDimension = "plugin"
+)
+
+// turnDimensions is the closed vocabulary, in the order surfaces should offer
+// it: the two that describe WHO was running first, then WHAT was being served,
+// then WHERE the code came from.
+var turnDimensions = []TurnDimension{
+	DimensionAgent, DimensionSkill, DimensionMCPTool, DimensionMCPServer, DimensionPlugin,
+}
+
+// TurnDimensions returns the closed dimension vocabulary. The slice is a copy:
+// a caller iterating it must not be able to edit the constant set.
+func TurnDimensions() []TurnDimension {
+	return append([]TurnDimension(nil), turnDimensions...)
+}
+
+// Valid reports whether d is one of the known dimensions. An unknown dimension
+// is refused at the API boundary rather than passed to SQL, so a typo returns
+// an error instead of an empty result that looks like "this agent cost nothing".
+func (d TurnDimension) Valid() bool {
+	for _, k := range turnDimensions {
+		if k == d {
+			return true
+		}
+	}
+	return false
+}
+
+// TurnContext records that ONE usage event was produced while the agent was
+// operating under ONE named thing along ONE dimension — inside a skill, as a
+// subagent, serving an MCP tool, and so on. It answers "what did X cost", which
+// the activity ledger alone cannot: an ActivityEvent of kind=skill records the
+// turn that INVOKED a skill, not the thousands of turns the skill then went on
+// to spend, and there is no activity row at all for "this turn ran as
+// workflow-subagent".
+//
+// TURN CONTEXT IS A PROPERTY OF THE TURN, NOT A CALL WITHIN IT. That single
 // distinction is why this is a separate record type rather than another
 // ActivityEvent kind, and it is worth stating precisely.
 //
 // An ActivityEvent is one CALL. A turn emits several of them against a single
 // usage object, so each takes a divided share (calls_in_turn) and the shares sum
-// back to the turn. A skill context is not a call — it is the answer to "which
-// skill was running when this turn happened", and a turn has AT MOST ONE. The
-// source enforces that: Claude Code's `attributionSkill` is a scalar string on
-// the record, so a usage row cannot carry two. Measured over 209,435 local
-// transcript records, 8,039 carry the field, every one of them a plain string,
-// and no (session, request) turn ever carried two distinct values.
+// back to the turn. A turn context is not a call — it is the answer to "what was
+// running when this turn happened", and along ANY ONE dimension a turn has AT
+// MOST ONE. The source enforces that: every one of claude-code's five
+// attribution fields is a scalar string on the record, verified over the whole
+// local corpus (99,894 field occurrences across the five, 100% of them JSON
+// strings, none an array or object), so a usage row cannot carry two agents or
+// two skills. The store keys these rows by (UsageDedupKey, Dimension), which
+// makes that a database constraint rather than an invariant a reader must trust.
 //
-// Therefore the cost of a skill is the sum over DISTINCT usage rows whose
-// context is that skill, with NO division and no divisor to share. Over-
-// attribution is not prevented by a rule here, it is unrepresentable: the store
-// keys these rows by UsageDedupKey uniquely, so the join to the ledger is 1:1
-// and cannot multiply a row's cost.
+// Therefore the cost of a value along a dimension is the sum over DISTINCT usage
+// rows whose context is that value, with NO division and no divisor to share.
+// Over-attribution WITHIN a dimension is not prevented by a rule, it is
+// unrepresentable: the join to the ledger is 1:1 once the query is pinned to one
+// dimension.
 //
-// It is deliberately NOT an ActivityEvent kind. Tool-call attribution and skill-
-// context attribution are two different PARTITIONS of the same dollars — "which
-// tool was called" and "which skill was running" — in the way cost-by-region and
-// cost-by-product are two views of one budget. They are each honest alone and
+// ACROSS dimensions is the opposite, and it is the whole hazard of putting them
+// in one table. A single turn commonly carries three or four contexts at once —
+// measured: 3,816 records carry agent+mcp_tool+mcp_server, 2,201 carry
+// agent+skill+plugin, 9 carry all five — and each of those rows names the turn's
+// FULL cost, because each is a complete answer to a different question. A query
+// that forgets to pin one dimension joins that turn once per context and reports
+// up to five times its real cost. See store.SummarizeTurnContext, which takes the
+// dimension as a required argument rather than as a filter that could be omitted.
+//
+// A turn context is deliberately NOT an ActivityEvent kind, for the same reason
+// skill context never was: tool-call attribution and turn-context attribution
+// are different partitions of the same dollars, each honest alone and
 // meaningless added together. Sharing activity_events would have put that
-// mistake one forgotten WHERE clause away: SummarizeActivity grouped by tool,
-// with no kind filter, would have silently counted every skill turn twice. A
-// separate table makes the sum unexpressible rather than merely discouraged.
+// mistake one forgotten WHERE clause away — SummarizeActivity grouped by tool,
+// with no kind filter, would silently have counted every attributed turn again.
+// Nor is it a column on activity_events: 41.8% of skill-context records carry no
+// tool_use block at all and emit no activity row to hang a column on, and the
+// agent dimension covers turns that called nothing far more often still.
 //
 // NESTING is real and is recorded shallowly, because that is all the source
-// offers. A skill may invoke another skill (5 such records locally, e.g.
-// superpowers:brainstorming invoking superpowers:writing-plans), but once the
-// inner one is running the field names ONLY the inner skill. So cost is
-// attributed to the INNERMOST active skill, and an outer skill is not credited
-// with what its callee spent. That is the source's own accounting, not a choice
-// made here, and inventing a parent chain the transcript does not record would
-// be a guess wearing a number.
+// offers. A skill may invoke another skill, but once the inner one is running
+// the field names ONLY the inner skill, so cost lands on the innermost active
+// one and an outer skill is not credited with what its callee spent. The same
+// holds for an agent that spawns an agent. That is the source's own accounting,
+// not a choice made here, and inventing a parent chain the transcript does not
+// record would be a guess wearing a number.
 //
-// PRIVACY: the skill NAME and nothing else. There is no field for the skill's
-// arguments, its inputs, its prompt or its output — the same allow-list
-// discipline ActivityEvent follows, for the same reason.
-type SkillContext struct {
+// PRIVACY: the NAME and nothing else — agent type, skill name, MCP server and
+// tool name, plugin name. There is no field for arguments, inputs, prompts or
+// results, and there is no raw column, so `privacy.no_raw` has nothing to drop
+// here: the discipline is satisfied by the shape rather than by a switch.
+type TurnContext struct {
 	// UsageDedupKey is the dedup_key of the usage_events row this context
-	// describes. It is the identity of the record: one usage row, one context.
+	// describes. Together with Dimension it is the identity of the record: one
+	// usage row, one value per dimension.
 	UsageDedupKey string
 	Tool          string // agent CLI id (ToolClaudeCode, ...)
-	// Skill is the skill the turn ran inside, verbatim ("adhd",
-	// "superpowers:writing-plans"). Never empty — a context with no skill is
-	// not a context.
-	Skill string
+	// Dimension names which axis this context is on. Must be one of the closed
+	// vocabulary; the store's CHECK constraint refuses anything else.
+	Dimension TurnDimension
+	// Value is the name the turn ran under, verbatim ("workflow-subagent",
+	// "adhd", "browser_eval", "ruflo", "mattpocock-skills"). Never empty — a
+	// context with no value is not a context.
+	Value string
 
 	SessionID string    // provider session id
 	Project   string    // workspace / cwd path
