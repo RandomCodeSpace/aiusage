@@ -320,11 +320,7 @@ func (m Model) renderBody(lay views.Layout) string {
 		ov.Gen = m.dataGen     // render-memo dataset identity (applied generation)
 		ov.Memo = m.heroMemo
 		ov.Mode = m.heroMode()
-		// The candidate treatment is injected at render time, the same way the
-		// pivot mode and the sys gauges are: flipping it touches no loaded data.
-		vc := m.vctx
-		vc.Trend = m.heroTrend
-		return views.Overview(vc, ov, lay)
+		return views.Overview(m.vctx, ov, lay)
 	case ViewByTool:
 		return views.ByTool(m.vctx, m.byTool, lay)
 	case ViewByModel:

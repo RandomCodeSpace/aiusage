@@ -23,13 +23,17 @@ func hasBrailleFrame(s string) bool {
 	return false
 }
 
-// heroCharted renders m and reports whether the Overview hero is a BUILT chart:
-// braille under a pane that declares its scale in text. Both channels are
-// required - the KPI tiles carry block sparklines, so braille alone would also
-// match a hero that degraded to its strip.
+// heroCharted renders m and reports whether the Overview hero is a BUILT body.
+// There are two of them and they are told apart by what the pane declares in
+// TEXT, never by ink alone: the heat lanes state each lane's peak ("max N"),
+// the braille bodies state a detent or decade pitch ("SCALE N/div"). Ink alone
+// would match either way - the KPI tiles carry heat strips of their own, and
+// they carry neither readout.
 func heroCharted(m Model) (bool, string) {
 	out := ansiHeroChart.ReplaceAllString(m.View().Content, "")
-	return hasBrailleFrame(out) && strings.Contains(out, "SCALE "), out
+	lanes := strings.Contains(out, "max ")
+	braille := hasBrailleFrame(out) && strings.Contains(out, "SCALE ")
+	return lanes || braille, out
 }
 
 // TestClassicTerminalRendersTheHeroChart: 80x24 is the classic terminal size and

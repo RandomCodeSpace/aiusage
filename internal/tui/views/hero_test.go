@@ -123,33 +123,30 @@ func TestHeroModeBodyExactHeight(t *testing.T) {
 	}
 }
 
-// TestHeroTwoPaneMonoLegibility reads the hero through the monochrome channel:
-// both pane names and both SCALE readouts must survive with every SGR sequence
-// stripped. The declared scale is the only thing that makes two independently
-// detented panes comparable, so it can never be carried by color alone.
-func TestHeroTwoPaneMonoLegibility(t *testing.T) {
+// TestHeroHeatLanesMonoLegibility reads the hero through the monochrome channel:
+// every lane must name itself and declare the peak its intensities are read
+// against, with every SGR sequence stripped. The lanes are self-scaled, so that
+// declared peak is the only thing that makes them comparable — it can never be
+// carried by color alone. The ramp itself is glyph-first for the same reason.
+func TestHeroHeatLanesMonoLegibility(t *testing.T) {
 	c := heroTestCtx()
 	lay := ComputeLayout(120, 30)
 	out := ansiHero.ReplaceAllString(heroPanel(c, heroTestData(HeroTrend), 81, 19, lay, true), "")
 
-	for _, want := range []string{"TREND", "fresh", "cache", "/div"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("mono hero is missing %q:\n%s", want, out)
+	want := []string{"TREND"}
+	for _, s := range c.Comp {
+		want = append(want, s.Label)
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("mono hero is missing %q:\n%s", w, out)
 		}
 	}
-	if n := strings.Count(out, "SCALE "); n != 2 {
-		t.Errorf("mono hero carries %d SCALE readouts, want one per pane (2):\n%s", n, out)
+	if n := strings.Count(out, "max "); n != len(c.Comp) {
+		t.Errorf("mono hero carries %d peak readouts, want one per lane (%d):\n%s", n, len(c.Comp), out)
 	}
-	// Both panes' plot areas must start in the same column — the shared gutter
-	// is what lets the eye compare them. Take the axis column of each pane.
-	axes := map[int]bool{}
-	for _, ln := range strings.Split(out, "\n") {
-		if i := strings.IndexRune(ln, '│'); i >= 0 {
-			axes[i] = true
-		}
-	}
-	if len(axes) != 1 {
-		t.Errorf("panes are not column-aligned: Y axis found in columns %v", axes)
+	if !hasHeatInk(out) {
+		t.Errorf("mono hero plots no ramp ink — the intensity did not survive the strip:\n%s", out)
 	}
 }
 
@@ -228,10 +225,15 @@ func TestHeroDecadeBandBelowTwoPaneFloor(t *testing.T) {
 			t.Fatalf("h=%d: band declares no decade pitch:\n%s", h, got)
 		}
 	}
-	// At the floor the two panes take over.
+	// At the floor the heat lanes take over: one rule per series, each carrying
+	// its own peak, and no SCALE readout at all.
 	at := ansiHero.ReplaceAllString(heroBodyMemo(c, d, lay, w, minHeroTwoPaneH, -1), "")
-	if strings.Count(at, "SCALE ") != 2 {
-		t.Fatalf("two-pane hero did not engage at the floor (h=%d):\n%s", minHeroTwoPaneH, at)
+	if n := strings.Count(at, "max "); n != len(c.Comp) {
+		t.Fatalf("heat lanes did not engage at the floor (h=%d): %d peak readouts, want %d:\n%s",
+			minHeroTwoPaneH, n, len(c.Comp), at)
+	}
+	if strings.Contains(at, "SCALE ") {
+		t.Fatalf("h=%d: the lanes still carry a detent SCALE readout:\n%s", minHeroTwoPaneH, at)
 	}
 }
 

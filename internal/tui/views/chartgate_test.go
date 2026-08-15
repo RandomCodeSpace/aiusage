@@ -91,8 +91,15 @@ func chartReads(out string, w, h int) string {
 			continue
 		}
 		heads++
+		// A pane states its own scale in words. The braille bodies say it as a
+		// SCALE readout per division; a heat lane says it as the peak its
+		// intensities are read against. Both survive an SGR strip, and neither
+		// pane kind may drop its own.
+		if strings.Contains(ln, "max ") {
+			continue
+		}
 		if !strings.Contains(ln, "SCALE ") || !strings.Contains(ln, "/div") {
-			return fmt.Sprintf("pane header %q drops its SCALE readout", ln)
+			return fmt.Sprintf("pane header %q drops its scale readout", ln)
 		}
 	}
 	if heads == 0 {
@@ -100,7 +107,10 @@ func chartReads(out string, w, h int) string {
 	}
 	axis := ""
 	for i, ln := range lines {
-		if strings.Contains(ln, "└") && i+1 < len(lines) {
+		if i+1 >= len(lines) {
+			continue
+		}
+		if strings.Contains(ln, "└") || isRuleRow(ln) {
 			axis = lines[i+1]
 		}
 	}
@@ -113,10 +123,29 @@ func chartReads(out string, w, h int) string {
 	if gateDigit.MatchString(gateDate.ReplaceAllString(axis, "")) {
 		return fmt.Sprintf("x axis carries a cut label: %q", axis)
 	}
-	if !hasBraille(out) {
+	if !hasBraille(out) && !hasHeatInk(out) {
 		return "nothing plotted"
 	}
 	return ""
+}
+
+// isRuleRow reports whether ln is nothing but a horizontal hairline. It is how
+// the heat lanes' x axis is found: with no Y gutter the pane has no origin
+// corner, so the axis is a bare rule row rather than a "└"-anchored one.
+func isRuleRow(ln string) bool {
+	ln = strings.TrimRight(ln, " ")
+	return ln != "" && strings.Trim(ln, "─") == ""
+}
+
+// hasHeatInk reports whether s carries a rung of the intensity ramp — the heat
+// lanes' equivalent of braille, and what "something was plotted" means on them.
+func hasHeatInk(s string) bool {
+	for _, r := range s {
+		if isHeatInk(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // gateBuckets builds daily buckets whose magnitudes scale with mul, so the same

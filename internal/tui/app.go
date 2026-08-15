@@ -88,11 +88,6 @@ type Model struct {
 	// leverage-ratio pivot. Presentation only — it reads the applied timeline.
 	heroPivot bool
 
-	// heroTrend is the candidate trend LINE TREATMENT the hero draws (ticket
-	// #65): current -> A -> B -> C, cycled with x. Presentation only, and
-	// deliberately not persisted — the prototype's whole point is a live flip.
-	heroTrend views.TrendRender
-
 	// scrubComp holds each timeline bucket's by-tool composition, prewarmed by
 	// loadOverview from ONE [dim, tool] grouped query, index-aligned with
 	// tlData.Buckets. Scrubbing re-prices entirely from this — zero queries.

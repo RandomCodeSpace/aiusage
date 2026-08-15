@@ -130,15 +130,6 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key.Matches(msg, m.keys.Render):
-		// Prototype switcher (ticket #65). Like the pivot this is pure
-		// presentation: it re-draws the timeline already applied, dispatches no
-		// load, and is deliberately not persisted.
-		if m.view == ViewOverview {
-			m.heroTrend = m.heroTrend.Next()
-		}
-		return m, nil
-
 	case key.Matches(msg, m.keys.Sort):
 		m.sort = m.sort.Next()
 		cmd := m.startLoad()

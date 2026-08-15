@@ -2,52 +2,25 @@ package views
 
 import (
 	"math"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
-	"github.com/NimbleMarkets/ntcharts/v2/canvas/runes"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
-// trendrender_test.go is the rendering smoke gate for the candidate trend
-// treatments (ticket #65). It is a prototype harness, not a pixel contract: it
-// pins the things that would make a side-by-side dishonest — a panic, two
-// candidates that are secretly the same picture, a smoothed curve that dips
-// below zero on an idle stretch, or a real bucket with no marker on it.
+// trendrender_test.go pins the hero's heat lanes: the slab is uniform, the
+// intensity is the value, each lane scales against its own peak, a missing
+// bucket stays a hole, and the geometry ladder degrades from tall bands to flat
+// strips to the sub-floor pane fallback.
 
-// allTrends is the switcher's cycle, in order.
-var allTrends = []TrendRender{TrendCurrent, TrendSmooth, TrendColumns, TrendRidge, TrendHeat}
-
-// TestTrendCycleVisitsEveryCandidate: x must reach every candidate and come back
-// to the shipped renderer, or one of them is unreachable in the prototype.
-func TestTrendCycleVisitsEveryCandidate(t *testing.T) {
-	got := []TrendRender{TrendCurrent}
-	for tr := TrendCurrent.Next(); tr != TrendCurrent; tr = tr.Next() {
-		got = append(got, tr)
-		if len(got) > len(allTrends) {
-			t.Fatalf("x cycle does not return to the baseline: %v", got)
-		}
-	}
-	if len(got) != len(allTrends) {
-		t.Fatalf("x cycle visits %v, want %v", got, allTrends)
-	}
-	for i, tr := range allTrends {
-		if got[i] != tr {
-			t.Fatalf("x cycle position %d = %v, want %v", i, got[i], tr)
-		}
-	}
-}
-
-// spikeIdleBuckets is the shape the interpolation research measured against:
-// a spike, a run of idle buckets, another spike — plus a real gap, so a
-// treatment that smooths across an outage is caught here too.
+// spikeIdleBuckets is the shape these assertions are made against: a spike, a
+// run of idle buckets, another spike - plus a real gap, so a renderer that
+// paints across an outage is caught here too.
 //
 // Cache deliberately does NOT track input. A fixed multiple would make the
 // self-scaled heat lanes render three identical strips, which proves the
@@ -92,13 +65,6 @@ func spikeIdleBuckets() []store.Bucket {
 	return out
 }
 
-// trendTestCtx is heroTestCtx pinned to one candidate treatment.
-func trendTestCtx(tr TrendRender) Ctx {
-	c := heroTestCtx()
-	c.Trend = tr
-	return c
-}
-
 func trendTestData() OverviewData {
 	return OverviewData{
 		Timeline:    spikeIdleBuckets(),
@@ -108,197 +74,24 @@ func trendTestData() OverviewData {
 	}
 }
 
-// renderTrendHero renders the hero panel for one treatment at (w, h).
-func renderTrendHero(tr TrendRender, w, h int) string {
-	return heroPanel(trendTestCtx(tr), trendTestData(), w, h, ComputeLayout(w+40, h+10), false)
-}
-
-// TestTrendTreatmentsRenderAndDiffer is the core smoke gate: no candidate may
-// panic at either gate size, every candidate must hold the panel's exact height,
-// and — wherever the two detented panes are the body — no two candidates may
-// produce the same frame. Below the two-pane floor the hero renders the
-// decade-ring log band, which the prototype deliberately leaves untouched, so
-// identical frames there are the correct answer rather than a bug.
-func TestTrendTreatmentsRenderAndDiffer(t *testing.T) {
-	for _, geom := range []struct{ w, h int }{{100, 30}, {42, 12}} {
-		lay := ComputeLayout(geom.w+40, geom.h+10)
-		inner := geom.w - cardChromeW
-		twoPane := heroFrameFor(HeroTrend, lay, inner, geom.h-heroCardChromeH) == heroFrameTwoPane
-
-		seen := map[string]TrendRender{}
-		for _, tr := range allTrends {
-			out := renderTrendHero(tr, geom.w, geom.h)
-			if n := lipglossHeight(out); n != geom.h {
-				t.Errorf("%dx%d %v: panel is %d rows, want %d", geom.w, geom.h, tr, n, geom.h)
-			}
-			if !strings.Contains(ansiHero.ReplaceAllString(out, ""), tr.Chip()) {
-				t.Errorf("%dx%d %v: title carries no treatment chip", geom.w, geom.h, tr)
-			}
-			if !twoPane {
-				continue
-			}
-			if prev, dup := seen[out]; dup {
-				t.Errorf("%dx%d: %v renders the same frame as %v", geom.w, geom.h, tr, prev)
-			}
-			seen[out] = tr
-		}
-	}
+// renderTrendHero renders the hero panel at (w, h).
+func renderTrendHero(w, h int) string {
+	return heroPanel(heroTestCtx(), trendTestData(), w, h, ComputeLayout(w+40, h+10), false)
 }
 
 // lipglossHeight counts rendered rows without importing lipgloss for one call.
 func lipglossHeight(s string) int { return len(strings.Split(s, "\n")) }
 
-// freshPaneFor builds the two-pane hero for one treatment and returns its fresh
-// pane, which is the pane both the below-zero and the marker contract live on.
-func freshPaneFor(t *testing.T, tr TrendRender, w, h int) (*heroFrame, paneGeom) {
-	t.Helper()
-	c := trendTestCtx(tr)
-	buckets := spikeIdleBuckets()
-	f, ok := buildHeroFrame(c, buckets, "day", heroFrameTwoPane, w, h, nil)
-	if !ok || len(f.panes) < 1 {
-		t.Fatalf("%v: two-pane hero did not build at %dx%d", tr, w, h)
-	}
-	return f, newPaneGeom(f.panes[0].model)
-}
-
-// TestSmoothCurveStaysOnZeroOverIdle is the below-zero test from the research.
-// Fritsch-Carlson zeroes the tangent at a zero secant, so a run of idle buckets
-// interpolates to exactly zero and never dips under it; uniform Catmull-Rom
-// undershoots the same shape by 2/27 of the spike height, which on token counts
-// is a negative number of tokens. The assertion is made twice — once on the
-// spline itself, where "exactly zero" is checkable, and once on the drawn
-// canvas, where an idle column must carry ink on the baseline dot row and
-// nowhere above it.
-func TestSmoothCurveStaysOnZeroOverIdle(t *testing.T) {
-	xs := []float64{0, 1, 2, 3, 4, 5}
-	ys := []float64{4_000_000, 0, 0, 0, 0, 3_200_000}
-	tan := monotoneTangents(xs, ys)
-	for i := 0; i <= 4000; i++ {
-		x := 1 + 3*float64(i)/4000 // strictly inside the idle stretch
-		if v := evalMonotone(xs, ys, tan, x); v != 0 {
-			t.Fatalf("monotone spline at x=%g over an idle stretch = %g, want exactly 0", x, v)
+// TestTrendHeroHoldsItsHeight is the panel-level smoke gate: the hero holds its
+// exact height at the two gate sizes, one above the two-pane floor and one
+// below it, where the decade-ring log band is the body instead.
+func TestTrendHeroHoldsItsHeight(t *testing.T) {
+	for _, geom := range []struct{ w, h int }{{100, 30}, {42, 12}} {
+		out := renderTrendHero(geom.w, geom.h)
+		if n := lipglossHeight(out); n != geom.h {
+			t.Errorf("%dx%d: panel is %d rows, want %d", geom.w, geom.h, n, geom.h)
 		}
 	}
-	for i := 0; i <= 5000; i++ {
-		x := 5 * float64(i) / 5000
-		if v := evalMonotone(xs, ys, tan, x); v < 0 {
-			t.Fatalf("monotone spline at x=%g = %g, below zero", x, v)
-		}
-		if v := evalMonotone(xs, ys, tan, x); v > math.Max(ys[0], ys[5]) {
-			t.Fatalf("monotone spline at x=%g = %g, above the data range", x, v)
-		}
-	}
-
-	// And on the canvas: pick the columns strictly between two idle buckets, so
-	// no real-bucket marker is in play, and require the ink to sit on the
-	// baseline dot row only.
-	f, g := freshPaneFor(t, TrendSmooth, 100, 24)
-	m := f.panes[0].model
-	buckets := spikeIdleBuckets()
-	times := bucketTimes(buckets, "day")
-	lo := g.dotX(float64(times[2].UnixMilli())/1e3) / 2
-	hi := g.dotX(float64(times[3].UnixMilli())/1e3) / 2
-	if hi-lo < 4 {
-		t.Fatalf("idle stretch spans %d cells, too narrow to assert on", hi-lo)
-	}
-	// A marker is two dot columns wide, so a bucket on an odd dot column bleeds
-	// one cell to the RIGHT. Skipping one cell after the left bucket clears it;
-	// nothing bleeds leftwards, so the right bucket needs no margin of its own.
-	const bottomRowDots = rune(0x40 | 0x80)
-	for x := lo + 2; x < hi; x++ {
-		for y := 0; y < g.gh; y++ {
-			r := m.Canvas.Cell(canvas.Point{X: g.startX + x, Y: y}).Rune
-			if r == 0 || !runes.IsBraillePattern(r) {
-				continue
-			}
-			dots := r - runes.BrailleBlockOffset
-			if y != g.gh-1 {
-				t.Fatalf("idle column %d carries ink on row %d (of %d) — the curve left the baseline", x, y, g.gh)
-			}
-			if dots&^bottomRowDots != 0 {
-				t.Fatalf("idle column %d baseline cell = %#x, has dots above the zero row", x, dots)
-			}
-		}
-	}
-}
-
-// TestSmoothMarksEveryRealBucket pins the honesty treatment: candidate A draws a
-// marker at every REAL bucket coordinate and never at a curve sample, which is
-// the trap Observable Plot documents for built-in line markers. The anchor dot
-// of each marker is the bucket's own coordinate, so it must be lit in the
-// composited cell that covers it.
-func TestSmoothMarksEveryRealBucket(t *testing.T) {
-	f, g := freshPaneFor(t, TrendSmooth, 100, 24)
-	m := f.panes[0].model
-	buckets := spikeIdleBuckets()
-	times := bucketTimes(buckets, "day")
-	if len(times) != len(buckets) {
-		t.Fatalf("test buckets do not all parse: %d times for %d buckets", len(times), len(buckets))
-	}
-	for i, b := range buckets {
-		p := canvas.Point{
-			X: g.dotX(float64(times[i].UnixMilli()) / 1e3),
-			Y: g.dotY(float64(b.Input)),
-		}
-		cell := m.Canvas.Cell(canvas.Point{X: g.startX + p.X/2, Y: p.Y / 4})
-		if !runes.IsBraillePattern(cell.Rune) {
-			t.Fatalf("bucket %d (%s): cell at dot (%d,%d) holds %q, not a braille pattern",
-				i, b.Keys["day"], p.X, p.Y, string(cell.Rune))
-		}
-		if bit := brailleDotBit(p.X%2, p.Y%4); (cell.Rune-runes.BrailleBlockOffset)&bit == 0 {
-			t.Errorf("bucket %d (%s): no marker dot at its own coordinate (%d,%d)",
-				i, b.Keys["day"], p.X, p.Y)
-		}
-	}
-}
-
-// brailleDotBit is the dot-number mapping of the Unicode Braille Patterns block.
-// It is NOT row-major: dots 7 and 8 were appended after the original six, so the
-// bottom row is bits 0x40 and 0x80.
-//
-//	[0][3] = [0x01][0x08]
-//	[1][4]   [0x02][0x10]
-//	[2][5]   [0x04][0x20]
-//	[6][7]   [0x40][0x80]
-func brailleDotBit(col, row int) rune {
-	left := [4]rune{0x01, 0x02, 0x04, 0x40}
-	right := [4]rune{0x08, 0x10, 0x20, 0x80}
-	if col == 0 {
-		return left[row]
-	}
-	return right[row]
-}
-
-// TestOwnershipKeepsCoincidentSeriesVisible is the issue #67 contract: with two
-// series running over the same cells, majority ownership must leave BOTH with
-// visible cells. The shipped renderer writes the incoming style on every draw,
-// so the earlier series renders zero visible cells wherever the later one shares
-// its cells — decided purely by argument order.
-func TestOwnershipKeepsCoincidentSeriesVisible(t *testing.T) {
-	// Input and output are 3:1 here, close enough on a shared pane to share
-	// cells across most of the range.
-	count := func(tr TrendRender) (in, out int) {
-		f, _ := freshPaneFor(t, tr, 100, 24)
-		frame := f.panes[0].model.View()
-		specs, _ := heroPaneSeries(trendTestCtx(tr))
-		if len(specs) < 2 {
-			t.Fatal("fresh pane must carry two series")
-		}
-		return strings.Count(frame, ansiFor(specs[0])), strings.Count(frame, ansiFor(specs[1]))
-	}
-	in, out := count(TrendSmooth)
-	if in == 0 || out == 0 {
-		t.Errorf("candidate A: coincident series render in=%d out=%d styled runs, want both non-zero", in, out)
-	}
-}
-
-// ansiFor is the SGR prefix one series' style emits, used to count the cells a
-// series actually owns in a rendered frame.
-func ansiFor(s CompSpec) string {
-	if p := sgrPrefix(s.Style()); p != "" {
-		return p
-	}
-	return s.Style().Render("X")
 }
 
 // sgrPrefix is the escape sequence a style writes ahead of its content. It is
@@ -313,11 +106,11 @@ func sgrPrefix(s lipgloss.Style) string {
 	return ""
 }
 
-// heatLanesFor builds candidate D and returns its single pane, the pane
+// heatLanesFor builds the hero trend body and returns its single pane, the pane
 // geometry and the lane layout the assertions below index with.
 func heatLanesFor(t *testing.T, w, h int) (*timeserieslinechart.Model, paneGeom, heatGeom, []CompSpec) {
 	t.Helper()
-	c := trendTestCtx(TrendHeat)
+	c := heroTestCtx()
 	f, ok := buildHeroFrame(c, spikeIdleBuckets(), "day", heroFrameTwoPane, w, h, nil)
 	if !ok || len(f.panes) != 1 {
 		t.Fatalf("heat frame did not build at %dx%d", w, h)
@@ -350,7 +143,7 @@ func isHeatInk(r rune) bool {
 
 // heatSlab returns lane li's painted column at plot column x, one cell per band
 // row, top row first. A bucket owns its whole band, so this is the entire mark
-// the treatment makes for it.
+// the renderer makes for it.
 func heatSlab(m *timeserieslinechart.Model, g paneGeom, hg heatGeom, li, x int) []canvas.Cell {
 	out := make([]canvas.Cell, 0, hg.bandH)
 	for row := hg.heatRow(li); row <= hg.baseRow(li); row++ {
@@ -364,12 +157,12 @@ func heatSlab(m *timeserieslinechart.Model, g paneGeom, hg heatGeom, li, x int) 
 // bold, so a rune-only comparison would call them the same ink.
 func cellInk(c canvas.Cell) string { return string(c.Rune) + sgrPrefix(c.Style) }
 
-// TestHeatSlabsAreUniform is the rework's contract, and the difference between a
-// heat map and the bar chart it replaced: a bucket paints every row of its band
-// with the SAME ink. Nothing in a column's shape carries information — no
-// silhouette to measure, no tip to read — so the value has nowhere to live but
-// the intensity. The assertion covers every plot column, holes and idle buckets
-// included: a lane is uniform everywhere or it is not a band.
+// TestHeatSlabsAreUniform is the contract that separates a heat map from the bar
+// chart it replaced: a bucket paints every row of its band with the SAME ink.
+// Nothing in a column's shape carries information — no silhouette to measure, no
+// tip to read — so the value has nowhere to live but the intensity. The
+// assertion covers every plot column, holes and idle buckets included: a lane is
+// uniform everywhere or it is not a band.
 func TestHeatSlabsAreUniform(t *testing.T) {
 	m, g, hg, specs := heatLanesFor(t, 100, 24)
 	if !hg.tall || hg.bandH < heatMinTallBand {
@@ -452,7 +245,7 @@ func TestHeatInkTracksValue(t *testing.T) {
 	}
 }
 
-// TestHeatRungIsMonotone pins the ramp itself, where the ordering contract now
+// TestHeatRungIsMonotone pins the ramp itself, where the ordering contract
 // lives: more tokens never means less ink, any non-zero fraction reaches the
 // first rung, and the peak reaches the last. Zero is not on the ramp at all —
 // it is the track mark, so heatRungFor reports no rung for it.
@@ -482,9 +275,9 @@ func TestHeatRungIsMonotone(t *testing.T) {
 
 // TestHeatDegradesToFlatBands pins the ladder: bands grow to fill the pane while
 // they can be at least heatMinTallBand rows tall, and below that the lanes fall
-// back to fixed 2-row then 1-row strips before the pane fallback takes over
-// entirely. The encoding is the same at every rung of that ladder — only the
-// thickness of the band changes.
+// back to fixed 2-row then 1-row strips before the sub-floor pane fallback takes
+// over entirely. The encoding is the same at every rung of that ladder — only
+// the thickness of the band changes.
 func TestHeatDegradesToFlatBands(t *testing.T) {
 	const lanes = 3
 	for _, tc := range []struct {
@@ -522,7 +315,7 @@ func TestHeatDegradesToFlatBands(t *testing.T) {
 	// the hero body is chartH = h-heroCardChromeH and the lanes get chartH-2, so
 	// a 16-row panel leaves 11 rows and a 17-row panel is the first tall one.
 	for _, h := range []int{16, 17} {
-		out := renderTrendHero(TrendHeat, 100, h)
+		out := renderTrendHero(100, h)
 		if n := lipglossHeight(out); n != h {
 			t.Errorf("heat panel at 100x%d is %d rows, want %d", h, n, h)
 		}
@@ -532,13 +325,46 @@ func TestHeatDegradesToFlatBands(t *testing.T) {
 	}
 }
 
+// TestHeatFallsBackBelowItsFloor: a pane too short for one lane per series must
+// still build a hero body, and it must be the two detented braille panes rather
+// than nothing at all. That fallback is the bottom of the built-body ladder.
+//
+// It takes a FOURTH series to reach it. The lanes need two rows per series and
+// the two panes need nine body rows, so at the three series the hero actually
+// carries the lanes always win and the fallback is structural rather than
+// reachable; a wider component descriptor is what puts the two floors back in
+// the order the fallback was written for.
+func TestHeatFallsBackBelowItsFloor(t *testing.T) {
+	c := heroTestCtx()
+	c.Comp = append(append([]CompSpec{}, c.Comp...), CompSpec{
+		Key: "extra", Label: "extra", Short: "extra", Glyph: "▪",
+		Color: lipgloss.Color("5"),
+		Pick:  func(x Components) int64 { return x.Input },
+	})
+	buckets := spikeIdleBuckets()
+	times := bucketTimes(buckets, "day")
+
+	const h = 9
+	if _, ok := newHeatGeom(h-2, len(c.Comp)); ok {
+		t.Fatalf("%d lanes still fit %d rows; the fixture no longer falls below the heat floor",
+			len(c.Comp), h-2)
+	}
+	f, ok := buildTwoPaneFrame(c, buckets, times, "day", 100, h, &detentLock{})
+	if !ok {
+		t.Fatal("the sub-floor fallback did not build")
+	}
+	if len(f.panes) != 2 {
+		t.Fatalf("the sub-floor fallback built %d panes, want the two detented panes", len(f.panes))
+	}
+}
+
 // TestHeatCrosshairPaintsWithoutMovingInk: the scrub crosshair and the now
 // column are canvas post-passes that touch backgrounds only, so pinning the
 // scrub must change the rendered frame while leaving every glyph exactly where
 // it was. Over lanes that reads as one full-height band through all three at the
 // same instant, which is what makes the lanes comparable at a point in time.
 func TestHeatCrosshairPaintsWithoutMovingInk(t *testing.T) {
-	c := trendTestCtx(TrendHeat)
+	c := heroTestCtx()
 	f, ok := buildHeroFrame(c, spikeIdleBuckets(), "day", heroFrameTwoPane, 100, 24, nil)
 	if !ok {
 		t.Fatal("heat frame did not build")
@@ -582,7 +408,7 @@ func TestHeatGapIsAHoleNotAZero(t *testing.T) {
 	}
 }
 
-// TestHeatLanesSelfScale is the point of the treatment: each lane is scaled
+// TestHeatLanesSelfScale is the point of the rendering: each lane is scaled
 // against its OWN peak, so every lane's largest bucket reaches the top rung of
 // the ramp even though cache runs about 100x fresh. On one shared scale the two
 // fresh lanes would sit on the bottom rung throughout — the same data fact that
@@ -611,7 +437,7 @@ func TestHeatLanesSelfScale(t *testing.T) {
 			}
 		}
 	}
-	// And the spread the treatment exists to absorb is really there.
+	// And the spread the lanes exist to absorb is really there.
 	if peaks[len(peaks)-1] < 20*peaks[0] {
 		t.Fatalf("cache peak %d is only %.1fx input peak %d — the fixture no longer exercises self-scaling",
 			peaks[len(peaks)-1], float64(peaks[len(peaks)-1])/float64(peaks[0]), peaks[0])
@@ -619,52 +445,9 @@ func TestHeatLanesSelfScale(t *testing.T) {
 	// Each lane must state the number its intensities are a fraction of.
 	frame := ansiHero.ReplaceAllString(m.View(), "")
 	for li, s := range specs {
-		want := "max " + detentHuman(trendTestCtx(TrendHeat), peaks[li])
+		want := "max " + detentHuman(heroTestCtx(), peaks[li])
 		if !strings.Contains(frame, want) {
 			t.Errorf("lane %s does not declare %q:\n%s", s.Key, want, frame)
 		}
 	}
-}
-
-// TestTrendFrameDump writes one ANSI-stripped frame per treatment when
-// AIUSAGE_TREND_FRAMES names a directory. It exists so a reviewer can eyeball
-// the candidates without a terminal; a normal test run writes nothing.
-func TestTrendFrameDump(t *testing.T) {
-	dir := os.Getenv("AIUSAGE_TREND_FRAMES")
-	if dir == "" {
-		t.Skip("set AIUSAGE_TREND_FRAMES=<dir> to dump candidate frames")
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	names := map[TrendRender]string{
-		TrendCurrent: "current", TrendSmooth: "a", TrendColumns: "b",
-		TrendRidge: "c", TrendHeat: "d",
-	}
-	for _, tr := range allTrends {
-		var b strings.Builder
-		for _, geom := range []struct{ w, h int }{{100, 30}, {74, 20}, {42, 12}} {
-			b.WriteString("=== " + tr.Chip() + "  @ " +
-				itoa(geom.w) + "x" + itoa(geom.h) + " ===\n")
-			b.WriteString(ansiHero.ReplaceAllString(renderTrendHero(tr, geom.w, geom.h), ""))
-			b.WriteString("\n\n")
-		}
-		if err := os.WriteFile(filepath.Join(dir, names[tr]+".txt"), []byte(b.String()), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// itoa keeps the dump helper free of a strconv import in a file that needs it
-// for nothing else.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var d []byte
-	for n > 0 {
-		d = append([]byte{byte('0' + n%10)}, d...)
-		n /= 10
-	}
-	return string(d)
 }

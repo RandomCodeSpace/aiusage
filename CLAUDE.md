@@ -242,7 +242,12 @@ document:
   and never restores it when rows arrive. Reset the cursor after repopulating
   (see Browse.SetData in internal/tui/views/browse.go).
 
-Charts are ntcharts (linear scale only).
+Charts are ntcharts (linear scale only). The hero trend is the exception: its
+heat lanes are drawn cell by cell onto an ntcharts canvas
+(internal/tui/views/trendrender.go), so ntcharts still supplies the widget, the
+axes and the memo/scrub contract while the plot rectangle is ours. Every other
+chart surface — the decade band, the leverage pivot, the sub-floor two-pane
+fallback — is ntcharts braille as before.
 
 ## Migrations
 

@@ -34,13 +34,9 @@ type HeroMemo struct {
 	ptr *store.Bucket
 	n   int
 
-	// Built body (no highlights) and the key it was built for. trend is part of
-	// that key because the candidate treatment (ticket #65) changes the built
-	// braille itself and flips live under the reader's hands, which is exactly
-	// what the rest of Ctx does not do.
+	// Built body (no highlights) and the key it was built for.
 	dim   string
 	kind  heroFrameKind
-	trend TrendRender
 	w, h  int
 	built *heroFrame
 
@@ -94,13 +90,13 @@ func (m *HeroMemo) frame(c Ctx, gen uint64, buckets []store.Bucket, dim string, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.syncIdentity(gen, buckets)
-	if m.built == nil || m.dim != dim || m.kind != kind || m.trend != c.Trend || m.w != w || m.h != h {
+	if m.built == nil || m.dim != dim || m.kind != kind || m.w != w || m.h != h {
 		f, ok := buildHeroFrame(c, buckets, dim, kind, w, h, &m.lock)
 		if !ok {
 			return "", false
 		}
 		m.built = f
-		m.dim, m.kind, m.trend, m.w, m.h = dim, kind, c.Trend, w, h
+		m.dim, m.kind, m.w, m.h = dim, kind, w, h
 		m.frames = map[int]string{}
 		m.builds++
 	}

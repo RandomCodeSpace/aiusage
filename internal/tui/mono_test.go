@@ -46,13 +46,13 @@ func containsAny(s string, alts ...string) bool {
 }
 
 // TestMonoPaneLabelsAndScaleReadouts: pane identity and the hero's declared
-// scale are text, so they survive the strip. The scale is the only thing that
-// makes two independently detented panes comparable.
+// scale are text, so they survive the strip. The hero's lanes are self-scaled,
+// so the peak each one names is the only thing that makes them comparable.
 func TestMonoPaneLabelsAndScaleReadouts(t *testing.T) {
 	m := newTestModelWH(t, &fakeData{}, 160, 44)
 	out := monoFrame(m)
 
-	for _, want := range []string{"TREND", "BY TOOL", "SPLIT", "SCALE ", "/div"} {
+	for _, want := range []string{"TREND", "BY TOOL", "SPLIT", "max "} {
 		if !strings.Contains(out, want) {
 			t.Errorf("mono Overview is missing %q:\n%s", want, out)
 		}
