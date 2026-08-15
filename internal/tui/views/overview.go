@@ -124,7 +124,7 @@ func Overview(c Ctx, d OverviewData, lay Layout) string {
 type kpiSpec struct {
 	label, foot        string
 	value, prev        int64
-	spark              string // pre-rendered sparkline row; "" → none (total/events are never graphed)
+	spark              string // pre-rendered heat-strip row; "" → none (total/events are never graphed)
 	style              lipgloss.Style
 	shareVal, shareTot int64 // shareTot>0 shows a share %
 	// fmtVal overrides the default token humanizer. Cost is not a token count,
@@ -141,7 +141,7 @@ type kpiSpec struct {
 const kpiTileH = 2*blockPadY + 4
 
 // overviewKPIs renders the read-only KPI strip: one tile per token component
-// (input, output, cache-read, cache-creation) with a self-scaled sparkline and
+// (input, output, cache-read, cache-creation) with a self-scaled heat strip and
 // its share of the component sum, then total and events as bare numbers (total
 // is never graphed). Tiles reflow to fit the body width.
 //
@@ -157,8 +157,8 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 	prev := Split(d.Prev)
 	sum := tot.Sum()
 
-	// Tile geometry first: the sparkline width is needed while building specs
-	// (memoized sparklines key on their rendered width). How many tiles fit
+	// Tile geometry first: the heat strip's width is needed while building specs
+	// (memoized strips key on their rendered width). How many tiles fit
 	// across, given a minimum useful tile width + 1-col gutters.
 	nspec := len(c.Comp) + 2
 	// The cost tile is counted here even though it may not survive the fit check
@@ -191,7 +191,7 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 	for _, s := range c.Comp {
 		spark := ""
 		if lay.Sparklines {
-			spark = kpiSparkline(c, d, s, cw)
+			spark = kpiHeatStrip(c, d, s, cw)
 		}
 		specs = append(specs, kpiSpec{
 			label:    s.Short,
@@ -266,13 +266,23 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
-// kpiSparkline renders one KPI tile's self-scaled sparkline row, through the
-// render memo when one is wired (the series derives only from the timeline, so
-// it is stable for the lifetime of an applied dataset).
-func kpiSparkline(c Ctx, d OverviewData, s CompSpec, w int) string {
+// kpiHeatStrip renders one KPI tile's self-scaled heat row, through the render
+// memo when one is wired (the series derives only from the timeline, so it is
+// stable for the lifetime of an applied dataset).
+//
+// Self-scaling is right here and wrong on the sys strips: a token series has no
+// ceiling to read against, so the question a tile answers is shape over time -
+// the same reason the hero's lanes scale per lane. The memo key stays (series,
+// width): everything else the row is built from - the ramp, the series color,
+// the card's elevation - is static for the life of the process.
+func kpiHeatStrip(c Ctx, d OverviewData, s CompSpec, w int) string {
 	build := func() string {
 		vals := SeriesFor(d.Timeline, func(b store.Bucket) int64 { return s.Pick(Split(b)) })
-		return newColumnSparkline(vals, w, 1, s.Style())
+		// The row is painted on the tile's card step, the same one kpiTile renders
+		// at: the ramp's lighter rungs and the track mark do not cover their cell,
+		// so an unpainted strip would punch holes in the card.
+		cc := c.On(ElevCard)
+		return heatStrip(cc, vals, w, heatPeak(vals), heatConstInk(cc.compStyle(s)))
 	}
 	if d.Memo == nil {
 		return build()
@@ -281,7 +291,7 @@ func kpiSparkline(c Ctx, d OverviewData, s CompSpec, w int) string {
 }
 
 // kpiTile renders one read-only KPI bento card: title on the border, big
-// right-aligned number + delta chip, an optional self-scaled sparkline, then a
+// right-aligned number + delta chip, an optional self-scaled heat strip, then a
 // share % or unit. KPI tiles are not interactive (the trend is the only
 // interactive surface on Overview).
 func kpiTile(c Ctx, s kpiSpec, w int) string {

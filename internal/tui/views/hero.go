@@ -496,8 +496,8 @@ func leverageBelowFloor(c Ctx, buckets []store.Bucket, dim string, w, h int) str
 }
 
 // leverageFallback is the pivot below its chart floor: the ratio series as one
-// self-scaled sparkline row (order only, no axis) over the magnitude footer, so
-// the toggle stays meaningful at sizes an axed chart cannot fill.
+// self-scaled heat row (order only, no axis) over the magnitude footer, so the
+// toggle stays meaningful at sizes an axed chart cannot fill.
 func leverageFallback(c Ctx, buckets []store.Bucket, dim string, w, h int) string {
 	if len(buckets) == 0 {
 		return emptyChartFrame(c, w, h)
@@ -512,7 +512,7 @@ func leverageFallback(c Ctx, buckets []store.Bucket, dim string, w, h int) strin
 	if len(vals) == 0 {
 		return leverageBelowFloor(c, buckets, dim, w, h)
 	}
-	rows := []string{newColumnSparkline(vals, w, 1, leverageLineStyle(c))}
+	rows := []string{heatStrip(c, vals, w, heatPeak(vals), heatConstInk(leverageLineStyle(c)))}
 	if h >= 2 {
 		rows = append(rows, leverageFooter(c, buckets, w))
 	}

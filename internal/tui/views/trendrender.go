@@ -722,49 +722,9 @@ func drawRidgeCenterline(m *timeserieslinechart.Model, g paneGeom, r ridgeGeom) 
 
 // --- candidate D: self-scaled heat lanes --------------------------------------
 
-// heatRamp is the intensity ladder: six rungs built from four BMP shade and
-// block glyphs plus two SGR attributes. It is the ONLY channel - a lane carries
-// its value in ink alone, never in a height - so it has to carry the magnitude
-// on its own. Magnitude survives in the glyph without any color at all -
-// termgraph's calendar model - so a 16-color terminal, NO_COLOR and grayscale
-// all keep light, medium, dark, full.
-var heatRamp = [...]struct {
-	glyph rune
-	faint bool
-	bold  bool
-}{
-	{'░', true, false},
-	{'░', false, false},
-	{'▒', false, false},
-	{'▓', false, false},
-	{'█', false, false},
-	{'█', false, true},
-}
-
-// heatTrack marks a lane cell whose bucket exists and is zero. It is deliberately
-// NOT the bottom rung of the ramp: an idle bucket and a missing one are different
-// facts, so the track shows where the lane runs and a gap leaves it blank. It
-// sits below the first rung in density, which keeps the whole ladder monotone:
-// hole, track, then the six rungs.
-const heatTrack = '·'
-
-// heatRungFor maps a fraction of a lane's own peak onto a rung. Any non-zero
-// value reaches at least the first rung - the smallest-honest-mark rule - and a
-// value at the peak reaches the last, which is what makes per-lane scaling
-// legible rather than merely true.
-func heatRungFor(f float64) int {
-	if f <= 0 {
-		return -1
-	}
-	r := int(math.Ceil(f * float64(len(heatRamp))))
-	if r < 1 {
-		r = 1
-	}
-	if r > len(heatRamp) {
-		r = len(heatRamp)
-	}
-	return r - 1
-}
+// The ramp itself - heatRamp, heatTrack, heatRungFor, heatInk - lives in
+// heat.go: the KPI tiles and the sys gauges speak the same vocabulary in string
+// form, and one ladder shared beats two that drift.
 
 // heatGeom is the vertical layout of the lanes inside a pane: how tall each
 // lane's band is, where the first lane's rule sits, and - in the degraded modes
@@ -900,22 +860,6 @@ func drawHeatLanes(c Ctx, m *timeserieslinechart.Model, specs []CompSpec,
 		}
 	}
 	return true
-}
-
-// heatInk is the ramp style for a fraction of a lane's peak: the shade or block
-// glyph plus whichever SGR attributes that rung carries. Any non-zero fraction
-// reaches the first rung, so an active bucket is never painted as an idle one -
-// the smallest honest mark, now that there is no height left to quantize away.
-func heatInk(base lipgloss.Style, frac float64) (rune, lipgloss.Style) {
-	rung := heatRamp[heatRungFor(frac)]
-	s := base
-	if rung.faint {
-		s = s.Faint(true)
-	}
-	if rung.bold {
-		s = s.Bold(true)
-	}
-	return rung.glyph, s
 }
 
 // fillHeatSlab paints one bucket's whole band: the same glyph and style on every

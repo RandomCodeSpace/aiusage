@@ -9,7 +9,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
-	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
 
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
@@ -20,20 +19,10 @@ import (
 // ntcharts directly. Trend series names, colors and order come from Ctx.Comp
 // (the component token model in components.go).
 
-// newColumnSparkline uses solid block columns for a self-scaled magnitude row
-// (reads better at h=1 for KPI tiles).
-func newColumnSparkline(values []float64, w, h int, style lipgloss.Style) string {
-	if w < 1 {
-		w = 1
-	}
-	if h < 1 {
-		h = 1
-	}
-	sl := sparkline.New(w, h, sparkline.WithStyle(style))
-	sl.PushAll(values)
-	sl.Draw()
-	return sl.View()
-}
+// Every one-row series on these surfaces is a heat strip (heat.go): the column
+// sparkline that used to draw them encoded magnitude as a height, which is the
+// one channel the hero's lanes deliberately gave up. Two encodings of the same
+// quantity on one screen is a reading error waiting to happen.
 
 // heroBody renders the shared token trend used by Overview, Timeline and the
 // per-entity preview cards: input, output, cache-read and cache-creation as four
@@ -180,9 +169,11 @@ func clearTrendHighlights(t *timeserieslinechart.Model, times []time.Time, scrub
 	}
 }
 
-// trendStrip is the small-pane fallback: one self-scaled sparkline row per series
+// trendStrip is the small-pane fallback: one self-scaled heat row per series
 // when there is vertical room, else a single-line per-series numeric readout. It
-// never shows a total.
+// never shows a total. The rows are the hero's lanes at one row each - same
+// ramp, same per-series scaling, same hole/track/rung ladder - so degrading to
+// this strip changes the size of the picture and not its language.
 func trendStrip(c Ctx, buckets []store.Bucket, w, h int) string {
 	if h >= len(c.Comp) {
 		const lbl = 9 // glyph + space + short(6) + space
@@ -198,7 +189,7 @@ func trendStrip(c Ctx, buckets []store.Bucket, w, h int) string {
 			}
 			label := s.Glyph + " " + padRightLocal(s.Short, 6) + " "
 			st := c.compStyle(s)
-			rows = append(rows, st.Render(label)+newColumnSparkline(vals, sw, 1, st))
+			rows = append(rows, st.Render(label)+heatStrip(c, vals, sw, heatPeak(vals), heatConstInk(st)))
 		}
 		return strings.Join(rows, "\n")
 	}

@@ -23,10 +23,17 @@ func sysTestCtx() Ctx {
 }
 
 func sysTestGauges() []SysGauge {
+	hist := func(v float64) []float64 {
+		out := make([]float64, 24)
+		for i := range out {
+			out[i] = v
+		}
+		return out
+	}
 	return []SysGauge{
-		{Label: "cpu", Frac: 0.38, Text: "0.8/2 cpu", Known: true},
-		{Label: "mem", Frac: 0.72, Text: "2.9G/4.0G", Known: true},
-		{Label: "disk", Frac: 0.93, Text: "28G/30G", Known: true},
+		{Label: "cpu", Frac: 0.38, Text: "0.8/2 cpu", Known: true, History: hist(0.38)},
+		{Label: "mem", Frac: 0.72, Text: "2.9G/4.0G", Known: true, History: hist(0.72)},
+		{Label: "disk", Frac: 0.93, Text: "28G/30G", Known: true, History: hist(0.93)},
 	}
 }
 
@@ -44,7 +51,8 @@ func TestSysStripNeverOverflows(t *testing.T) {
 }
 
 // TestSysStripUnknownPlaceholder: an unknown gauge (CPU before its 2nd sample)
-// renders a muted "…" rather than a misleading 0%.
+// renders a muted "…" rather than a misleading 0%, and paints no heat at all -
+// an unread resource is a hole, not an idle one.
 func TestSysStripUnknownPlaceholder(t *testing.T) {
 	c := sysTestCtx()
 	g := []SysGauge{{Label: "cpu", Known: false}}
@@ -54,6 +62,81 @@ func TestSysStripUnknownPlaceholder(t *testing.T) {
 	}
 	if strings.Contains(out, "0%") {
 		t.Errorf("unknown gauge must not show a misleading 0%%, got %q", out)
+	}
+	if strings.ContainsAny(out, "░▒▓█·") {
+		t.Errorf("unknown gauge painted heat cells, got %q", out)
+	}
+}
+
+// TestSysStripHeatIsAbsolute: the strips are read against the resource's own
+// ceiling, never self-scaled. A busy gauge is hot and a quiet one is cool at the
+// same instant, which is exactly what per-strip scaling would destroy.
+func TestSysStripHeatIsAbsolute(t *testing.T) {
+	c := sysTestCtx()
+	g := []SysGauge{
+		{Label: "cpu", Frac: 0.05, Known: true, History: []float64{0.05, 0.05}},
+		{Label: "mem", Frac: 0.93, Known: true, History: []float64{0.93, 0.93}},
+	}
+	out := ansiSys.ReplaceAllString(SysStrip(c, g, 80), "")
+	cpu, mem, ok := strings.Cut(out, "mem")
+	if !ok {
+		t.Fatalf("strip did not render both gauges: %q", out)
+	}
+	if strings.ContainsAny(cpu, "▓█") {
+		t.Errorf("a 5%% cpu painted a hot rung: %q", cpu)
+	}
+	if !strings.Contains(mem, "█") {
+		t.Errorf("a 93%% mem did not reach the top rung: %q", mem)
+	}
+}
+
+// TestSysStripHoleVsZero: a strip narrower than its history is full, a young one
+// leaves the OLD side blank, and a genuinely zero sample paints the track mark.
+// Three different facts, three different marks.
+func TestSysStripHoleVsZero(t *testing.T) {
+	c := sysTestCtx()
+	g := []SysGauge{{Label: "cpu", Frac: 0, Known: true, History: []float64{0, 0}}}
+	out := ansiSys.ReplaceAllString(SysStrip(c, g, 40), "")
+	if !strings.Contains(out, "··") {
+		t.Errorf("zero samples should paint the track mark, got %q", out)
+	}
+	if strings.ContainsAny(out, "░▒▓█") {
+		t.Errorf("zero samples painted a rung, got %q", out)
+	}
+	if !strings.Contains(out, "▕ ") {
+		t.Errorf("a two-sample history should leave holes on the old side, got %q", out)
+	}
+}
+
+// TestSysStripRollsWithHistory: the newest sample sits at the RIGHT edge of the
+// strip, beside the live percentage - btop's arrangement, and the only one where
+// the number and the cell next to it are the same reading.
+func TestSysStripRollsWithHistory(t *testing.T) {
+	c := sysTestCtx()
+	hist := make([]float64, 60)
+	for i := range hist {
+		hist[i] = float64(i) / float64(len(hist)-1) // a 0 -> 1 ramp
+	}
+	g := []SysGauge{{Label: "cpu", Frac: 1, Known: true, History: hist}}
+	out := ansiSys.ReplaceAllString(SysStrip(c, g, 40), "")
+	strip := out[strings.Index(out, "▕")+len("▕") : strings.Index(out, "▏")]
+	runes := []rune(strip)
+	if len(runes) < 4 {
+		t.Fatalf("strip too short to read: %q", strip)
+	}
+	if got := runes[len(runes)-1]; got != '█' {
+		t.Errorf("newest (100%%) cell = %q, want █ at the right edge", got)
+	}
+	// A ramp must be monotone in ink: no rung may be denser than a later one,
+	// and the oldest cell the window still shows must be cooler than the newest.
+	rank := map[rune]int{'·': 0, '░': 1, '▒': 2, '▓': 3, '█': 4}
+	if rank[runes[0]] >= rank[runes[len(runes)-1]] {
+		t.Errorf("oldest cell %q is not cooler than the newest %q", runes[0], runes[len(runes)-1])
+	}
+	for i := 1; i < len(runes); i++ {
+		if rank[runes[i]] < rank[runes[i-1]] {
+			t.Fatalf("ramp went backwards at cell %d: %q", i, strip)
+		}
 	}
 }
 
