@@ -2,8 +2,8 @@ package tui
 
 import "github.com/RandomCodeSpace/aiusage/internal/tui/views"
 
-// View identifies the active tab. The four views form the command-center spine;
-// 1..4 (and clicking a top tab) select them directly, and Tab / Shift+Tab cycle
+// View identifies the active tab. The five views form the command-center spine;
+// 1..5 (and clicking a top tab) select them directly, and Tab / Shift+Tab cycle
 // through them. There is no within-view pane cycling: each view has exactly one
 // interactive surface, and every other panel is read-only.
 type View int
@@ -12,8 +12,9 @@ const (
 	ViewOverview View = iota
 	ViewByTool
 	ViewByModel
-	ViewBrowse // Sessions / Browse — the real drill list
-	viewCount  // sentinel: number of routed views (keep last)
+	ViewBrowse   // Sessions / Browse — the real drill list
+	ViewActivity // tool / skill / hook invocations, from the activity ledger
+	viewCount    // sentinel: number of routed views (keep last)
 )
 
 // viewMeta describes each view for the top tab strip: a glyph, a label and the
@@ -33,6 +34,7 @@ var viewList = []viewMeta{
 	{ViewByTool, "❖", "By Tool", "2"},
 	{ViewByModel, "⬡", "By Model", "3"},
 	{ViewBrowse, "≣", "Sessions", "4"},
+	{ViewActivity, "✦", "Activity", "5"},
 }
 
 // nextView / prevView cycle the active tab (Tab / Shift+Tab), wrapping around.
@@ -66,4 +68,5 @@ var _ = [...]int{
 	views.PaneOverviewKPIs, views.PaneOverviewHero, views.PaneOverviewTools,
 	views.PaneByXBars, views.PaneByXDetail,
 	views.PaneBrowseTable, views.PaneBrowsePreview,
+	views.PaneActivityRank, views.PaneActivityDetail,
 }

@@ -23,8 +23,16 @@ func (m Model) selectionRows() []store.Bucket {
 	}
 }
 
-// selectionCount returns the number of selectable bars in the current view.
-func (m Model) selectionCount() int { return len(m.selectionRows()) }
+// selectionCount returns the number of selectable rows in the current view.
+// Activity is counted off its own rows: they are activity buckets, a different
+// shape from the usage buckets selectionRows deals in, and folding the two into
+// one slice type would mean projecting one onto the other somewhere.
+func (m Model) selectionCount() int {
+	if m.view == ViewActivity {
+		return len(m.activity.Rows)
+	}
+	return len(m.selectionRows())
+}
 
 // currentSelection returns the active bar index for the current view.
 func (m Model) currentSelection() int {
@@ -33,6 +41,8 @@ func (m Model) currentSelection() int {
 		return m.byTool.Selected
 	case ViewByModel:
 		return m.byModel.Selected
+	case ViewActivity:
+		return m.activity.Selected
 	default:
 		return 0
 	}
@@ -59,6 +69,10 @@ func (m *Model) setSelection(i int) {
 	case ViewByModel:
 		m.byModel.Selected = i
 		m.syncByModelDetail()
+	case ViewActivity:
+		// No detail leg: the Activity detail card is a pure projection of the
+		// selected row, so moving the selection queries nothing, warm or cold.
+		m.activity.Selected = i
 	}
 }
 

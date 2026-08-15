@@ -61,5 +61,12 @@ func BarZone(name string) string { return "bar:" + name }
 // RowZone returns the click-zone id for a browse table row by index.
 func RowZone(idx int) string { return "row:" + strconv.Itoa(idx) }
 
+// ActZone returns the click-zone id for an Activity rank row by index. Activity
+// rows are keyed by index rather than by name (the way BarZone keys tool and
+// model bars) because a name is not unique on that tab: the same tool name is
+// invoked by more than one agent CLI, and two zones sharing an id would resolve
+// a press to whichever the manager happened to record last.
+func ActZone(idx int) string { return "act:" + strconv.Itoa(idx) }
+
 // CrumbZone returns the click-zone id for a breadcrumb at a drill depth.
 func CrumbZone(depth int) string { return "crumb:" + strconv.Itoa(depth) }

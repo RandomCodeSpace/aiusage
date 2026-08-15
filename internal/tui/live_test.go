@@ -136,7 +136,7 @@ func TestRefreshTickChangedMtimeReloads(t *testing.T) {
 // raceSource is a stateless DataSource that is safe for concurrent use. Its
 // bucket set orders differently under every sort mode, so each mode change
 // re-permutes — writes to — the slice being sorted.
-type raceSource struct{}
+type raceSource struct{ noActivity }
 
 func (raceSource) Summarize(_ context.Context, f store.Filter) (*store.Summary, error) {
 	if len(f.GroupBy) == 0 {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,6 +60,10 @@ func (m *Model) reloadWith(cacheOnlyDetail bool) {
 				m.loadBrowsePreview()
 			}
 		}
+	case ViewActivity:
+		// No detail twin: the Activity detail card projects the selected row, so
+		// there is nothing for a selection move to load (see setSelection).
+		m.loadActivity()
 	}
 	m.applyPaneFocus()
 }
@@ -235,6 +240,115 @@ func (m *Model) syncByModelDetail() {
 	} else {
 		m.detailWanted = true
 	}
+}
+
+// activityRankLimit caps the ranked page the Activity tab holds. The name
+// vocabulary is a long tail — every mcp__server__tool id an agent has ever
+// called is its own row — and the panel windows to what fits on screen anyway,
+// so the cap only bounds what is carried and re-sorted in memory. It is stated
+// in the panel's "1-12/143" readout, which is what keeps a capped list from
+// reading as the whole list.
+const activityRankLimit = 200
+
+// activityRankDims groups the ranking by the identity of an invocation: its
+// name, what kind of thing it is, and which agent CLI ran it. The tool belongs
+// in the key because the same name is invoked by more than one CLI ("Bash" is
+// claude-code's and opencode's), and merging those would attribute one tool's
+// calls to another's cost.
+var activityRankDims = []string{"name", "kind", "tool"}
+
+// loadActivity builds the Activity tab: the ranked invocation page, the kind
+// breakdown (which also carries the grand total the honesty footnote quantifies
+// against) and the per-bucket call counts behind the summary heat strip. Three
+// queries, all through the ctx-aware cached path, none of them repeated when
+// the tab is revisited inside one load generation.
+func (m *Model) loadActivity() {
+	now := m.qnow()
+	sp := m.span()
+
+	rows, err := m.data.ActivityRank(m.qctx(), now, sp, m.crumbs, activityRankDims, activityOrder(m.sort), activityRankLimit)
+	if err != nil {
+		m.err = err
+		return
+	}
+	kinds, err := m.data.ActivityGroup(m.qctx(), now, sp, m.crumbs, []string{"kind"})
+	if err != nil {
+		m.err = err
+		return
+	}
+	dim := timelineDim(sp.R)
+	calls, err := m.data.ActivityGroup(m.qctx(), now, sp, m.crumbs, []string{dim})
+	if err != nil {
+		m.err = err
+		return
+	}
+
+	rows = filterActivity(rows, m.filter)
+	if m.sort == SortName {
+		// The ranking metric decided WHICH rows came back (the cap is applied in
+		// SQL); the name mode only decides the order they are listed in. Sorting
+		// the page here rather than asking for a different one keeps that honest —
+		// the rows on screen are still the busiest ones.
+		rows = sortActivityByName(rows)
+	}
+
+	m.activity = views.ActivityData{
+		Rows:       rows,
+		Kinds:      kinds.Buckets,
+		Calls:      sortActivityBuckets(calls.Buckets, dim),
+		CallsDim:   dim,
+		Totals:     kinds.Totals,
+		Selected:   m.activity.Selected,
+		RangeLbl:   m.spanLabel(),
+		OrderLbl:   activityOrderLabel(m.sort),
+		Limit:      activityRankLimit,
+		ActivePane: views.PaneActivityRank,
+	}
+	if m.activity.Selected >= len(rows) || m.activity.Selected < 0 {
+		m.activity.Selected = 0
+	}
+}
+
+// filterActivity keeps rows whose invocation name contains the
+// (case-insensitive) filter substring — the same contract filterBuckets applies
+// to a grouping dimension.
+func filterActivity(rows []store.ActivityBucket, filter string) []store.ActivityBucket {
+	if filter == "" {
+		return rows
+	}
+	lf := strings.ToLower(filter)
+	out := make([]store.ActivityBucket, 0, len(rows))
+	for _, b := range rows {
+		if strings.Contains(strings.ToLower(b.Keys["name"]), lf) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// sortActivityByName returns the page ordered by invocation name, then tool, on
+// a copy: the slice handed back by ActivityRank is the cached one, and the
+// cache is shared with the UI thread.
+func sortActivityByName(rows []store.ActivityBucket) []store.ActivityBucket {
+	out := append([]store.ActivityBucket(nil), rows...)
+	slices.SortStableFunc(out, func(x, y store.ActivityBucket) int {
+		if c := strings.Compare(x.Keys["name"], y.Keys["name"]); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Keys["tool"], y.Keys["tool"])
+	})
+	return out
+}
+
+// sortActivityBuckets orders time-keyed activity buckets ascending by their
+// (lexically sortable) bucket key, on a copy — same cache-sharing contract as
+// sortActivityByName.
+func sortActivityBuckets(rows []store.ActivityBucket, dim string) []store.ActivityBucket {
+	out := append([]store.ActivityBucket(nil), rows...)
+	slices.SortStableFunc(out, func(x, y store.ActivityBucket) int {
+		return strings.Compare(x.Keys[dim], y.Keys[dim])
+	})
+	return out
 }
 
 // loadBrowseBase builds the drill list at the current depth (no preview leg —

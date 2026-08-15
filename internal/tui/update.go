@@ -113,6 +113,9 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.View4):
 		cmd := m.setView(ViewBrowse)
 		return m, cmd
+	case key.Matches(msg, m.keys.View5):
+		cmd := m.setView(ViewActivity)
+		return m, cmd
 
 	case key.Matches(msg, m.keys.Range):
 		return m.cycleRange()
@@ -200,7 +203,7 @@ func (m *Model) handleHome() {
 	case ViewBrowse:
 		m.browse.SetCursor(0)
 		m.syncBrowsePreview()
-	case ViewByTool, ViewByModel:
+	case ViewByTool, ViewByModel, ViewActivity:
 		m.setSelection(0)
 	}
 }
@@ -219,7 +222,7 @@ func (m *Model) handleEnd() {
 	case ViewBrowse:
 		m.browse.SetCursor(m.browseRowCount() - 1)
 		m.syncBrowsePreview()
-	case ViewByTool, ViewByModel:
+	case ViewByTool, ViewByModel, ViewActivity:
 		m.setSelection(m.selectionCount() - 1)
 	}
 }
@@ -234,7 +237,7 @@ func (m Model) forward(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.browse, cmd = m.browse.Update(msg)
 		m.syncBrowsePreview()
 		m.rowChosen = false // moved by key, not by a press (see Model.rowChosen)
-	case ViewByTool, ViewByModel:
+	case ViewByTool, ViewByModel, ViewActivity:
 		m.moveSelectionFromKey(msg)
 		m.rowChosen = false
 	}

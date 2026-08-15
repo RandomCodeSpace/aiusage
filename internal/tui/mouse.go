@@ -144,6 +144,17 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case strings.HasPrefix(zid, "act:"):
+		// The Activity tab is flat — an invocation name has nothing under it in
+		// either ledger's drill order — so a press selects and that is all. There
+		// is deliberately no second-press branch here: an affordance that acts on
+		// the second press when the first did nothing visible would be advertising
+		// a descent that does not exist.
+		if idx, err := strconv.Atoi(strings.TrimPrefix(zid, "act:")); err == nil {
+			m.setSelection(idx)
+		}
+		return m, nil
+
 	case strings.HasPrefix(zid, "row:"):
 		idx, err := strconv.Atoi(strings.TrimPrefix(zid, "row:"))
 		if err != nil {
@@ -229,7 +240,7 @@ func (m Model) focusedWheelTarget() wheelTarget {
 	switch m.view {
 	case ViewOverview:
 		return wheelScrub
-	case ViewByTool, ViewByModel:
+	case ViewByTool, ViewByModel, ViewActivity:
 		return wheelBars
 	case ViewBrowse:
 		return wheelTable
@@ -318,6 +329,10 @@ func (m Model) itemZoneCandidates() []string {
 	case ViewBrowse:
 		for i := 0; i < m.browseRowCount(); i++ {
 			out = append(out, views.RowZone(i))
+		}
+	case ViewActivity:
+		for i := range m.activity.Rows {
+			out = append(out, views.ActZone(i))
 		}
 	}
 	return out

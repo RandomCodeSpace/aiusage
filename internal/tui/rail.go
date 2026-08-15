@@ -17,12 +17,42 @@ import (
 // the focus bar, the others a blank cell of the same width — so the strip never
 // reflows as the selection moves, and WHICH tab is active survives a monochrome
 // terminal, where the accent paint does not. Each tab is a click zone.
+//
+// The strip has two rungs, picked by width the way the header picks its range
+// chip. Labelled chips are the wide form; below that every chip drops to its
+// glyph and the ACTIVE tab's name is appended once. The rung exists because the
+// caller MaxWidth-clamps this row: an overflowing strip does not merely look
+// cut, it loses the clipped tabs' zone markers, so the last tab would stop
+// being clickable at exactly the widths where the fifth one no longer fits.
 func (m Model) renderTabStrip() string {
-	var tabs []string
+	full := m.tabChips(true)
+	// The strip is rendered inside the header bar's Padding(0,1).
+	budget := m.frameW() - 2
+	if lipgloss.Width(full) <= budget {
+		return full
+	}
+	strip := m.tabChips(false)
 	for _, meta := range viewList {
-		// Full label (e.g. "◧ Overview") — the wide strip has room, so no cryptic
-		// abbreviations. minTabStripW (64) leaves margin for all four.
-		body := meta.glyph + " " + meta.label
+		if meta.v != m.view {
+			continue
+		}
+		name := "  " + lipgloss.NewStyle().Foreground(m.th.Text).Bold(true).Render(meta.glyph+" "+meta.label)
+		if lipgloss.Width(strip)+lipgloss.Width(name) <= budget {
+			strip += name
+		}
+		break
+	}
+	return strip
+}
+
+// tabChips renders the chip row, with or without the labels.
+func (m Model) tabChips(labels bool) string {
+	tabs := make([]string, 0, len(viewList))
+	for _, meta := range viewList {
+		body := meta.glyph
+		if labels {
+			body += " " + meta.label
+		}
 		active := meta.v == m.view
 		tone := views.ChipCard
 		fg := m.th.Muted

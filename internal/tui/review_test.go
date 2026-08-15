@@ -14,7 +14,7 @@ func TestTabCyclesAllViews(t *testing.T) {
 		t.Fatalf("initial view = %v, want Overview", m.view)
 	}
 	// Forward through every tab and back to the start.
-	want := []View{ViewByTool, ViewByModel, ViewBrowse, ViewOverview}
+	want := []View{ViewByTool, ViewByModel, ViewBrowse, ViewActivity, ViewOverview}
 	for i, w := range want {
 		m = send(m, keyMsg("tab"))
 		if m.view != w {
@@ -23,8 +23,8 @@ func TestTabCyclesAllViews(t *testing.T) {
 	}
 	// Shift+Tab walks back one.
 	m = send(m, keyMsg("shift+tab"))
-	if m.view != ViewBrowse {
-		t.Fatalf("after Shift+Tab view = %v, want Sessions(Browse)", m.view)
+	if m.view != ViewActivity {
+		t.Fatalf("after Shift+Tab view = %v, want Activity", m.view)
 	}
 }
 

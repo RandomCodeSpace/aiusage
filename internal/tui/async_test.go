@@ -189,6 +189,20 @@ func (b *blockingSource) Summarize(ctx context.Context, _ store.Filter) (*store.
 	return nil, ctx.Err()
 }
 
+// The activity half blocks on the same terms: whichever query a flight opens
+// first, the cancellation has to reach it.
+func (b *blockingSource) SummarizeActivity(ctx context.Context, _ store.ActivityFilter) (*store.ActivitySummary, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingSource) TopActivity(ctx context.Context, _ store.ActivityFilter, _ store.ActivityOrder, _ int) ([]store.ActivityBucket, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 // TestSupersededFlightCancelsRunningQuery proves the flight context reaches the
 // DataSource: a query already executing when the next generation dispatches is
 // cancelled mid-run, not merely ignored on arrival.
@@ -257,6 +271,7 @@ func TestRefreshTickWhileLoadingStillDispatches(t *testing.T) {
 // gateSource blocks its first Summarize until released, so a test can hold a
 // query "in flight" across an Invalidate.
 type gateSource struct {
+	noActivity
 	release chan struct{}
 	calls   atomic.Int64
 }

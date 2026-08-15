@@ -187,9 +187,13 @@ const (
 	SortTotal Sort = iota
 	SortEvents
 	SortName
+	// SortCost orders by stamped cost. It exists because the Activity tab ranks
+	// invocations by spend and the sort key is shared state — one cycle drives
+	// every view, so a mode a view needs has to be on the cycle.
+	SortCost
 )
 
-var sortOrder = []Sort{SortTotal, SortEvents, SortName}
+var sortOrder = []Sort{SortTotal, SortEvents, SortName, SortCost}
 
 // Label returns the human label for a sort mode.
 func (s Sort) Label() string {
@@ -198,6 +202,8 @@ func (s Sort) Label() string {
 		return "total"
 	case SortEvents:
 		return "events"
+	case SortCost:
+		return "cost"
 	default:
 		return "name"
 	}
@@ -225,10 +231,19 @@ type Crumb struct {
 }
 
 // DataSource is the read-only query surface the TUI needs from a store. It is an
-// interface (not *store.SQLite) so tests can substitute a fake. It is Summarize
-// only: the dashboard renders aggregates exclusively, never raw event lists.
+// interface (not *store.SQLite) so tests can substitute a fake. It is aggregates
+// only: the dashboard renders summaries exclusively, never raw event lists —
+// which is why ListEvents / ListActivity are absent from both ledgers' halves.
 type DataSource interface {
 	Summarize(ctx context.Context, f store.Filter) (*store.Summary, error)
+
+	// SummarizeActivity and TopActivity are the activity ledger's half, read by
+	// the Activity tab. They are on the same interface rather than an optional
+	// one a type assertion sniffs for: a source that cannot answer them would
+	// leave that tab rendering "no rows" over a populated ledger, and a missing
+	// method is a compile error where a failed assertion is a silent lie.
+	SummarizeActivity(ctx context.Context, f store.ActivityFilter) (*store.ActivitySummary, error)
+	TopActivity(ctx context.Context, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.ActivityBucket, error)
 }
 
 // compile-time guarantee that a *store.Store satisfies DataSource.
@@ -245,43 +260,47 @@ var _ DataSource = (store.Store)(nil)
 // long-running dashboard.
 const summaryCacheCap = 512
 
-// summaryCache is a minimal LRU over cache keys. Not safe for concurrent use on
-// its own — every access happens under Data.mu.
-type summaryCache struct {
+// lru is a minimal LRU over cache keys. Not safe for concurrent use on its own —
+// every access happens under Data.mu. It is generic over the cached value
+// because the two ledgers answer with different shapes (a usage summary, an
+// activity ranking) and a cache holding `any` would hand every reader a type
+// assertion to get wrong.
+type lru[T any] struct {
 	cap int
 	ll  *list.List               // front = most recently used
-	m   map[string]*list.Element // key → element holding *summaryEntry
+	m   map[string]*list.Element // key → element holding *lruEntry[T]
 }
 
-type summaryEntry struct {
+type lruEntry[T any] struct {
 	key string
-	sum *store.Summary
+	val T
 }
 
-func newSummaryCache(capacity int) *summaryCache {
-	return &summaryCache{cap: capacity, ll: list.New(), m: make(map[string]*list.Element)}
+func newLRU[T any](capacity int) *lru[T] {
+	return &lru[T]{cap: capacity, ll: list.New(), m: make(map[string]*list.Element)}
 }
 
-func (c *summaryCache) get(k string) (*store.Summary, bool) {
+func (c *lru[T]) get(k string) (T, bool) {
 	e, ok := c.m[k]
 	if !ok {
-		return nil, false
+		var zero T
+		return zero, false
 	}
 	c.ll.MoveToFront(e)
-	return e.Value.(*summaryEntry).sum, true
+	return e.Value.(*lruEntry[T]).val, true
 }
 
-func (c *summaryCache) put(k string, s *store.Summary) {
+func (c *lru[T]) put(k string, v T) {
 	if e, ok := c.m[k]; ok {
 		c.ll.MoveToFront(e)
-		e.Value.(*summaryEntry).sum = s
+		e.Value.(*lruEntry[T]).val = v
 		return
 	}
-	c.m[k] = c.ll.PushFront(&summaryEntry{key: k, sum: s})
+	c.m[k] = c.ll.PushFront(&lruEntry[T]{key: k, val: v})
 	if c.ll.Len() > c.cap {
 		e := c.ll.Back()
 		c.ll.Remove(e)
-		delete(c.m, e.Value.(*summaryEntry).key)
+		delete(c.m, e.Value.(*lruEntry[T]).key)
 	}
 }
 
@@ -301,7 +320,13 @@ type Data struct {
 	src   DataSource
 	now   func() time.Time
 	mu    sync.Mutex
-	cache *summaryCache
+	cache *lru[*store.Summary]
+	// act caches the activity ledger's grouped summaries and rank is its
+	// ranking twin. They are separate instances, not one cache of `any`: the
+	// two answer different questions and their keys are built differently (a
+	// ranking key carries the metric and the cap).
+	act  *lru[*store.ActivitySummary]
+	rank *lru[[]store.ActivityBucket]
 }
 
 // NewData builds a Data over src.
@@ -309,18 +334,22 @@ func NewData(src DataSource) *Data {
 	return &Data{
 		src:   src,
 		now:   time.Now,
-		cache: newSummaryCache(summaryCacheCap),
+		cache: newLRU[*store.Summary](summaryCacheCap),
+		act:   newLRU[*store.ActivitySummary](summaryCacheCap),
+		rank:  newLRU[[]store.ActivityBucket](summaryCacheCap),
 	}
 }
 
-// Invalidate clears the cache (used on refresh). Swapping the cache instance —
+// Invalidate clears the caches (used on refresh). Swapping the cache instances —
 // rather than deleting keys — is load-bearing: in-flight loads write into the
 // instance they captured before querying, so their post-invalidation writes
 // land in the abandoned cache and are discarded.
 func (d *Data) Invalidate() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.cache = newSummaryCache(summaryCacheCap)
+	d.cache = newLRU[*store.Summary](summaryCacheCap)
+	d.act = newLRU[*store.ActivitySummary](summaryCacheCap)
+	d.rank = newLRU[[]store.ActivityBucket](summaryCacheCap)
 }
 
 // filterFor builds a store.Filter from a range, drill stack and group-by dims.
@@ -479,6 +508,148 @@ func (d *Data) GroupByDims(ctx context.Context, now time.Time, sp Span, crumbs [
 	return copySummary(s), nil
 }
 
+// activityFilterFor builds a store.ActivityFilter from the same window + drill
+// stack every usage query keys off, so the Activity tab shows the invocations
+// that happened inside exactly the window the rest of the dashboard is showing.
+// The crumb dimensions the activity ledger has no column for are dropped by
+// applyActivityCrumb rather than silently ignored — see there.
+func (d *Data) activityFilterFor(now time.Time, sp Span, crumbs []Crumb, groupBy []string) store.ActivityFilter {
+	since, until := sp.Window(now)
+	f := store.ActivityFilter{Since: since, Until: until, GroupBy: groupBy}
+	for _, c := range crumbs {
+		applyActivityCrumb(&f, c)
+	}
+	return f
+}
+
+// applyActivityCrumb appends a drill crumb's value to the matching activity
+// filter dimension. Every dimension the Browse drill can produce (tool, model,
+// project, session) is a column on activity_events too, so a crumb carried onto
+// this tab always narrows it — an unknown dimension would leave the filter wide
+// open, which is why the drill order and this switch have to stay in step.
+func applyActivityCrumb(f *store.ActivityFilter, c Crumb) {
+	switch c.Dim {
+	case "tool":
+		f.Tools = append(f.Tools, c.Value)
+	case "model":
+		f.Models = append(f.Models, c.Value)
+	case "project":
+		f.Projects = append(f.Projects, c.Value)
+	case "session":
+		f.Sessions = append(f.Sessions, c.Value)
+	}
+}
+
+// activityKey derives a stable cache key from an activity filter, with the same
+// layout rules as cacheKey: two timestamps then each list comma-joined. The
+// dimension order matters (it is the grouping), so the lists are never sorted.
+func activityKey(f store.ActivityFilter) string {
+	var scratch [cacheKeyBuf]byte
+	b := scratch[:0]
+	b = f.Since.AppendFormat(b, time.RFC3339)
+	b = append(b, '|')
+	b = f.Until.AppendFormat(b, time.RFC3339)
+	for _, list := range [...][]string{f.GroupBy, f.Tools, f.Kinds, f.Names, f.Projects, f.Sessions, f.Models} {
+		b = append(b, '|')
+		for i, v := range list {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			b = append(b, v...)
+		}
+	}
+	return string(b)
+}
+
+// ActivityGroup returns the activity summary grouped by dims for the current
+// window and drill stack. Like summarize it serves a cache hit whatever ctx
+// says and bails on a MISS under a cancelled context, so a superseded flight
+// stops at this stage boundary instead of opening a join over both ledgers
+// nobody will read.
+func (d *Data) ActivityGroup(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dims []string) (*store.ActivitySummary, error) {
+	f := d.activityFilterFor(now, sp, crumbs, dims)
+	k := activityKey(f)
+	d.mu.Lock()
+	cache := d.act
+	s, ok := cache.get(k)
+	d.mu.Unlock()
+	if ok {
+		return s, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s, err := d.src.SummarizeActivity(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	cache.put(k, s) // the instance captured before the query (see summarize)
+	d.mu.Unlock()
+	return s, nil
+}
+
+// ActivityRank returns the top `limit` activity buckets grouped by dims and
+// ranked by one metric, ordering and capping in SQL. The metric and the cap are
+// part of the cache key: two rankings of the same window by different metrics
+// are different answers, and the cap decides which rows came back.
+func (d *Data) ActivityRank(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dims []string, by store.ActivityOrder, limit int) ([]store.ActivityBucket, error) {
+	f := d.activityFilterFor(now, sp, crumbs, dims)
+	k := activityKey(f) + "|" + string(by) + "|" + strconv.Itoa(limit)
+	d.mu.Lock()
+	cache := d.rank
+	rows, ok := cache.get(k)
+	d.mu.Unlock()
+	if ok {
+		return rows, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := d.src.TopActivity(ctx, f, by, limit)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	cache.put(k, rows)
+	d.mu.Unlock()
+	return rows, nil
+}
+
+// activityOrder maps the shared sort mode onto the activity ledger's ranking
+// metric. "events" is calls (one activity row IS one invocation), "total" is
+// attributed tokens and "cost" is attributed cost. "name" has no SQL ranking:
+// it takes the call ranking and re-orders the returned page alphabetically, so
+// the rows on screen are still the busiest ones, just listed by name.
+func activityOrder(s Sort) store.ActivityOrder {
+	switch s {
+	case SortEvents:
+		return store.ActivityByCalls
+	case SortCost:
+		return store.ActivityByCost
+	case SortTotal:
+		return store.ActivityByTokens
+	default:
+		return store.ActivityByCalls
+	}
+}
+
+// activityOrderLabel names the metric a ranking is ordered by, for the panel
+// title. It says what the list IS, which the sort chip alone does not: "name"
+// ranks by calls and then sorts the page.
+func activityOrderLabel(s Sort) string {
+	switch s {
+	case SortEvents:
+		return "calls"
+	case SortCost:
+		return "cost"
+	case SortTotal:
+		return "tokens"
+	default:
+		return "name"
+	}
+}
+
 // DrillDim returns the grouping dimension for a given drill depth (0-based).
 func DrillDim(depth int) (string, bool) {
 	if depth < 0 || depth >= len(drillDims) {
@@ -589,6 +760,10 @@ func sortBuckets(b []store.Bucket, dim string, srt Sort) {
 	case SortEvents:
 		slices.SortStableFunc(b, func(x, y store.Bucket) int {
 			return cmp.Compare(y.Events, x.Events)
+		})
+	case SortCost:
+		slices.SortStableFunc(b, func(x, y store.Bucket) int {
+			return cmp.Compare(y.CostMicroUSD, x.CostMicroUSD)
 		})
 	default:
 		slices.SortStableFunc(b, func(x, y store.Bucket) int {

@@ -1,8 +1,8 @@
 // Package tui implements the read-only Bubble Tea terminal UI for aiusage. The
-// root model (Model) routes four views — Overview, By-Tool, By-Model,
-// Sessions/Browse — with a drill-down stack, a breadcrumb, a scrub crosshair and
-// full keyboard + mouse navigation, querying the store through a small cached
-// data layer. It never writes to the store.
+// root model (Model) routes five views — Overview, By-Tool, By-Model,
+// Sessions/Browse and Activity — with a drill-down stack, a breadcrumb, a scrub
+// crosshair and full keyboard + mouse navigation, querying the store through a
+// small cached data layer. It never writes to the store.
 package tui
 
 import (
@@ -103,6 +103,7 @@ type Model struct {
 	byTool   views.ByToolData
 	byModel  views.ByModelData
 	browse   views.Browse
+	activity views.ActivityData
 
 	help     help.Model
 	showHelp bool
@@ -260,6 +261,7 @@ func NewModel(src DataSource, opt Options) Model {
 		heroMemo:      views.NewHeroMemo(),
 	}
 	mdl.syncStepKeys()
+	mdl.syncViewKeys()
 	return mdl
 }
 
@@ -276,6 +278,16 @@ func (m Model) spanLabel() string { return m.span().Label(m.qnow()) }
 // choose between, widest first (see Span.labelForms). The header picks by
 // width; nothing else has a reason to see the shorter forms.
 func (m Model) spanLabels() []string { return m.span().labelForms(m.qnow()) }
+
+// syncViewKeys keeps the per-view bindings honest, on the same terms as
+// syncStepKeys: Enter descends on every tab that has something under its rows,
+// and the Activity tab does not — an invocation name is not a dimension either
+// ledger drills on. A disabled binding is skipped by both key.Matches and the
+// help renderer, so the footer stops advertising a drill exactly where there is
+// none to advertise.
+func (m *Model) syncViewKeys() {
+	m.keys.Enter.SetEnabled(m.view != ViewActivity)
+}
 
 // syncStepKeys keeps the [ / ] bindings honest: they are advertised only where
 // they can act — never on the open-ended "all" range, and ] only while the
@@ -372,6 +384,7 @@ func (m *Model) toggleHelp() {
 // load applies — no store queries run on the UI thread here.
 func (m *Model) setView(v View) tea.Cmd {
 	m.view = v
+	m.syncViewKeys()
 	m.persistUI()
 	return m.startLoad()
 }
@@ -384,6 +397,7 @@ func (m *Model) applyPaneFocus() {
 	m.byTool.ActivePane = views.PaneByXBars
 	m.byModel.ActivePane = views.PaneByXBars
 	m.browse.SetFocusedPane(views.PaneBrowseTable)
+	m.activity.ActivePane = views.PaneActivityRank
 	m.tlData.Focused = true
 }
 
@@ -413,6 +427,7 @@ func (m Model) drillIntoBrowse(dim, val string) (tea.Model, tea.Cmd) {
 	}
 	m.crumbs = append(m.crumbs, Crumb{Dim: dim, Value: val})
 	m.view = ViewBrowse
+	m.syncViewKeys()
 	cmd := m.startLoad()
 	return m, cmd
 }

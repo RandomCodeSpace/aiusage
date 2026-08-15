@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -88,6 +90,106 @@ func fakeCross(primary, secondary string) []store.Bucket {
 		}
 	}
 	return out
+}
+
+// fakeActivity returns canned activity buckets for a grouping. The proportions
+// mirror the real ledger's awkward shape rather than a tidy one: codex's calls
+// are the largest block and NONE of them join a usage row (its tokens live in
+// unrelated records), so every assertion about unattributed volume is made
+// against data that actually has some.
+func fakeActivity(dims []string) []store.ActivityBucket {
+	mk := func(name, kind, tool string, calls, tokens, cost, unattributed int64) store.ActivityBucket {
+		keys := map[string]string{"name": name, "kind": kind, "tool": tool}
+		b := store.ActivityBucket{
+			Keys:              keys,
+			OrderedKeys:       dims,
+			Calls:             calls,
+			Sessions:          calls / 4,
+			AttributedInput:   tokens / 4,
+			AttributedOutput:  tokens / 4,
+			AttributedTotal:   tokens,
+			UnattributedCalls: unattributed,
+		}
+		b.AttributedCostMicroUSD = cost
+		return b
+	}
+	switch strings.Join(dims, ",") {
+	case "name,kind,tool":
+		return []store.ActivityBucket{
+			mk("exec", "tool", "codex", 790, 0, 0, 790),
+			mk("Bash", "tool", "claude-code", 408, 2_000_000, 3_400_000, 0),
+			mk("mcp__github__create_pull_request", "tool", "claude-code", 120, 900_000, 1_100_000, 12),
+			mk("code-review", "skill", "claude-code", 8, 400_000, 500_000, 0),
+			mk("PreToolUse", "hook", "claude-code", 213, 0, 0, 213),
+		}
+	case "kind":
+		return []store.ActivityBucket{
+			{Keys: map[string]string{"kind": "hook"}, OrderedKeys: dims, Calls: 213, UnattributedCalls: 213},
+			{Keys: map[string]string{"kind": "skill"}, OrderedKeys: dims, Calls: 8, AttributedTotal: 400_000, AttributedCostMicroUSD: 500_000},
+			{Keys: map[string]string{"kind": "tool"}, OrderedKeys: dims, Calls: 1318, AttributedTotal: 2_900_000, AttributedCostMicroUSD: 4_500_000, UnattributedCalls: 802, UnpricedCalls: 12},
+		}
+	case "day":
+		return []store.ActivityBucket{
+			{Keys: map[string]string{"day": "2026-05-28"}, OrderedKeys: dims, Calls: 700},
+			{Keys: map[string]string{"day": "2026-05-29"}, OrderedKeys: dims, Calls: 839},
+		}
+	case "hour":
+		return []store.ActivityBucket{
+			{Keys: map[string]string{"hour": "2026-05-29 13"}, OrderedKeys: dims, Calls: 300},
+			{Keys: map[string]string{"hour": "2026-05-29 14"}, OrderedKeys: dims, Calls: 539},
+		}
+	}
+	return nil
+}
+
+func (f *fakeData) SummarizeActivity(_ context.Context, fl store.ActivityFilter) (*store.ActivitySummary, error) {
+	f.summarizeCalls.Add(1)
+	buckets := fakeActivity(fl.GroupBy)
+	s := &store.ActivitySummary{GroupBy: fl.GroupBy, Buckets: buckets}
+	for _, b := range buckets {
+		s.Totals.Calls += b.Calls
+		s.Totals.AttributedInput += b.AttributedInput
+		s.Totals.AttributedOutput += b.AttributedOutput
+		s.Totals.AttributedTotal += b.AttributedTotal
+		s.Totals.AttributedCostMicroUSD += b.AttributedCostMicroUSD
+		s.Totals.UnattributedCalls += b.UnattributedCalls
+		s.Totals.UnpricedCalls += b.UnpricedCalls
+	}
+	s.Totals.Sessions = 12
+	return s, nil
+}
+
+func (f *fakeData) TopActivity(_ context.Context, fl store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.ActivityBucket, error) {
+	f.summarizeCalls.Add(1)
+	rows := append([]store.ActivityBucket(nil), fakeActivity(fl.GroupBy)...)
+	metric := func(b store.ActivityBucket) int64 {
+		switch by {
+		case store.ActivityByCost:
+			return b.AttributedCostMicroUSD
+		case store.ActivityByTokens:
+			return b.AttributedTotal
+		default:
+			return b.Calls
+		}
+	}
+	slices.SortStableFunc(rows, func(x, y store.ActivityBucket) int { return cmp.Compare(metric(y), metric(x)) })
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+// noActivity is the activity half of DataSource for fakes whose tests never
+// open the Activity tab: it answers empty, exactly as a database carrying no
+// activity rows would.
+type noActivity struct{}
+
+func (noActivity) SummarizeActivity(context.Context, store.ActivityFilter) (*store.ActivitySummary, error) {
+	return &store.ActivitySummary{}, nil
+}
+
+func (noActivity) TopActivity(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.ActivityBucket, error) {
+	return nil, nil
 }
 
 func (f *fakeData) Summarize(_ context.Context, fl store.Filter) (*store.Summary, error) {
@@ -305,7 +407,7 @@ func TestViewSwitching(t *testing.T) {
 	}
 
 	// Rendering every view must not panic and must be non-empty.
-	for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse} {
+	for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse, ViewActivity} {
 		m.view = v
 		m.reload()
 		if got := m.View().Content; got == "" {
@@ -317,7 +419,7 @@ func TestViewSwitching(t *testing.T) {
 func TestTabCyclesViews(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	// Tab now cycles the active tab forward through all views and wraps back.
-	want := []View{ViewByTool, ViewByModel, ViewBrowse, ViewOverview}
+	want := []View{ViewByTool, ViewByModel, ViewBrowse, ViewActivity, ViewOverview}
 	for i, w := range want {
 		m = send(m, keyMsg("tab"))
 		if m.view != w {
@@ -326,8 +428,8 @@ func TestTabCyclesViews(t *testing.T) {
 	}
 	// Shift+Tab walks back one tab.
 	m = send(m, keyMsg("shift+tab"))
-	if m.view != ViewBrowse {
-		t.Fatalf("shift+tab view = %v, want Sessions(Browse)", m.view)
+	if m.view != ViewActivity {
+		t.Fatalf("shift+tab view = %v, want Activity", m.view)
 	}
 }
 
@@ -442,7 +544,7 @@ func TestRangeAndSortCycle(t *testing.T) {
 		t.Fatalf("range change did not reset crumbs: %v", m.crumbs)
 	}
 
-	for _, want := range []Sort{SortEvents, SortName, SortTotal} {
+	for _, want := range []Sort{SortEvents, SortName, SortCost, SortTotal} {
 		m = step(t, m, keyMsg("s"))
 		if m.sort != want {
 			t.Fatalf("after 's' sort = %v, want %v", m.sort, want)

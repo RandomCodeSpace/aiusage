@@ -29,7 +29,7 @@ var ansiMono = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 func monoFrame(m Model) string { return ansiMono.ReplaceAllString(m.View().Content, "") }
 
 // emptySource is a DataSource with no rows at all, for the empty-state channel.
-type emptySource struct{}
+type emptySource struct{ noActivity }
 
 func (emptySource) Summarize(_ context.Context, fl store.Filter) (*store.Summary, error) {
 	return &store.Summary{GroupBy: fl.GroupBy}, nil

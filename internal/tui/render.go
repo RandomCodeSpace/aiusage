@@ -342,6 +342,8 @@ func (m Model) renderBody(lay views.Layout) string {
 		// load path where a stale value could outlive a drill.
 		b.SetDrillable(m.browseDrillable())
 		return b.View()
+	case ViewActivity:
+		return views.Activity(m.vctx, m.activity, lay)
 	}
 	return ""
 }

@@ -18,6 +18,7 @@ type KeyMap struct {
 	View2    key.Binding
 	View3    key.Binding
 	View4    key.Binding
+	View5    key.Binding
 	Filter   key.Binding
 	Sort     key.Binding
 	Range    key.Binding
@@ -70,6 +71,7 @@ func DefaultKeyMap() KeyMap {
 		View2: key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "by-tool")),
 		View3: key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "by-model")),
 		View4: key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "sessions")),
+		View5: key.NewBinding(key.WithKeys("5"), key.WithHelp("5", "activity")),
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "filter"),
@@ -128,7 +130,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // FullHelp implements help.KeyMap: the expanded multi-column overlay.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.View1, k.View2, k.View3, k.View4},
+		{k.View1, k.View2, k.View3, k.View4, k.View5},
 		{k.NextPane, k.PrevPane, k.Up, k.Down, k.Left, k.Right},
 		{k.Enter, k.Back, k.Top, k.Bottom},
 		{k.Range, k.StepBack, k.StepFwd, k.Pivot, k.Sort, k.Filter},
