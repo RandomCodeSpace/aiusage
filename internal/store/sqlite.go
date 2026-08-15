@@ -26,7 +26,7 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // SQLite is the concrete append-only store backed by modernc.org/sqlite.
 type SQLite struct {
@@ -351,7 +351,16 @@ func (s *SQLite) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp 
 // in first so an activity row's usage_dedup_key names a row that is already
 // present in the same transaction.
 func (s *SQLite) ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error) {
-	if len(events) == 0 && len(activity) == 0 && cp == nil {
+	return s.ApplyBatch(ctx, ObservationBatch{Events: events, Activity: activity, Checkpoint: cp})
+}
+
+// ApplyBatch appends usage events, activity rows AND skill contexts and upserts
+// the source checkpoint in ONE transaction — see Store.ApplyBatch. Events go in
+// first so the rows that name them by dedup key find them already present in the
+// same transaction.
+func (s *SQLite) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error) {
+	events, activity, skills, cp := b.Events, b.Activity, b.SkillContexts, b.Checkpoint
+	if len(events) == 0 && len(activity) == 0 && len(skills) == 0 && cp == nil {
 		return Applied{}, nil
 	}
 	if err := s.writable(); err != nil {
@@ -374,6 +383,11 @@ func (s *SQLite) ApplyObservation(ctx context.Context, events []model.UsageEvent
 	if err != nil {
 		return out, err
 	}
+	skillInserted, skillSkipErr, err := insertSkillContextsTx(ctx, tx, skills)
+	out.SkillContexts = skillInserted
+	if err != nil {
+		return out, err
+	}
 	if cp != nil {
 		if err := upsertCheckpoint(ctx, tx, *cp); err != nil {
 			return out, err
@@ -384,10 +398,15 @@ func (s *SQLite) ApplyObservation(ctx context.Context, events []model.UsageEvent
 	}
 	// A usage skip is reported ahead of an activity skip: the ledger is the
 	// authoritative half, and a caller that logs one line should see that one.
+	// The skill-context skip comes last for the same reason — it is the most
+	// derived of the three.
 	if skipErr != nil {
 		return out, skipErr
 	}
-	return out, actSkipErr
+	if actSkipErr != nil {
+		return out, actSkipErr
+	}
+	return out, skillSkipErr
 }
 
 // Checkpoint returns the stored incremental state for (tool, sourcePath), or

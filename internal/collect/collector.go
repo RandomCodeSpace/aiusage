@@ -81,6 +81,13 @@ type CycleStats struct {
 	ActivitySeen     int
 	ActivityInserted int
 
+	// SkillContextsSeen counts observed turns that ran inside a skill and
+	// SkillContextsInserted the new ones actually written. A context is one per
+	// USAGE EVENT, so these track the event counts rather than the activity
+	// ones: the turns a skill spent, not the calls it made.
+	SkillContextsSeen     int
+	SkillContextsInserted int
+
 	// RollupRebuilt reports that the pass found the derived rollup out
 	// of step with the ledger and rebuilt it before collecting. Expected once,
 	// on the first pass after the v4 migration; anywhere else it means a write
@@ -184,16 +191,18 @@ func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc ada
 				evCp = nil
 			}
 
-			// ApplyObservation commits per-row: a non-nil error may accompany a
+			// ApplyBatch commits per-row: a non-nil error may accompany a
 			// partial insert (skipped poison rows), so the counts hold
-			// regardless. Events and activity ride ONE transaction with the
-			// checkpoint, so the checkpoint can never advance past activity
-			// that did not land.
-			applied, sErr := storeObservation(ctx, st, obs.Events, obs.Activity, observedAt, evCp, o.pricer)
+			// regardless. Events, activity and skill contexts ride ONE
+			// transaction with the checkpoint, so the checkpoint can never
+			// advance past rows that did not land.
+			applied, sErr := storeObservation(ctx, st, obs, observedAt, evCp, o.pricer)
 			stats.EventsSeen += len(obs.Events)
 			stats.EventsInserted += applied.Events
 			stats.ActivitySeen += len(obs.Activity)
 			stats.ActivityInserted += applied.Activity
+			stats.SkillContextsSeen += len(obs.SkillContexts)
+			stats.SkillContextsInserted += applied.SkillContexts
 			if sErr != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("insert events %s %s: %v", ad.ID(), src.Path, sErr))
 			}
@@ -280,8 +289,9 @@ func collectSource(ctx context.Context, ad adapter.Adapter, st store.Store, src 
 // column at all: its cost is derived on read by joining the usage row it names,
 // so there is exactly one stamped cost per turn and no second copy to keep in
 // step with the ladder.
-func storeObservation(ctx context.Context, st store.Store, events []model.UsageEvent, activity []model.ActivityEvent, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
-	if len(events) == 0 && len(activity) == 0 && cp == nil {
+func storeObservation(ctx context.Context, st store.Store, obs adapter.Observation, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
+	events, activity, skills := obs.Events, obs.Activity, obs.SkillContexts
+	if len(events) == 0 && len(activity) == 0 && len(skills) == 0 && cp == nil {
 		return store.Applied{}, nil
 	}
 	stamped := make([]model.UsageEvent, len(events))
@@ -299,7 +309,20 @@ func storeObservation(ctx context.Context, st store.Store, events []model.UsageE
 		}
 		acts[i] = a
 	}
-	return st.ApplyObservation(ctx, stamped, acts, cp)
+	// Skill contexts are not priced here either, and for a stronger reason than
+	// activity: they carry no token columns at all. The cost of a skill is the
+	// cost of the usage rows it names, read through the join, so there is one
+	// stamped figure per turn and never a second copy to keep in step.
+	ctxs := make([]model.SkillContext, len(skills))
+	for i, c := range skills {
+		if c.ObservedTime.IsZero() {
+			c.ObservedTime = observedAt
+		}
+		ctxs[i] = c
+	}
+	return st.ApplyBatch(ctx, store.ObservationBatch{
+		Events: stamped, Activity: acts, SkillContexts: ctxs, Checkpoint: cp,
+	})
 }
 
 // stampCost prices an event at the table in effect right now. A model no rung

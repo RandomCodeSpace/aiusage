@@ -83,3 +83,69 @@ type ActivityEvent struct {
 	SourcePath string // file/db the record came from
 	DedupKey   string // globally-unique stable key; inserts conflict-skip on this
 }
+
+// SkillContext records that ONE usage event was produced while the agent was
+// operating inside a skill. It answers "what did skill X cost", which the
+// activity ledger alone cannot: an ActivityEvent of kind=skill records the turn
+// that INVOKED a skill, not the thousands of turns the skill then went on to
+// spend. On this machine's transcripts those are 44 invocation rows against
+// 8,039 records of actual work.
+//
+// SKILL CONTEXT IS A PROPERTY OF THE TURN, NOT A CALL WITHIN IT. That single
+// distinction is why this is a separate record type rather than another
+// ActivityEvent kind, and it is worth stating precisely.
+//
+// An ActivityEvent is one CALL. A turn emits several of them against a single
+// usage object, so each takes a divided share (calls_in_turn) and the shares sum
+// back to the turn. A skill context is not a call — it is the answer to "which
+// skill was running when this turn happened", and a turn has AT MOST ONE. The
+// source enforces that: Claude Code's `attributionSkill` is a scalar string on
+// the record, so a usage row cannot carry two. Measured over 209,435 local
+// transcript records, 8,039 carry the field, every one of them a plain string,
+// and no (session, request) turn ever carried two distinct values.
+//
+// Therefore the cost of a skill is the sum over DISTINCT usage rows whose
+// context is that skill, with NO division and no divisor to share. Over-
+// attribution is not prevented by a rule here, it is unrepresentable: the store
+// keys these rows by UsageDedupKey uniquely, so the join to the ledger is 1:1
+// and cannot multiply a row's cost.
+//
+// It is deliberately NOT an ActivityEvent kind. Tool-call attribution and skill-
+// context attribution are two different PARTITIONS of the same dollars — "which
+// tool was called" and "which skill was running" — in the way cost-by-region and
+// cost-by-product are two views of one budget. They are each honest alone and
+// meaningless added together. Sharing activity_events would have put that
+// mistake one forgotten WHERE clause away: SummarizeActivity grouped by tool,
+// with no kind filter, would have silently counted every skill turn twice. A
+// separate table makes the sum unexpressible rather than merely discouraged.
+//
+// NESTING is real and is recorded shallowly, because that is all the source
+// offers. A skill may invoke another skill (5 such records locally, e.g.
+// superpowers:brainstorming invoking superpowers:writing-plans), but once the
+// inner one is running the field names ONLY the inner skill. So cost is
+// attributed to the INNERMOST active skill, and an outer skill is not credited
+// with what its callee spent. That is the source's own accounting, not a choice
+// made here, and inventing a parent chain the transcript does not record would
+// be a guess wearing a number.
+//
+// PRIVACY: the skill NAME and nothing else. There is no field for the skill's
+// arguments, its inputs, its prompt or its output — the same allow-list
+// discipline ActivityEvent follows, for the same reason.
+type SkillContext struct {
+	// UsageDedupKey is the dedup_key of the usage_events row this context
+	// describes. It is the identity of the record: one usage row, one context.
+	UsageDedupKey string
+	Tool          string // agent CLI id (ToolClaudeCode, ...)
+	// Skill is the skill the turn ran inside, verbatim ("adhd",
+	// "superpowers:writing-plans"). Never empty — a context with no skill is
+	// not a context.
+	Skill string
+
+	SessionID string    // provider session id
+	Project   string    // workspace / cwd path
+	Model     string    // model id of the turn
+	EventTime time.Time // the usage event's own time, copied so both ledgers
+	// place the turn in the same instant
+	ObservedTime time.Time // when the daemon read/stored the record
+	SourcePath   string    // file/db the record came from
+}

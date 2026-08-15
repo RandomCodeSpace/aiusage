@@ -235,7 +235,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	parseErr := false
 	for _, e := range files {
 		if ctx.Err() != nil {
-			return adapter.Observation{Events: d.events(), Activity: d.activity()}, ctx.Err()
+			return adapter.Observation{
+				Events:        d.events(),
+				Activity:      d.activity(),
+				SkillContexts: d.skillContexts(),
+			}, ctx.Err()
 		}
 		if err := parseFile(e.path, e.segment, d); err != nil {
 			// A failed or partial parse must not land in the manifest: the gate
@@ -245,7 +249,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		}
 	}
 
-	obs := adapter.Observation{Events: d.events(), Activity: d.activity()}
+	obs := adapter.Observation{
+		Events:        d.events(),
+		Activity:      d.activity(),
+		SkillContexts: d.skillContexts(),
+	}
 	if statErr || parseErr {
 		return obs, nil
 	}
@@ -359,8 +367,20 @@ type rawLine struct {
 	IsAPIErrorMessage nullable[bool]    `json:"isApiErrorMessage"`
 	Version           nullable[string]  `json:"version"`
 	CostUSD           nullable[float64] `json:"costUSD"`
-	Message           *message          `json:"message"`
-	Data              *struct {
+	// AttributionSkill names the skill this record was produced INSIDE, when the
+	// turn ran under one. It is a plain top-level string — not an object, not a
+	// list — so a record cannot carry two, which is what makes per-skill cost a
+	// sum with no divisor.
+	//
+	// It decodes leniently, and that is not cosmetic: it is enrichment, and a
+	// field the ledger did without until now must never become a way to LOSE a
+	// usage row. A null, a number or an object yields the empty string and the
+	// record is stored exactly as it was before this field existed, with no skill
+	// context emitted. It is likewise NOT a guarded key — a record without it is
+	// the overwhelming majority (8,039 of 209,435 locally carry one).
+	AttributionSkill lenientString `json:"attributionSkill"`
+	Message          *message      `json:"message"`
+	Data             *struct {
 		Message *message `json:"message"`
 	} `json:"data"`
 }
@@ -455,6 +475,12 @@ type candidate struct {
 	// record, tool_use blocks included, and emitting those separately would
 	// count every replayed call a second time.
 	activity []model.ActivityEvent
+	// skill is the skill this record was produced inside, or "" for none. It
+	// rides the candidate for the same reason activity does: a sidechain replay
+	// repeats the attribution too, and only the winner's copy may reach the
+	// store — though here a duplicate would be absorbed anyway, since the usage
+	// dedup key is the context table's primary key.
+	skill string
 }
 
 // parseLine decodes one transcript line into a candidate. It returns ok=false
@@ -561,6 +587,7 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		cost:        rl.CostUSD.Value,
 		total:       total,
 		activity:    callActivity(msg.Content, ev, requestID),
+		skill:       strings.TrimSpace(string(rl.AttributionSkill)),
 	}, true
 }
 

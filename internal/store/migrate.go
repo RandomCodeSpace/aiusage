@@ -33,6 +33,8 @@ type migration struct {
 //	v4 — usage_rollup derived rollup table, 15-minute UTC buckets (issue #59)
 //	v5 — activity_events ledger: tool/skill/hook invocations, joined to
 //	     usage_events by dedup key for cost attribution
+//	v6 — usage_skill_context: the skill a turn ran under, one row per usage
+//	     event, for un-divided per-skill cost
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -69,6 +71,18 @@ var migrations = []migration{
 	// adapter's checkpoint sits — see the adapters' own notes on what that
 	// means for history.
 	{version: 5, statements: activityV5Statements()},
+	// v6 creates the skill-context table EMPTY, and NOTHING CAN EVER BACKFILL
+	// IT for rows already in the ledger. The fact it records — which skill a
+	// turn ran under — exists only on the source transcript record; usage_events
+	// never carried it, and the no-UPDATE trigger forbids adding it to a stored
+	// row even if it had. Rows land only where a re-read of the sources reaches,
+	// which each adapter's checkpoint bounds. In practice: usage already
+	// collected stays permanently unattributed to any skill, and per-skill cost
+	// is answerable from the moment this version ships forward, not backwards.
+	// Only the CONTEXT is lost, never the cost — those turns remain in
+	// usage_events in full, and every total that does not group by skill is
+	// unaffected.
+	{version: 6, statements: skillContextV6Statements()},
 }
 
 // ensureSchema reads the recorded schema version before touching anything and

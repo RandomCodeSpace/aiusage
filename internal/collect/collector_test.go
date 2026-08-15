@@ -37,6 +37,8 @@ type fakeStore struct {
 	events        []model.UsageEvent
 	activityDedup map[string]struct{}
 	activity      []model.ActivityEvent
+	skillDedup    map[string]struct{} // key: the USAGE dedup key, one skill per turn
+	skillContexts []model.SkillContext
 	state         map[string]model.AggregateSnapshot // key: tool|key
 	checkpoints   map[string]model.SourceCheckpoint  // key: tool|sourcePath
 	upserts       int                                // standalone UpsertState calls (snapshot path must not use it)
@@ -49,6 +51,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		dedup:         map[string]struct{}{},
 		activityDedup: map[string]struct{}{},
+		skillDedup:    map[string]struct{}{},
 		state:         map[string]model.AggregateSnapshot{},
 		checkpoints:   map[string]model.SourceCheckpoint{},
 	}
@@ -123,16 +126,24 @@ func (s *fakeStore) ApplyEvents(ctx context.Context, events []model.UsageEvent, 
 
 // ApplyObservation mirrors the SQLite contract: both ledgers and the checkpoint
 // land together, activity deduped on its own key.
-func (s *fakeStore) ApplyObservation(_ context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (store.Applied, error) {
+func (s *fakeStore) ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (store.Applied, error) {
+	return s.ApplyBatch(ctx, store.ObservationBatch{Events: events, Activity: activity, Checkpoint: cp})
+}
+
+// ApplyBatch mirrors the SQLite contract: all three streams and the checkpoint
+// land together, activity deduped on its own key and a skill context deduped on
+// the USAGE key it describes — which is what makes a second sighting of a turn
+// a no-op rather than a second helping of its cost.
+func (s *fakeStore) ApplyBatch(_ context.Context, b store.ObservationBatch) (store.Applied, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out store.Applied
-	inserted, err := s.insertLocked(events)
+	inserted, err := s.insertLocked(b.Events)
 	out.Events = inserted
 	if err != nil {
 		return out, err
 	}
-	for _, a := range activity {
+	for _, a := range b.Activity {
 		if a.DedupKey == "" {
 			return out, errors.New("empty activity dedup key")
 		}
@@ -143,8 +154,22 @@ func (s *fakeStore) ApplyObservation(_ context.Context, events []model.UsageEven
 		s.activity = append(s.activity, a)
 		out.Activity++
 	}
-	if cp != nil {
-		s.checkpoints[cp.Tool+"|"+cp.SourcePath] = *cp
+	for _, c := range b.SkillContexts {
+		if c.UsageDedupKey == "" {
+			return out, errors.New("empty skill context usage dedup key")
+		}
+		if c.Skill == "" {
+			return out, errors.New("empty skill name")
+		}
+		if _, ok := s.skillDedup[c.UsageDedupKey]; ok {
+			continue
+		}
+		s.skillDedup[c.UsageDedupKey] = struct{}{}
+		s.skillContexts = append(s.skillContexts, c)
+		out.SkillContexts++
+	}
+	if b.Checkpoint != nil {
+		s.checkpoints[b.Checkpoint.Tool+"|"+b.Checkpoint.SourcePath] = *b.Checkpoint
 	}
 	return out, nil
 }
@@ -196,6 +221,65 @@ func (s *fakeStore) SummarizeActivity(_ context.Context, f store.ActivityFilter)
 // It exists so the fake still satisfies store.Store.
 func (s *fakeStore) TopActivity(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.ActivityBucket, error) {
 	return nil, nil
+}
+
+// SummarizeSkillCost reproduces the real store's skill attribution, which is
+// the interesting half: NO division. Each context names one usage row and each
+// usage row has at most one context (the fake's skillDedup is keyed by the usage
+// key, exactly as the real table's primary key is), so a turn's full cost is
+// added once and the whole thing is bounded by the ledger without a divisor
+// anywhere. The collector never calls it; it exists so the fake satisfies
+// store.Store and so a collect-level test can assert that skill and tool
+// attribution together stay inside the real total.
+func (s *fakeStore) SummarizeSkillCost(_ context.Context, f store.ActivityFilter) (*store.SkillCostSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	byKey := map[string]model.UsageEvent{}
+	for _, e := range s.events {
+		byKey[e.DedupKey] = e
+	}
+	var b store.SkillCostBucket
+	for _, c := range s.skillContexts {
+		if !f.Since.IsZero() && c.EventTime.Before(f.Since) {
+			continue
+		}
+		if !f.Until.IsZero() && !c.EventTime.Before(f.Until) {
+			continue
+		}
+		if len(f.Skills) > 0 && !containsStr(f.Skills, c.Skill) {
+			continue
+		}
+		b.Turns++
+		u, ok := byKey[c.UsageDedupKey]
+		if !ok {
+			b.UnjoinedTurns++
+			continue
+		}
+		b.InputTokens += u.InputTokens
+		b.OutputTokens += u.OutputTokens
+		b.TotalTokens += u.TotalTokens
+		if cost, priced := u.Cost(); priced {
+			b.CostMicroUSD += cost
+		} else {
+			b.UnpricedTurns++
+		}
+	}
+	return &store.SkillCostSummary{GroupBy: f.GroupBy, Totals: b}, nil
+}
+
+// TopSkillCost is unreachable through the collector; the fake does no ranking.
+func (s *fakeStore) TopSkillCost(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.SkillCostBucket, error) {
+	return nil, nil
+}
+
+func containsStr(hay []string, needle string) bool {
+	for _, v := range hay {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *fakeStore) Checkpoint(_ context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error) {

@@ -397,9 +397,9 @@ func TestMigrateV4ToV5CreatesActivityLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if SchemaVersion != 5 {
-		t.Fatalf("SchemaVersion = %d; this test is about the v4->v5 step", SchemaVersion)
-	}
+	// Opening a v4 database runs every step from v5 up to SchemaVersion, so this
+	// asserts the activity ledger exists after that whole chain rather than
+	// after one step. The v5 statements are the only ones that can create it.
 	if v != SchemaVersion {
 		t.Fatalf("post-migration version = %d, want %d", v, SchemaVersion)
 	}

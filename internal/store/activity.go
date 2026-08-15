@@ -94,6 +94,12 @@ type ActivityFilter struct {
 	Projects []string // restrict to these projects (empty = all)
 	Sessions []string // restrict to these sessions (empty = all)
 	Models   []string // restrict to these models (empty = all)
+	// Skills restricts the SKILL-COST queries to these skill contexts (empty =
+	// all). It is ignored by SummarizeActivity/TopActivity/ListActivity, which
+	// read activity_events and have no skill-context column: a skill context is
+	// a property of the turn, recorded in usage_skill_context. See
+	// SummarizeSkillCost and the skillcost.go package comment.
+	Skills []string
 
 	// GroupBy lists grouping dimensions, applied in order. Valid values:
 	// "hour","day","week","month","tool","kind","name","project","session",

@@ -356,6 +356,12 @@ func legacyDB(t *testing.T, version int) string {
 	if version >= 4 {
 		ddl += legacyRollupDDL
 	}
+	if version >= 5 {
+		// A v5 database is by definition one that ran the v5 statements, so
+		// they are the fixture rather than a hand-copied third transcription of
+		// the same DDL.
+		ddl += strings.Join(activityV5Statements(), ";\n") + ";\n"
+	}
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatalf("create v%d schema: %v", version, err)
 	}

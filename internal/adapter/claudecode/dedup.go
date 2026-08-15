@@ -135,3 +135,38 @@ func (d *deduper) activity() []model.ActivityEvent {
 	}
 	return append(out, d.hooks...)
 }
+
+// skillContexts returns one row per surviving usage event that was produced
+// inside a skill, taken from the same winners events() emits and in the same
+// order.
+//
+// Taking the winner's copy is what keeps the context aligned with the event it
+// describes: the row is keyed by the usage event's dedup key, and a loser's key
+// names a usage row that events() never emitted, so the context would join
+// nothing and the winning turn would show no skill at all. Hooks contribute
+// none — they carry no usage object to attribute.
+func (d *deduper) skillContexts() []model.SkillContext {
+	var out []model.SkillContext
+	add := func(c *candidate) {
+		if c == nil || c.skill == "" {
+			return
+		}
+		out = append(out, model.SkillContext{
+			UsageDedupKey: c.event.DedupKey,
+			Tool:          model.ToolClaudeCode,
+			Skill:         c.skill,
+			SessionID:     c.event.SessionID,
+			Project:       c.event.Project,
+			Model:         c.event.Model,
+			EventTime:     c.event.EventTime,
+			SourcePath:    c.event.SourcePath,
+		})
+	}
+	for _, pk := range d.order {
+		add(d.primary[pk])
+	}
+	for i := range d.noID {
+		add(&d.noID[i])
+	}
+	return out
+}

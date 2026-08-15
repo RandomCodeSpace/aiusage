@@ -113,6 +113,38 @@ identity with its `function_call`/`custom_tool_call` records (verified: zero of
 261,938 local token_count records carry a turn_id, while every call does), and a
 positional guess is not on offer.
 
+**Skill cost is a property of the TURN, and lives in its own table** (schema v6,
+usage_skill_context). An activity row of kind='skill' records the turn that
+INVOKED a skill — one call — not the thousands of turns the skill then spends;
+locally that is 44 invocation rows against 8,039 records of real work. The
+missing fact is Claude Code's top-level `attributionSkill`, a scalar string on
+every assistant record emitted while operating inside a skill. Because it is
+scalar, a usage row carries AT MOST ONE skill, and the table makes that a
+constraint rather than a hope: usage_dedup_key is its PRIMARY KEY, usage_events'
+dedup_key is UNIQUE, so the join is 1:1 and per-skill cost is a plain SUM with NO
+divisor — over-attribution is unrepresentable, not merely avoided.
+
+It is deliberately NOT another activity_events kind. Tool-call attribution splits
+a turn's cost among the calls that shared it; skill-context attribution assigns
+the whole turn to one skill. They are two PARTITIONS of the same dollars —
+"which tool was called" and "which skill was running" — each honest alone and
+meaningless added together, and sharing a table would have put that mistake one
+forgotten WHERE clause away (SummarizeActivity grouped by tool, unfiltered by
+kind, would have counted every skill turn twice). Nor is it a column on
+activity_events: 41.8% of skill records (3,361 of 8,039) call no tool at all and
+emit no activity row to hang a column on. Keying on the usage row captures those
+for free. SummarizeSkillCost REFUSES ActivityFilter's Kinds/Names rather than
+ignoring them, because honouring them means joining activity_events, where a turn
+with two matching calls joins twice.
+
+NESTING is recorded shallowly because that is all the source offers: a skill may
+invoke another, and once the inner one runs the field names only the inner skill,
+so cost lands on the innermost active skill. **v6 cannot be backfilled.** The
+fact exists only on the source transcript — usage_events never carried it — and
+the no-UPDATE trigger forbids adding it to a stored row regardless. Usage already
+collected stays permanently unattributed to any skill; only the CONTEXT is lost,
+never the cost, and every total that does not group by skill is unaffected.
+
 **Adapters are strictly observational.** They read files/DBs the agent CLIs
 have already produced, nothing more: no writes, no write locks, no rotation.
 SQLite sources open read-only (mode=ro; immutable=1 only when the source is

@@ -151,6 +151,25 @@ func WithRaw() ListOption {
 type Applied struct {
 	Events   int
 	Activity int
+	// SkillContexts counts new usage_skill_context rows: turns newly recorded as
+	// having run inside a skill. A turn already carrying a context counts here
+	// no more than a duplicate event counts in Events.
+	SkillContexts int
+}
+
+// ObservationBatch is everything one read of one source commits together. It is
+// a struct rather than a parameter list because the set grows: activity joined
+// events in v5, skill contexts in v6, and each addition must land in the SAME
+// transaction as the checkpoint that gates its re-read, not in a second call
+// that a crash could separate from the first.
+type ObservationBatch struct {
+	Events   []model.UsageEvent
+	Activity []model.ActivityEvent
+	// SkillContexts records which skill each usage event ran inside. At most one
+	// per event, keyed by its dedup key — see model.SkillContext.
+	SkillContexts []model.SkillContext
+	// Checkpoint, when non-nil, is upserted in the same transaction.
+	Checkpoint *model.SourceCheckpoint
 }
 
 // SourceStat summarises stored usage per tool for the `sources` command.
@@ -239,6 +258,14 @@ type Store interface {
 	// meaningful when the error is non-nil.
 	ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error)
 
+	// ApplyBatch is ApplyObservation plus the skill contexts, and is what a
+	// collection cycle actually calls; ApplyObservation is the shorthand that
+	// omits them. Same single transaction, same ordering (events first, so the
+	// rows naming them by dedup key find them present), same idempotence: a
+	// skill context conflicts on its usage dedup key and does nothing, which is
+	// what stops a re-read serving a turn's cost twice.
+	ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error)
+
 	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
 	Summarize(ctx context.Context, f Filter) (*Summary, error)
 
@@ -287,6 +314,25 @@ type Store interface {
 	// skill is expensive" in one query. It needs at least one GroupBy
 	// dimension: ranking a single grand-total bucket is not a ranking.
 	TopActivity(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]ActivityBucket, error)
+
+	// SummarizeSkillCost aggregates what the turns that ran INSIDE a skill
+	// actually cost, grouped per ActivityFilter.GroupBy (which accepts "skill"
+	// here, and refuses the call-level "kind"/"name"). This is the real answer
+	// to "which skill is expensive": TopActivity ranks the turn that INVOKED a
+	// skill, which is one call, while the skill's own work is every turn that
+	// followed under it.
+	//
+	// Unlike the activity queries it does NOT divide. Each usage event has at
+	// most one skill context and the join is 1:1, so a bucket's cost is the full
+	// ledger cost of its turns and the buckets partition the window without
+	// overlap. It also counts turns that called no tool at all, which the
+	// activity ledger has no row for.
+	SummarizeSkillCost(ctx context.Context, f ActivityFilter) (*SkillCostSummary, error)
+
+	// TopSkillCost ranks SummarizeSkillCost's buckets by one metric and caps
+	// them at limit (0 = uncapped), ordering and limiting in SQL. It needs at
+	// least one GroupBy dimension. ActivityByCalls ranks by turns here.
+	TopSkillCost(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]SkillCostBucket, error)
 
 	// SourceStats returns per-tool stored stats.
 	SourceStats(ctx context.Context) ([]SourceStat, error)

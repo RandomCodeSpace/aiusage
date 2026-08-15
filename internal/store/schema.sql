@@ -185,6 +185,53 @@ CREATE TRIGGER IF NOT EXISTS trg_activity_no_delete
 BEFORE DELETE ON activity_events
 BEGIN SELECT RAISE(ABORT, 'activity_events is append-only: DELETE forbidden'); END;
 
+-- usage_skill_context records which SKILL a turn was running inside, one row per
+-- usage event. It answers "what did skill X cost", which activity_events cannot:
+-- a kind='skill' row records the turn that INVOKED a skill, not the thousands of
+-- turns the skill then spends.
+--
+-- Skill context is a property of the TURN, not a call within it, and that is why
+-- this is its own table rather than another activity kind. usage_dedup_key is
+-- the PRIMARY KEY, so a turn can carry at most one skill (which is also all the
+-- source can express) and the join to usage_events is 1:1 in both directions.
+-- Per-skill cost is therefore a plain SUM with NO divisor, and over-attribution
+-- is unrepresentable rather than merely avoided.
+--
+-- Keeping it out of activity_events is deliberate. Tool-call attribution splits
+-- a turn's cost among its calls; skill-context attribution assigns the whole
+-- turn to one skill. They are two partitions of the same dollars and are
+-- meaningless added together, so they live in tables no single query joins.
+-- Keying on the usage row rather than on a call also captures the turns that ran
+-- under a skill and called no tool at all (41.8% of them, measured), which a
+-- column on activity_events would have had nowhere to record.
+CREATE TABLE IF NOT EXISTS usage_skill_context (
+  usage_dedup_key    TEXT    NOT NULL PRIMARY KEY,       -- the usage_events row this describes; one turn, one skill
+  tool               TEXT    NOT NULL,                   -- which agent CLI
+  skill              TEXT    NOT NULL,                   -- skill name, verbatim; never inputs
+  session_id         TEXT    NOT NULL DEFAULT '',
+  project            TEXT    NOT NULL DEFAULT '',        -- workspace / cwd
+  model              TEXT    NOT NULL DEFAULT '',
+  event_time_unix    INTEGER NOT NULL,                   -- UTC seconds; the usage event's own time
+  observed_time_unix INTEGER NOT NULL,                   -- UTC seconds; when daemon stored it
+  source_path        TEXT    NOT NULL DEFAULT '',
+  CHECK (usage_dedup_key <> ''),
+  CHECK (skill <> '')
+);
+
+CREATE INDEX IF NOT EXISTS idx_skillctx_skill_time ON usage_skill_context(skill, event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_skillctx_event_time ON usage_skill_context(event_time_unix);
+CREATE INDEX IF NOT EXISTS idx_skillctx_session    ON usage_skill_context(session_id);
+
+-- Immutability: same terms as the two ledgers. A skill context is an observation
+-- of an immutable transcript line, not working state.
+CREATE TRIGGER IF NOT EXISTS trg_skillctx_no_update
+BEFORE UPDATE ON usage_skill_context
+BEGIN SELECT RAISE(ABORT, 'usage_skill_context is append-only: UPDATE forbidden'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_skillctx_no_delete
+BEFORE DELETE ON usage_skill_context
+BEGIN SELECT RAISE(ABORT, 'usage_skill_context is append-only: DELETE forbidden'); END;
+
 -- Mutable accumulator state: latest observed counters per growing cell.
 CREATE TABLE IF NOT EXISTS aggregate_state (
   tool                  TEXT    NOT NULL,
