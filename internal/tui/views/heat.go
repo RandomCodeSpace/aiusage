@@ -10,7 +10,7 @@ import (
 // heat.go owns the heat-map VOCABULARY the Overview screen speaks: the six-rung
 // intensity ramp candidate D established (ticket #65), the track mark that keeps
 // an idle sample distinct from a missing one, and the one-row strip the KPI
-// tiles, the sys gauges and the degraded trend bodies are drawn with.
+// tiles and the degraded trend bodies are drawn with.
 //
 // One ramp, one honesty ladder. The hero's lanes paint these same rungs onto an
 // ntcharts canvas (trendrender.go, drawHeatLanes) while everything else paints
@@ -80,9 +80,9 @@ func heatInk(base lipgloss.Style, frac float64) (rune, lipgloss.Style) {
 
 // heatPeak is the largest value in vals: the scale a SELF-scaled strip reads
 // against. A series whose own maximum is the top rung is the right reading for a
-// KPI tile or a trend lane, where the question is shape over time; it is the
-// wrong one for a utilisation strip, which has an absolute ceiling and must pass
-// 1 instead (see SysStrip).
+// KPI tile or a trend lane, where the question is shape over time; a series with
+// an absolute ceiling would pass that ceiling instead, since self-scaling would
+// paint its quietest window as hot.
 func heatPeak(vals []float64) float64 {
 	peak := 0.0
 	for _, v := range vals {
@@ -95,8 +95,8 @@ func heatPeak(vals []float64) float64 {
 
 // heatConstInk is the ink of a series whose COLOR says nothing about the value:
 // every rung is drawn in the series' own color and intensity alone carries the
-// magnitude. The sys strips pass their own function instead, because there the
-// color is a second reading (healthy / busy / critical) of the same number.
+// magnitude. A series whose color is a second reading of the same number passes
+// its own function instead.
 func heatConstInk(s lipgloss.Style) func(float64) lipgloss.Style {
 	return func(float64) lipgloss.Style { return s }
 }

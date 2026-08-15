@@ -37,26 +37,24 @@ func sysTickCmd(mon *sysmon.Monitor) tea.Cmd {
 	})
 }
 
-// handleSysTick stores the background sample, appends it to the rolling history
-// the strip draws, and re-arms the ticker. It always re-arms so the strip stays
-// live for the session's lifetime.
+// handleSysTick stores the background sample and re-arms the ticker. It always
+// re-arms so the strip stays live for the session's lifetime.
 func (m Model) handleSysTick(msg sysTickMsg) (tea.Model, tea.Cmd) {
 	if m.mon != nil {
 		m.sys = msg.snap
-		m.sysHist.push(msg.snap)
 	}
 	return m, sysTickCmd(m.mon)
 }
 
-// sysGauges maps the latest sysmon snapshot and its sample history into the
-// view-layer gauge list the Overview strip renders, in fixed CPU/mem/disk order.
-// Before the first sample every gauge is unknown and the strip renders its
-// placeholder rather than a window of invented zeros.
+// sysGauges maps the latest sysmon snapshot into the view-layer gauge list the
+// Overview strip renders, in fixed CPU/mem/disk order. Before the first sample
+// every gauge is unknown and the strip renders its placeholder rather than bars
+// at an invented zero.
 func (m Model) sysGauges() []views.SysGauge {
 	s := m.sys
 	return []views.SysGauge{
-		{Label: "cpu", Frac: s.CPU.Frac, Text: s.CPU.Text, Known: s.CPU.Known, History: m.sysHist.cpu.values()},
-		{Label: "mem", Frac: s.Mem.Frac, Text: s.Mem.Text, Known: s.Mem.Known, History: m.sysHist.mem.values()},
-		{Label: "disk", Frac: s.Disk.Frac, Text: s.Disk.Text, Known: s.Disk.Known, History: m.sysHist.disk.values()},
+		{Label: "cpu", Frac: s.CPU.Frac, Text: s.CPU.Text, Known: s.CPU.Known},
+		{Label: "mem", Frac: s.Mem.Frac, Text: s.Mem.Text, Known: s.Mem.Known},
+		{Label: "disk", Frac: s.Disk.Frac, Text: s.Disk.Text, Known: s.Disk.Known},
 	}
 }

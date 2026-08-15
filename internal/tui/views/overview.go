@@ -270,11 +270,11 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 // memo when one is wired (the series derives only from the timeline, so it is
 // stable for the lifetime of an applied dataset).
 //
-// Self-scaling is right here and wrong on the sys strips: a token series has no
-// ceiling to read against, so the question a tile answers is shape over time -
-// the same reason the hero's lanes scale per lane. The memo key stays (series,
-// width): everything else the row is built from - the ramp, the series color,
-// the card's elevation - is static for the life of the process.
+// Self-scaling is right here: a token series has no ceiling to read against, so
+// the question a tile answers is shape over time - the same reason the hero's
+// lanes scale per lane. The memo key stays (series, width): everything else the
+// row is built from - the ramp, the series color, the card's elevation - is
+// static for the life of the process.
 func kpiHeatStrip(c Ctx, d OverviewData, s CompSpec, w int) string {
 	build := func() string {
 		vals := SeriesFor(d.Timeline, func(b store.Bucket) int64 { return s.Pick(Split(b)) })

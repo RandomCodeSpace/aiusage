@@ -132,12 +132,9 @@ type Model struct {
 
 	// Container resource gauges (CPU/mem/disk for the current pod, not the node).
 	// mon samples on its own tick; sys holds the latest reading for the Overview
-	// gauge strip and sysHist the rolling window behind its heat strips (a value,
-	// so Bubble Tea's Model copies never share one backing array — see
-	// sysring.go). Live system state — deliberately never persisted to the DB.
-	mon     *sysmon.Monitor
-	sys     sysmon.Snapshot
-	sysHist sysHistory
+	// gauge strip. Live system state — deliberately never persisted to the DB.
+	mon *sysmon.Monitor
+	sys sysmon.Snapshot
 
 	// heroMemo caches the rendered hero chart + KPI sparklines across frames
 	// (issue #4, 1f); a pointer so it survives Bubble Tea's value copies.

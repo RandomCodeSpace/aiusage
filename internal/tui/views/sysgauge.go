@@ -9,33 +9,20 @@ import (
 )
 
 // sysgauge.go renders the compact container-resource strip (CPU / memory / disk)
-// shown at the top of the Overview tab. Each gauge is a rolling HEAT STRIP — one
-// cell per sample, oldest left, newest right, btop's arrangement — beside the
-// live percentage, so the user reads both the current pressure and how it got
-// there. Values come from the root model's sysmon snapshot and its sample
-// history; this file only formats them.
-//
-// The strip speaks the same heat vocabulary as the hero's lanes (heat.go), with
-// one deliberate difference: utilisation has an absolute ceiling, so these cells
-// are read against 1 and never self-scaled. A quiet machine must look quiet —
-// self-scaling would paint an idle CPU's 3% peak as a full black cell.
-// Color remains the second reading of the same number (green healthy, amber
-// busy, red critical); the ramp alone still carries it under NO_COLOR.
+// shown at the top of the Overview tab. Each gauge is a labelled horizontal bar
+// colored by utilisation — green when healthy, amber when busy, red when near
+// the container's limit — so the user can read pressure at a glance without a
+// detailed view. Values come from the root model's sysmon snapshot; this file
+// only formats them.
 
 // SysGauge is one resource reading for the strip: a 0..1 fill, a short readout
-// (e.g. "1.2G/4.0G"), the rolling sample history behind it, and Known=false when
-// the value is not yet available (CPU before its second sample), which renders a
-// muted placeholder.
+// (e.g. "1.2G/4.0G"), and Known=false when the value is not yet available (CPU
+// before its second sample), which renders a muted placeholder.
 type SysGauge struct {
 	Label string
 	Frac  float64
 	Text  string
 	Known bool
-	// History is the utilisation window, OLDEST first, one entry per sample
-	// tick; the newest entry is the reading Frac states. Fewer entries than the
-	// strip has cells is the normal state of a young session and renders as
-	// holes on the old side — the view never invents a sample it was not given.
-	History []float64
 }
 
 // utilisation thresholds for the gauge color (fraction of the container limit).
@@ -50,7 +37,7 @@ const (
 func SysStrip(c Ctx, gauges []SysGauge, width int) string {
 	const (
 		gutter  = 2
-		minCell = 12 // smallest readable gauge cell ("cpu ▕▒█▏ 38%")
+		minCell = 12 // smallest readable gauge cell ("cpu ▕██▏ 38%")
 	)
 	n := len(gauges)
 	if n == 0 {
@@ -82,11 +69,9 @@ func gaugeColor(c Ctx, frac float64) color.Color {
 	}
 }
 
-// sysGaugeCell renders one gauge to exactly cellW cells: "label ▕░▒▓██▏ 42%",
-// appending the readout text when there is spare room. The brackets mark the
-// strip's extent, which a history that has not filled it yet needs — an empty
-// cell inside them is a sample not taken, not a quiet one. Unknown gauges show
-// an empty strip and a "…" placeholder.
+// sysGaugeCell renders one gauge to exactly cellW cells: "label ▕███░░▏ 42%",
+// appending the readout text when there is spare room. Unknown gauges show a
+// faint empty bar and a "…" placeholder.
 func sysGaugeCell(c Ctx, g SysGauge, cellW int) string {
 	label := padRightLocal(g.Label, 4)
 
@@ -97,31 +82,35 @@ func sysGaugeCell(c Ctx, g SysGauge, cellW int) string {
 	if g.Known && g.Text != "" && cellW >= fixed+len(g.Text)+2 {
 		readout = " " + g.Text
 	}
-	stripW := cellW - fixed - lipgloss.Width(readout)
-	if stripW < 3 {
-		stripW = 3
+	barInner := cellW - fixed - lipgloss.Width(readout)
+	if barInner < 3 {
+		barInner = 3
 	}
 
-	var strip, pct string
+	var bar, pct string
 	if !g.Known {
-		// Nothing has been read yet, so nothing is painted: an unreadable gauge is
-		// a hole, exactly as a bucket with no data is a hole in the hero's lanes.
-		// A faint track across the strip would claim samples were taken and idle.
-		strip = c.pad(stripW)
+		bar = c.Faint.Render(strings.Repeat("░", barInner))
 		pct = c.Faint.Render("  …")
 	} else {
-		// Absolute scale: the fraction maps straight onto the ramp, so 90% looks
-		// hot whatever its neighbours did. The per-sample color keeps the strip's
-		// history honest about when the machine was in trouble, rather than
-		// painting the whole window at the current reading's severity.
-		strip = heatStrip(c, g.History, stripW, 1, func(v float64) lipgloss.Style {
-			return c.fg(gaugeColor(c, v))
-		})
-		pct = c.fg(gaugeColor(c, g.Frac)).Render(padLeftLocal(strconv.Itoa(int(g.Frac*100+0.5))+"%", 4))
+		// Eighth-block cap: a gauge at 38% of a 6-cell bar is 2.28 cells, drawn as
+		// two full cells plus a ▎ — not rounded to 2, where 33% and 41% would be
+		// the same picture.
+		full, cap := eighthCells(g.Frac*float64(barInner), barInner)
+		col := gaugeColor(c, g.Frac)
+		track := barInner - full
+		if cap != "" {
+			track--
+		}
+		if track < 0 {
+			track = 0
+		}
+		bar = c.fg(col).Render(strings.Repeat("█", full)+cap) +
+			c.Faint.Render(strings.Repeat("░", track))
+		pct = c.fg(col).Render(padLeftLocal(strconv.Itoa(int(g.Frac*100+0.5))+"%", 4))
 	}
 
 	cell := c.StatLabel.Render(label) + c.pad(1) +
-		c.Faint.Render("▕") + strip + c.Faint.Render("▏") + c.pad(1) + pct +
+		c.Faint.Render("▕") + bar + c.Faint.Render("▏") + c.pad(1) + pct +
 		c.Subtle.Render(readout)
 
 	// Pad/clamp to exactly cellW so the row never drifts or wraps.
