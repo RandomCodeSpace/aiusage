@@ -29,6 +29,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/reasonix"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
@@ -294,6 +295,7 @@ func defaultRegistry() *adapter.Registry {
 		opencode.New(),
 		hermes.New(),
 		agy.New(),
+		reasonix.New(),
 	)
 }
 
@@ -317,6 +319,10 @@ func discoveryEnv() []string {
 		copilot.ExporterEnv,
 		hermes.HomeEnv,
 		opencode.DataDirEnv,
+		// Reasonix resolves its state root from the first of these two that is
+		// set, so either one moves every stats file the adapter reads.
+		reasonix.StateHomeEnv,
+		reasonix.HomeEnv,
 	}
 }
 
