@@ -15,7 +15,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
-	"github.com/RandomCodeSpace/aiusage/internal/web"
 )
 
 // adapterNotes are operator-facing caveats surfaced by `doctor` for adapters
@@ -87,7 +86,6 @@ func runDoctor(c *cobra.Command) error {
 	fmt.Fprintf(out, "home:     %s\n", cfg.Home)
 	fmt.Fprintf(out, "interval: %ds\n", cfg.IntervalSeconds)
 	fmt.Fprintf(out, "build:    %s\n", buildinfo.Identity())
-	fmt.Fprintf(out, "web ui:   %s\n", webUIStatus())
 	fmt.Fprintln(out)
 
 	printSupervision(c, cfg)
@@ -113,17 +111,6 @@ func runDoctor(c *cobra.Command) error {
 	return nil
 }
 
-// webUIStatus describes this build's web-UI capability for doctor (issue #61).
-// It is the same tag that Identity() folds into the build identity, so a user
-// comparing `aiusage version` between two installs and a user reading this line
-// are being told the same fact.
-func webUIStatus() string {
-	if web.HasEmbeddedUI() {
-		return "embedded (`aiusage serve` available)"
-	}
-	return "not embedded (`aiusage serve` is unavailable; collection is unaffected)"
-}
-
 // printSupervision reports how the collector is being kept alive, which is the
 // question behind every complaint that numbers stopped updating.
 //
@@ -134,10 +121,10 @@ func webUIStatus() string {
 // diagnostic has no side effects.
 //
 // The whole block shares one deadline, for the reason ensureDaemon has one. It
-// is five calls into the service manager - availability, then enabled and
-// active for each unit - and a manager answering each of them slowly (four
-// seconds is a loaded machine, not a broken one) turns twenty seconds of
-// nothing into the first thing a user sees when they run this. doctor is
+// is several calls into the service manager - availability, then enabled and
+// active per unit - and a manager answering each of them slowly (four seconds
+// is a loaded machine, not a broken one) turns a diagnostic into the longest
+// wait in the CLI. doctor is
 // reached BECAUSE supervision is suspect, so the one thing it may not do is
 // hang on it: when the budget expires the block says what it managed to
 // establish and moves on, and a unit nobody got an answer about is reported as

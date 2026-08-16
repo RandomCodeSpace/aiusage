@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-// capSuffix is what this build appends to every identity, so a test can state
-// the expected identity without hardcoding one build tag's answer.
-func capSuffix() string {
-	if HasWebUI {
-		return "+webui"
-	}
-	return ""
-}
-
 func TestIdentityDevStamp(t *testing.T) {
 	// With the default "dev" Version, Identity derives a per-build stamp from the
 	// running test binary (size+modtime) - non-empty and prefixed "dev-".
@@ -34,7 +25,7 @@ func TestIdentityExplicitVersion(t *testing.T) {
 	old := Version
 	t.Cleanup(func() { Version = old })
 	Version = "v9.9.9"
-	want := "v9.9.9" + capSuffix()
+	want := "v9.9.9"
 	if got := Identity(); got != want {
 		t.Fatalf("Identity() with explicit Version = %q, want %q", got, want)
 	}
@@ -56,7 +47,7 @@ func TestIdentityNormalisesGoReleaserVersion(t *testing.T) {
 	if fromGoReleaser != fromModule {
 		t.Fatalf("identity differs by version spelling: %q vs %q", fromGoReleaser, fromModule)
 	}
-	if want := "v1.2.3" + capSuffix(); fromGoReleaser != want {
+	if want := "v1.2.3"; fromGoReleaser != want {
 		t.Fatalf("Identity() = %q, want the canonical %q", fromGoReleaser, want)
 	}
 }
@@ -71,8 +62,12 @@ func TestSameIdentity(t *testing.T) {
 		{"spelling only", "1.2.3", "v1.2.3", true},
 		{"surrounding space", " v1.2.3\n", "v1.2.3", true},
 		{"different version", "v1.2.3", "v1.2.4", false},
-		{"capability differs", "v1.2.3", "v1.2.3+webui", false},
-		{"capability matches", "1.2.3+webui", "v1.2.3+webui", true},
+		// Stamps left by an older binary carried a capability suffix. This
+		// build emits none, so one of those must compare UNEQUAL to the same
+		// version without it - that daemon is a different build and has to be
+		// restarted.
+		{"legacy capability differs", "v1.2.3", "v1.2.3+webui", false},
+		{"legacy capability matches", "1.2.3+webui", "v1.2.3+webui", true},
 		{"dev stamps", "dev-1-2", "dev-1-2", true},
 		{"dev vs release", "dev-1-2", "v1.2.3", false},
 		{"unrecorded", "", "v1.2.3", false},
@@ -87,8 +82,8 @@ func TestSameIdentity(t *testing.T) {
 }
 
 // TestBaseVersionStripsCapabilities keeps build CLASSIFICATION (release vs dev
-// stamp) independent of what the build can do: gaining the web UI must not turn
-// a dev stamp into something cmd.ensureDaemon auto-restarts.
+// stamp) independent of any capability suffix an older binary stamped: a dev
+// stamp carrying one must not become something cmd.ensureDaemon auto-restarts.
 func TestBaseVersionStripsCapabilities(t *testing.T) {
 	tests := []struct {
 		in, want string
@@ -107,17 +102,17 @@ func TestBaseVersionStripsCapabilities(t *testing.T) {
 	}
 }
 
-// TestIdentityCarriesTheBuildCapability is the whole point of issue #61: the
-// identity a UI build stamps must differ from the same version without the UI,
-// or an upgrade leaves the old collector running.
-func TestIdentityCarriesTheBuildCapability(t *testing.T) {
+// TestIdentityDeclaresNoCapabilities: this binary has no optional halves left,
+// so an identity is a bare version. A suffix appearing here again would be a
+// capability nobody declared.
+func TestIdentityDeclaresNoCapabilities(t *testing.T) {
 	old := Version
 	t.Cleanup(func() { Version = old })
 	Version = "v1.2.3"
 
 	got := Identity()
-	if HasWebUI != strings.HasSuffix(got, "+webui") {
-		t.Fatalf("Identity() = %q with HasWebUI=%v; the suffix must track the capability", got, HasWebUI)
+	if strings.Contains(got, "+") {
+		t.Fatalf("Identity() = %q; this build declares no capabilities", got)
 	}
 	if BaseVersion(got) != "v1.2.3" {
 		t.Fatalf("BaseVersion(%q) = %q, want v1.2.3", got, BaseVersion(got))

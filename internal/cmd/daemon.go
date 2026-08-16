@@ -194,8 +194,8 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 	// Normalised, not verbatim: the same release installed two ways spells its
 	// version differently (GoReleaser strips the leading v, the module version
 	// keeps it), and comparing the spellings would restart the daemon on every
-	// single invocation. Capabilities are NOT normalised away - a build that
-	// gained the web UI is a different build (issue #61).
+	// single invocation. A capability suffix an older binary stamped is NOT
+	// normalised away - that daemon is a different build.
 	if buildinfo.SameIdentity(recorded, self) {
 		return nil
 	}
@@ -212,8 +212,7 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 		return nil
 	}
 	// A supervised collector is replaced by restarting its unit, not by killing
-	// it: systemd would only start it again anyway, and the dashboard unit needs
-	// the same treatment because it has no self-exec watch of its own.
+	// it: systemd would only start it again anyway.
 	if superviseRestart(ctx, flags, warn) {
 		return nil
 	}
@@ -254,8 +253,8 @@ func restartOnMismatch(recorded, self string) bool {
 
 // isDevIdentity reports whether id is an unstamped build identity: the literal
 // "dev" default or the dev-<size>-<mtime> executable fallback stamp. It
-// classifies the VERSION part only - gaining a capability like the embedded web
-// UI does not turn a dev stamp into a release.
+// classifies the VERSION part only - a capability suffix an older binary
+// stamped does not turn a dev stamp into a release.
 func isDevIdentity(id string) bool {
 	base := buildinfo.BaseVersion(id)
 	return base == "dev" || strings.HasPrefix(base, "dev-")

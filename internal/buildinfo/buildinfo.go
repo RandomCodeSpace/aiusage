@@ -14,12 +14,11 @@
 // dev-stamp mismatches (`go run` is a fresh temp binary each time — acting on
 // those would flap the daemon on every invocation).
 //
-// An identity is version plus CAPABILITIES (issue #61): two builds of the same
-// source that differ in what they can do are different builds, and the one the
-// user installed is the one that should be collecting. The only capability today
-// is the embedded web UI, appended as a "+webui" suffix, so a UI build meeting a
-// UI-less daemon of the same version restarts it instead of leaving an install
-// half-applied.
+// This build declares no capabilities, so an identity is a version and nothing
+// else. The capability SUFFIX ("<version>+<capability>") is still understood on
+// the way in: a daemon stamped by an older binary carries one, and Normalize /
+// BaseVersion have to read those stamps for the comparison to mean anything.
+// Nothing produces a suffix any more.
 //
 // Version FORMATS differ by install path and must be normalised before two
 // identities are compared: GoReleaser interpolates {{ .Version }}, which has the
@@ -42,14 +41,12 @@ var Version = "dev"
 
 // capabilitySep separates the version from the capability suffix in an identity.
 // It is "+" because that is semver's build-metadata separator and it survives a
-// filename, a pidfile stamp and a JSON string without escaping.
+// filename, a pidfile stamp and a JSON string without escaping. This build emits
+// no suffix; the separator is kept because stamps written by older binaries do.
 const capabilitySep = "+"
 
-// webUICapability names the embedded-web-UI capability in an identity.
-const webUICapability = "webui"
-
-// Identity returns a stable identifier for this build: the normalised version
-// plus this binary's capabilities, e.g. "v1.2.3" or "v1.2.3+webui".
+// Identity returns a stable identifier for this build: the normalised version,
+// e.g. "v1.2.3".
 //
 // The version part is a real (non-"dev") Version when one was linked in.
 // Otherwise, if the binary was produced by `go install <module>@vX.Y.Z`, it is
@@ -59,22 +56,15 @@ const webUICapability = "webui"
 // is used (degrades to "always matches", which is safe - it just disables
 // auto-restart).
 func Identity() string {
-	return withCapabilities(Normalize(version()))
-}
-
-// withCapabilities appends this build's capability suffix to a version.
-func withCapabilities(v string) string {
-	if HasWebUI {
-		return v + capabilitySep + webUICapability
-	}
-	return v
+	return Normalize(version())
 }
 
 // Normalize canonicalises an identity for comparison: it trims surrounding
 // space and restores the leading v on a bare numeric version, so the GoReleaser
 // form ("1.2.3") and the module form ("v1.2.3") of one release compare equal.
-// Capabilities are preserved - they are a real difference between builds, not a
-// spelling difference.
+// A capability suffix left by an older binary is preserved - it was a real
+// difference between builds, not a spelling difference, and a daemon still
+// running one has to compare unequal to this build.
 func Normalize(id string) string {
 	id = strings.TrimSpace(id)
 	base, caps, hasCaps := strings.Cut(id, capabilitySep)
@@ -87,9 +77,10 @@ func Normalize(id string) string {
 	return base + capabilitySep + caps
 }
 
-// BaseVersion returns the normalised version part of an identity, without its
-// capability suffix. Callers classifying a build (release vs dev stamp) want
-// this: gaining the web UI does not make a dev stamp a release.
+// BaseVersion returns the normalised version part of an identity, without any
+// capability suffix an older binary stamped. Callers classifying a build
+// (release vs dev stamp) want this: a capability never made a dev stamp a
+// release.
 func BaseVersion(id string) string {
 	base, _, _ := strings.Cut(Normalize(id), capabilitySep)
 	return base

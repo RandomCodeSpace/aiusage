@@ -35,25 +35,18 @@ provider or service-tier dimension and no resolution below its bucket:
 distinct-session counts, per-event listing and finer buckets go to the ledger,
 and the read API refuses granularities below an hour outright.
 
-**A stale rollup falls back to the ledger, and says so.** The v4 migration
-creates usage_rollup EMPTY and leaves the fill to the collector's next pass, so
-a read-only `aiusage serve` on a machine with no daemon would otherwise answer
-every rollup-served question with zeros over a full ledger. internal/web asks
-store.RollupStale (watermark vs MAX(id), then SUM(events) vs COUNT(*)), caches
-the verdict against the database's write time with a short TTL, and routes to
-the ledger while it is stale. Every /api/summary and /api/facets response
-carries "source": "rollup" | "ledger".
-
-**The web surface is read-only and Host-checked.** `aiusage serve` opens the
-store with store.OpenReadOnly and never takes the collection lock. Every
-request must be addressed to a Host in the allowlist (localhost, 127.0.0.1,
-::1, plus `serve --allowed-hosts`), or it is refused with 421 before a handler
-runs, and a WebSocket Origin must name a host in that same list (an absent
-Origin is a non-browser client and is allowed). Binding loopback is not the
-defence: DNS rebinding makes an attacker's page same-origin with this port, and
-the Host header is the one part of that request the page cannot choose. A
-reverse proxy preserves the public Host, so a proxied deployment must list its
-name. No response ever carries usage_events.raw.
+**A stale rollup is DETECTED, never trusted.** The v4 migration creates
+usage_rollup EMPTY and leaves the fill to the collector's next pass, so between
+the two there is a window where a full ledger has a summary of zero rows behind
+it — and a reader that took the rollup's word for it would answer every question
+with zeros. `store.RollupStale` is the test, and it is two comparisons against
+the ledger itself: the watermark in schema_meta vs MAX(id), then SUM(events) vs
+COUNT(*). `store.EnsureRollup` runs it at the start of every collection pass and
+REBUILDS from usage_events when they disagree, which is the only direction a
+disagreement is ever resolved in — the ledger is never corrected to match the
+summary. Any future reader of usage_rollup owes the same check before it reads:
+the table is derived, and a derived table that has fallen behind is wrong rather
+than merely old.
 
 **Raw is usage-object-only** (issues #17 and #42, resolved). Every adapter
 builds usage_events.raw / aggregate_state.raw from an explicit ALLOW-LIST of
@@ -308,32 +301,33 @@ and the store depend only on `model`; collect/report/tui compose adapters and
 the store; `cmd` wires everything. Shared types belong in `model`, not in a
 sideways import.
 
-`internal/service` sits off to the side: it may import stdlib, `config` and
-`buildinfo`, and nothing else — never collect/store/report/tui/web. It knows
-how a machine supervises processes, not what aiusage collects.
+`internal/service` sits off to the side: it may import stdlib and nothing else —
+never collect/store/report/tui. It knows how a machine supervises processes, not
+what aiusage collects.
 
 ## Supervision
 
-aiusage installs itself. Two systemd **user** units — `aiusage-collect.service`
-and `aiusage-web.service` — are written to `$XDG_CONFIG_HOME/systemd/user`
-(default `~/.config/systemd/user`), enabled and started. No root anywhere: user
-units, `loginctl enable-linger` for survival past logout, and every call
+aiusage installs itself. One systemd **user** unit — `aiusage-collect.service` —
+is written to `$XDG_CONFIG_HOME/systemd/user` (default
+`~/.config/systemd/user`), enabled and started. No root anywhere: a user unit,
+`loginctl enable-linger` for survival past logout, and every call
 non-interactive (`--no-ask-password`).
 
 **Install is create-if-missing; removal is stamp-gated.** An existing unit file
 is never rewritten — the user may have edited it — only its enabled/active state
-is corrected. `aiusage setup --force` is the sole path that replaces one, and it
-then restarts whatever it rewrote, because the point of a new ExecStart is that
-the new one runs. Every generated unit opens with the
+is corrected. `aiusage setup --force` is the sole path that replaces it, and it
+then restarts what it rewrote, because the point of a new ExecStart is that
+the new one runs. The generated unit opens with the
 `# aiusage-generated-unit` stamp, and `setup --remove` refuses to delete a unit
 file that lacks it — naming the file and `--force`, and exiting NON-ZERO, since
 `setup --remove && rm -rf ~/.config/systemd/user` must not proceed as though the
 directory were clean — since create-if-missing exists precisely because the file
-may be the user's own (the hand-written units this feature replaced carry no
-stamp, and removal must refuse them). The whole
+may be the user's own (the hand-written unit this feature replaced carries no
+stamp, and removal must refuse it). The whole
 thing happens on any run that already auto-spawns a daemon (`ensureDaemon`);
 `setup` is the explicit, inspectable version of it, and `doctor` prints which of
-the three states holds (systemd units, unsupervised background process, none).
+the three states holds (the systemd unit, an unsupervised background process,
+none).
 `--no-daemon` suppresses the AUTOMATIC daemon start and the automatic install;
 it does not suppress `setup`, which is the explicit ask.
 
@@ -351,8 +345,8 @@ another. HOME is the worst of them and the only one that is never absent, so
 being set cannot be its test: it is compared against the account's own home
 (`os/user`, which the environment cannot move) and only a difference counts, an
 unresolvable account home included. It moves every derived path at once —
-database, state, config, and the unit directory itself — while the unit NAMES
-stay fixed constants, so a sandboxed-HOME run used to query the machine's REAL
+database, state, config, and the unit directory itself — while the unit NAME
+stays a fixed constant, so a sandboxed-HOME run used to query the machine's REAL
 `aiusage-collect.service`, find it running, and manage a sandbox file while
 believing itself supervised. `cmd.discoveryEnv` is the same trap from the other
 side: CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_OTEL_FILE_EXPORTER_PATH,
@@ -368,15 +362,15 @@ difference — and prints one note per environment override it cannot bake (ther
 is no flag for a state directory, and none for an adapter's discovery root).
 
 **The automatic install reports itself once.** Installing, enabling and starting
-two long-lived services — one of them a network listener — is not a side effect
-to perform in silence behind `aiusage today`, so a run that CHANGED the machine
-prints its account to stderr (`service.Result.Changed`, `cmd.reportSupervision`).
-A run that changed nothing prints nothing: the steady state is a dozen report
-commands a day finding everything in place. Lines that explain something which
-did NOT happen — a dashboard skipped for a busy port, a linger refusal — do not
-count as a change; they ride along with the install that first produced them and
-are silent afterwards. A failure is not routed there either: it keeps the single
-warning line the CLI has always printed before falling back.
+a long-lived service is not a side effect to perform in silence behind
+`aiusage today`, so a run that CHANGED the machine prints its account to stderr
+(`service.Result.Changed`, `cmd.reportSupervision`). A run that changed nothing
+prints nothing: the steady state is a dozen report commands a day finding
+everything in place. Lines that explain something which did NOT happen — a
+linger refusal, a unit that could not be written — do not count as a change;
+they ride along with the install that first produced them and are silent
+afterwards. A failure is not routed there either: it keeps the single warning
+line the CLI has always printed before falling back.
 
 **Everything degrades, and every wait is bounded.** Availability is `systemctl`
 on PATH *plus* a successful `systemctl --user show-environment` (what actually
@@ -388,12 +382,12 @@ Per call, `service.DefaultTimeout` (5s) kills the command and `WaitDelay` (500ms
 force-closes its pipes — without the second, `CombinedOutput` blocks until every
 writer is gone, so a systemctl leaving a grandchild behind hangs the CLI forever
 despite the context. Per phase, `cmd.supervisionBudget` (5s) is one parent
-deadline over the WHOLE attempt: an install is a dozen calls, and a manager
-answering each of them slowly would otherwise add its latency twelve times to a
+deadline over the WHOLE attempt: an install is several calls, and a manager
+answering each of them slowly would otherwise add its latency once per call to a
 report command. When the budget expires supervision is abandoned mid-sequence
 and the fallback takes over. Every phase gets one, not just `ensureDaemon`:
-`doctor`'s supervision block shares that same 5s (it is five calls, measured at
-20s against a manager answering in 4s each) and reports a unit it got no answer
+`doctor`'s supervision block shares that same 5s (measured at 20s against a
+manager answering in 4s each) and reports a unit it got no answer
 about as state unknown rather than inventing "inactive, not enabled"
 (`service.UnitStatus.StateKnown`); the explicit `setup` gets its own, far larger
 `cmd.setupBudget` (30s), because the user asked for that one and is watching it,
@@ -403,20 +397,14 @@ per-call bound, `the supervision deadline expired` for the phase — rather than
 reporting the signal that killed it (`signal: killed` names the mechanism and
 hides the cause).
 
-**The web unit may never cost the machine its collector.** It is installed only
-when `buildinfo.HasWebUI` — `serve` exits 1 without it, and a unit that exits 1
-under `Restart=always` is a restart loop — and `serve` stays in `daemonSkip` so
-serving a page never starts a second process on the same port. Before starting
-it, the install probes its address (`Manager.Dial`): something already answering
-there is a manual `aiusage serve`, and starting the unit against it would be a
-restart loop until StartLimitBurst trips, so the unit is written and then left
-alone entirely — not started, not even enabled, with one line saying so.
-`Install` returns the collection unit's error and no other; every dashboard
-failure is a line in the result. Version sync under systemd is `systemctl --user
-restart` of the units that are ACTIVE (the web unit does not self-exec on binary
-replacement the way the collector does); an inactive unit is never started by
-that path, because a second collector against a single-holder lock is worse than
-a stale one.
+**Version sync restarts only what is ACTIVE.** Under systemd a build mismatch is
+resolved with `systemctl --user restart`, not by killing a process the manager
+would start again anyway. An INACTIVE unit is never started by that path: it is
+either one the user stopped deliberately or one sitting beside a daemon that was
+started some other way, and a second collector against a single-holder lock is
+worse than a stale one. `Manager.Restart` reports whether the collection unit
+was in fact what it restarted, so a caller that gets false knows supervision did
+not handle the mismatch and it still owns the stop-and-respawn.
 
 **Enable and start are two calls, and the second can fail.** An enable that this
 install performed is rolled back when the start then fails: a unit left enabled
@@ -425,7 +413,7 @@ fallback daemon is by then holding. `is-enabled` is matched exactly, so
 `enabled-runtime` (enabled until the next reboot, and no longer) is not enabled
 and gets a persistent enable.
 
-Both units carry `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
+The unit carries `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
 `ProtectKernelTunables`, `ProtectControlGroups`, `RestrictSUIDSGID` and explicit
 `ReadWritePaths`. Honest caveat, measured on this host: for **user** units on
 Ubuntu 24.04 the namespace-building directives (ProtectSystem, PrivateTmp,
@@ -435,9 +423,9 @@ the namespace and it silently carries on without it. They are kept because they
 are real on hosts without that restriction, and because the ReadWritePaths they
 imply document what the daemon is allowed to touch.
 
-Tests never touch a real systemd: `service.Manager` takes an injected `Runner`,
-`Dial` and `UnitDir`, and `internal/cmd`'s TestMain pins the supervisor seam to
-a refusing fake for the whole package.
+Tests never touch a real systemd: `service.Manager` takes an injected `Runner`
+and `UnitDir`, and `internal/cmd`'s TestMain pins the supervisor seam to a
+refusing fake for the whole package.
 
 ## Time buckets
 

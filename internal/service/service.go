@@ -1,12 +1,12 @@
-// Package service installs and supervises aiusage as a pair of systemd USER
-// units, so that a machine where the user has no root still gets a collector
-// that starts on login, restarts after a crash and survives logout.
+// Package service installs and supervises aiusage as a systemd USER unit, so
+// that a machine where the user has no root still gets a collector that starts
+// on login, restarts after a crash and survives logout.
 //
 // It owns detection, unit rendering, install, enable/start, restart, removal
 // and status, and nothing else: internal/cmd wires it into the CLI. The
-// dependency list is deliberately short (standard library plus internal/config
-// and internal/buildinfo) because supervision is a fact about the machine, not
-// about what aiusage collects or reports.
+// dependency list is deliberately short (the standard library, and nothing
+// else) because supervision is a fact about the machine, not about what aiusage
+// collects or reports.
 //
 // Three properties matter more than the rest:
 //
@@ -26,7 +26,7 @@
 // command is killed at Timeout and its pipes are force-closed WaitDelay later,
 // so one call cannot outlast the two combined even when the tool leaves a
 // grandchild behind holding the output pipe open. That is a per-call
-// guarantee only: bounding a whole install - a dozen calls - is the caller's
+// guarantee only: bounding a whole install - several calls - is the caller's
 // job, and internal/cmd does it with one parent deadline. A failure returns an
 // error the caller degrades on: the CLI falls back to the detached background
 // process it used before this package existed, prints at most one warning line,
@@ -37,7 +37,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -45,8 +44,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 )
 
 // DefaultTimeout bounds each systemctl or loginctl invocation. Supervision runs
@@ -64,11 +61,6 @@ const DefaultTimeout = 5 * time.Second
 // blocks forever. WaitDelay closes the pipes shortly after the context expires,
 // which turns the timeout into an actual bound.
 const waitDelay = 500 * time.Millisecond
-
-// addrProbeTimeout bounds the check for an address already in use. It probes
-// loopback in the common case, where a connection either lands immediately or
-// is refused immediately.
-const addrProbeTimeout = 300 * time.Millisecond
 
 // unitFileMode is the mode of a written unit file. Units are configuration, not
 // secrets, and they are read by the user's own service manager.
@@ -89,12 +81,6 @@ type Manager struct {
 	// Run overrides how commands are executed. Empty means the real systemctl
 	// and loginctl.
 	Run Runner
-	// Dial overrides the check for an address already in use. Empty means a real
-	// TCP probe. It is the second injection seam, and it exists for the same
-	// reason the first one does: a test that dialled the developer's machine
-	// would answer differently depending on what that machine happens to be
-	// running.
-	Dial func(addr string) bool
 	// Timeout overrides the per-command timeout. Zero means DefaultTimeout.
 	Timeout time.Duration
 }
@@ -132,12 +118,11 @@ type Result struct {
 	// leaves it false, which is what lets the automatic install report a first
 	// install and stay silent for every invocation after it.
 	//
-	// Lines that explain something which did NOT happen - a dashboard skipped
-	// because its port is taken, a linger refusal, a unit that could not be
-	// written - deliberately do not set it. They repeat identically on every
-	// invocation until a human intervenes, so they ride along with the install
-	// that first produced them and are silent afterwards, which is the whole
-	// difference between a report and a nag.
+	// Lines that explain something which did NOT happen - a linger refusal, a
+	// unit that could not be written - deliberately do not set it. They repeat
+	// identically on every invocation until a human intervenes, so they ride
+	// along with the install that first produced them and are silent
+	// afterwards, which is the whole difference between a report and a nag.
 	Changed bool
 
 	// Refused counts unit files a removal left in place because they carry no
@@ -165,31 +150,10 @@ func (r *Result) change(format string, a ...any) {
 // unitPlan is one unit to install.
 type unitPlan struct {
 	name string
-	body string
-	// addr is the TCP address this unit binds, empty for one that binds
-	// nothing. A unit that cannot bind is a restart loop, so an address already
-	// answering is a reason not to start it.
-	addr string
 	// rewritten records that Force replaced an existing file. It is the only
 	// case where a unit that is already running has to be restarted: the point
 	// of rewriting an ExecStart is that the new one runs.
 	rewritten bool
-}
-
-// addrInUse reports whether something is already accepting TCP connections on
-// addr. An address that cannot be dialled is free as far as this is concerned:
-// the question is only ever whether starting a unit would collide with a server
-// that is already there.
-func (m *Manager) addrInUse(addr string) bool {
-	if m.Dial != nil {
-		return m.Dial(addr)
-	}
-	c, err := net.DialTimeout("tcp", addr, addrProbeTimeout)
-	if err != nil {
-		return false
-	}
-	_ = c.Close()
-	return true
 }
 
 // detection caches the availability probe for the process. Only the production
@@ -229,19 +193,9 @@ func (m *Manager) detect(ctx context.Context) bool {
 	return err == nil
 }
 
-// Install makes both units exist, be enabled and be running, and is safe to
-// repeat: an existing unit file is left exactly as it is unless o.Force says
-// otherwise, and an already enabled or already running unit is not touched.
-//
-// The web unit is installed only in a build that carries the embedded UI. serve
-// exits 1 without it, and a unit that exits 1 under Restart=always is a restart
-// loop rather than a dashboard.
-//
-// The returned error is the collection unit's, and only ever the collection
-// unit's: a dashboard that will not start, will not bind or will not enable is
-// reported in the lines and otherwise ignored, because none of that stops
-// anything from being recorded. The collection unit is also installed first, so
-// a dashboard that fails cannot even delay it.
+// Install makes the collection unit exist, be enabled and be running, and is
+// safe to repeat: an existing unit file is left exactly as it is unless o.Force
+// says otherwise, and an already enabled or already running unit is not touched.
 func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
 	var r Result
 	if o.Exec == "" {
@@ -254,58 +208,31 @@ func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
 	}
 	r.addf("unit directory: %s", dir)
 
-	units := []unitPlan{{name: CollectUnit, body: renderCollect(o)}}
-	switch {
-	case o.Web && buildinfo.HasWebUI:
-		units = append(units, unitPlan{name: WebUnit, body: renderWeb(o), addr: o.WebAddr})
-	case o.Web:
-		r.addf("skipped %s: this build has no embedded web UI", WebUnit)
+	u := unitPlan{name: CollectUnit}
+	wrote, rewritten, err := m.writeUnit(dir, u.name, renderCollect(o), o.Force, &r)
+	if err != nil {
+		return r, err
 	}
-
-	wrote := false
-	written := make([]unitPlan, 0, len(units))
-	for _, u := range units {
-		w, rewritten, err := m.writeUnit(dir, u.name, u.body, o.Force, &r)
-		switch {
-		case err != nil && u.name == CollectUnit:
-			return r, err
-		case err != nil:
-			// A dashboard that cannot be written is a line, not a failure: the
-			// collection unit beside it is what records data.
-			r.addf("%s: %v", u.name, err)
-			continue
-		}
-		u.rewritten = rewritten
-		wrote = wrote || w
-		written = append(written, u)
-	}
-	units = written
+	u.rewritten = rewritten
 	if wrote {
 		if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
 			return r, fmt.Errorf("systemctl --user daemon-reload: %w", err)
 		}
 	}
 
-	for _, u := range units {
-		err := m.activate(ctx, u, &r)
-		switch {
-		case err != nil && u.name == CollectUnit:
-			return r, err
-		case err != nil:
-			r.addf("%s: %v", u.name, err)
-		case u.name == CollectUnit:
-			r.Collecting = true
-		}
+	if err := m.activate(ctx, u, &r); err != nil {
+		return r, err
 	}
+	r.Collecting = true
 
 	m.enableLinger(ctx, &r)
 	return r, nil
 }
 
-// Restart replaces the code the running units execute, which is how a build
+// Restart replaces the code the running unit executes, which is how a build
 // mismatch is resolved once supervision is in play.
 //
-// Only ACTIVE units are restarted. An inactive one is either something the user
+// Only an ACTIVE unit is restarted. An inactive one is either something the user
 // stopped on purpose or a unit file sitting beside a daemon that was started
 // some other way, and starting it would put a second collector against a lock
 // exactly one process may hold. Collecting reports whether the collection unit
@@ -313,29 +240,20 @@ func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
 // handle the mismatch and it still owns the problem.
 func (m *Manager) Restart(ctx context.Context) (Result, error) {
 	var r Result
-	dir := m.unitDir()
-	for _, name := range []string{CollectUnit, WebUnit} {
-		if !fileExists(filepath.Join(dir, name)) || !m.isActive(ctx, name) {
-			continue
-		}
-		if _, err := m.systemctl(ctx, "restart", name); err != nil {
-			if name == CollectUnit {
-				return r, fmt.Errorf("restart %s: %w", name, err)
-			}
-			r.addf("could not restart %s: %v", name, err)
-			continue
-		}
-		r.change("restarted %s", name)
-		if name == CollectUnit {
-			r.Collecting = true
-		}
+	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) || !m.isActive(ctx, CollectUnit) {
+		return r, nil
 	}
+	if _, err := m.systemctl(ctx, "restart", CollectUnit); err != nil {
+		return r, fmt.Errorf("restart %s: %w", CollectUnit, err)
+	}
+	r.change("restarted %s", CollectUnit)
+	r.Collecting = true
 	return r, nil
 }
 
-// Remove stops, disables and deletes both units. It is the honest counterpart
-// of an install that happens by itself: whatever aiusage wrote, aiusage can
-// take back.
+// Remove stops, disables and deletes the unit. It is the honest counterpart of
+// an install that happens by itself: whatever aiusage wrote, aiusage can take
+// back.
 //
 // What aiusage did not write, it refuses to take. Install is create-if-missing
 // exactly because a unit file may be the user's own - written by hand before
@@ -344,76 +262,67 @@ func (m *Manager) Restart(ctx context.Context) (Result, error) {
 // is the evidence, an unstamped file is named in the result along with the flag
 // that overrides the refusal, and force is that flag.
 //
-// Linger is left alone. It is a property of the user, not of these units, and
+// Linger is left alone. It is a property of the user, not of this unit, and
 // other services may be relying on it.
 func (m *Manager) Remove(ctx context.Context, force bool) (Result, error) {
 	var r Result
-	dir := m.unitDir()
-	removed := false
-	for _, name := range []string{CollectUnit, WebUnit} {
-		path := filepath.Join(dir, name)
-		if !fileExists(path) {
-			r.addf("%s is not installed", name)
-			continue
-		}
-		if !force && !hasStamp(path) {
-			r.addf("refusing to remove %s: it carries no %q line, so aiusage did not write it; pass --force to delete it anyway",
-				path, unitStamp)
-			r.Refused++
-			continue
-		}
-		if m.isActive(ctx, name) {
-			if _, err := m.systemctl(ctx, "stop", name); err != nil {
-				r.addf("could not stop %s: %v", name, err)
-			} else {
-				r.change("stopped %s", name)
-			}
-		}
-		if m.isEnabled(ctx, name) {
-			if _, err := m.systemctl(ctx, "disable", name); err != nil {
-				r.addf("could not disable %s: %v", name, err)
-			} else {
-				r.change("disabled %s", name)
-			}
-		}
-		if err := os.Remove(path); err != nil {
-			return r, fmt.Errorf("remove %s: %w", path, err)
-		}
-		r.change("removed %s", path)
-		removed = true
+	name := CollectUnit
+	path := filepath.Join(m.unitDir(), name)
+	if !fileExists(path) {
+		r.addf("%s is not installed", name)
+		return r, nil
 	}
-	if removed {
-		if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
-			r.addf("could not reload the service manager: %v", err)
+	if !force && !hasStamp(path) {
+		r.addf("refusing to remove %s: it carries no %q line, so aiusage did not write it; pass --force to delete it anyway",
+			path, unitStamp)
+		r.Refused++
+		return r, nil
+	}
+	if m.isActive(ctx, name) {
+		if _, err := m.systemctl(ctx, "stop", name); err != nil {
+			r.addf("could not stop %s: %v", name, err)
+		} else {
+			r.change("stopped %s", name)
 		}
+	}
+	if m.isEnabled(ctx, name) {
+		if _, err := m.systemctl(ctx, "disable", name); err != nil {
+			r.addf("could not disable %s: %v", name, err)
+		} else {
+			r.change("disabled %s", name)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		return r, fmt.Errorf("remove %s: %w", path, err)
+	}
+	r.change("removed %s", path)
+	if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
+		r.addf("could not reload the service manager: %v", err)
 	}
 	return r, nil
 }
 
-// Status reports both units, installed or not, in a fixed order so a diagnostic
-// reads the same on every machine. A unit with no file is reported as absent
-// without asking systemd about it: the file is what this package installed, and
-// its absence is the answer.
+// Status reports the unit, installed or not. A unit with no file is reported as
+// absent without asking systemd about it: the file is what this package
+// installed, and its absence is the answer.
 //
 // Every state query obeys the caller's deadline, and a unit whose queries did
 // not complete inside it comes back with StateKnown false rather than with the
 // zero value dressed up as an answer. The deadline is why: a diagnostic asks
-// about two units, that is four calls into a manager that may be answering
-// slowly, and the caller bounds the lot. What it must not do in exchange is
-// print "inactive, not enabled" about a unit nobody managed to ask.
+// enabled and active of a manager that may be answering slowly, and the caller
+// bounds the lot. What it must not do in exchange is print "inactive, not
+// enabled" about a unit nobody managed to ask.
+//
+// It returns a slice because supervision is a set of units, whatever this
+// version happens to install; a caller renders whatever it is handed.
 func (m *Manager) Status(ctx context.Context) []UnitStatus {
-	dir := m.unitDir()
-	out := make([]UnitStatus, 0, 2)
-	for _, name := range []string{CollectUnit, WebUnit} {
-		st := UnitStatus{Name: name, Installed: fileExists(filepath.Join(dir, name))}
-		if st.Installed && ctx.Err() == nil {
-			st.Enabled = m.isEnabled(ctx, name)
-			st.Active = m.isActive(ctx, name)
-			st.StateKnown = ctx.Err() == nil
-		}
-		out = append(out, st)
+	st := UnitStatus{Name: CollectUnit, Installed: fileExists(filepath.Join(m.unitDir(), CollectUnit))}
+	if st.Installed && ctx.Err() == nil {
+		st.Enabled = m.isEnabled(ctx, CollectUnit)
+		st.Active = m.isActive(ctx, CollectUnit)
+		st.StateKnown = ctx.Err() == nil
 	}
-	return out
+	return []UnitStatus{st}
 }
 
 // writeUnit creates one unit file. It reports whether it wrote anything, and
@@ -446,13 +355,7 @@ func (m *Manager) writeUnit(dir, name, body string, force bool, r *Result) (wrot
 // already done is left alone, which is what keeps a repeated install from being
 // a repeated restart.
 //
-// Three departures from that, each earned:
-//
-// A unit whose address is already answering is installed and then left entirely
-// alone - not started, and not even enabled. Something else holds that port,
-// most likely a dashboard the user started by hand, and a unit that cannot bind
-// under Restart=always is a restart loop until StartLimitBurst trips. Enabling
-// it would only move the same fight to the next login.
+// Two departures from that, each earned:
 //
 // A unit whose file Force just rewrote is restarted rather than reported as
 // already running. The point of rewriting an ExecStart is that the new one runs;
@@ -463,11 +366,6 @@ func (m *Manager) writeUnit(dir, name, body string, force bool, r *Result) (wrot
 // collection lock the fallback daemon may by then be holding.
 func (m *Manager) activate(ctx context.Context, u unitPlan, r *Result) error {
 	active := m.isActive(ctx, u.name)
-	if !active && u.addr != "" && m.addrInUse(u.addr) {
-		r.addf("%s installed but not started: %s is already in use; free that address, then run: systemctl --user enable --now %s",
-			u.name, u.addr, u.name)
-		return nil
-	}
 
 	enabledHere := false
 	if m.isEnabled(ctx, u.name) {

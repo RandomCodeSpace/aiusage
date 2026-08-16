@@ -1,17 +1,10 @@
 name: Release
 
-# Cuts a GitHub Release when a version tag (vX.Y.Z) is pushed: builds the web
-# UI, then cross-compiles linux/darwin for amd64+arm64 (Windows is
-# intentionally not a target — see .goreleaser.yaml), builds archives +
-# checksums, and injects the tag version into the binary via ldflags.
-# Versioning is tag-driven — `git tag v1.2.3 && git push origin v1.2.3`.
-#
-# The Vite build runs here, as a workflow step, and not as a GoReleaser
-# before-hook: hooks are plain strings, word-split and run without a shell, and
-# there is no per-hook working directory, so `cd webui && npm ci` is not
-# expressible. Order is load-bearing: .goreleaser.yaml builds with
-# `-tags webui`, whose //go:embed all:dist fails to compile unless
-# internal/web/dist already holds the built assets.
+# Cuts a GitHub Release when a version tag (vX.Y.Z) is pushed: cross-compiles
+# linux/darwin for amd64+arm64 (Windows is intentionally not a target — see
+# .goreleaser.yaml), builds archives + checksums, and injects the tag version
+# into the binary via ldflags. Versioning is tag-driven —
+# `git tag v1.2.3 && git push origin v1.2.3`.
 
 on:
   push:
@@ -34,28 +27,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: webui/package-lock.json
-
-      - name: build web UI
-        working-directory: webui
-        run: |
-          npm ci
-          npm run build
-
-      # Fail here, with a sentence, rather than inside a cross-compile loop
-      # with an embed error. internal/web/dist is gitignored, so GoReleaser's
-      # dirty-tree check is unaffected by what this produced.
-      - name: verify embedded assets
-        run: |
-          if [ ! -f internal/web/dist/index.html ]; then
-            echo "::error::webui build produced no internal/web/dist/index.html; the tagged build would not compile"
-            exit 1
-          fi
 
       - name: GoReleaser
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6

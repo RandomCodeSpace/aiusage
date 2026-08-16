@@ -9,7 +9,6 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
-	"github.com/RandomCodeSpace/aiusage/internal/web"
 )
 
 // newSupervisor returns the systemd user-service manager this process drives.
@@ -41,18 +40,11 @@ func supervisionContext(ctx context.Context) (context.Context, context.CancelFun
 }
 
 // supervisionOptions builds the install plan for cfg, with args as the global
-// flags to bake into both units.
+// flags to bake into the unit.
 //
 // The caller supplies args rather than a globalFlags, because the two install
 // paths disagree about them on purpose: `aiusage setup` bakes what it was given
 // (see runSetup), and the automatic path bakes nothing at all (see autoArgs).
-//
-// The web unit is asked for unconditionally; service.Install is what refuses it
-// in a build with no embedded UI, so the capability rule lives in one place.
-// The address is passed explicitly rather than left to serve's default, because
-// a unit file that names the port is a unit file an operator can read - and
-// because service.Install checks that address before starting the unit, which
-// it cannot do for a port it was never told about.
 func supervisionOptions(cfg config.Config, args []string) (service.Options, error) {
 	exe, err := service.SelfExec()
 	if err != nil {
@@ -63,8 +55,6 @@ func supervisionOptions(cfg config.Config, args []string) (service.Options, erro
 		Args:     args,
 		DataDir:  filepath.Dir(cfg.DBPath),
 		StateDir: filepath.Dir(cfg.PIDPath),
-		Web:      true,
-		WebAddr:  web.DefaultAddr,
 	}, nil
 }
 
@@ -144,7 +134,7 @@ func superviseStart(ctx context.Context, cfg config.Config, f globalFlags, warn 
 	}
 	o, err := supervisionOptions(cfg, autoArgs())
 	if err != nil {
-		fmt.Fprintf(warn, "notice: could not install the aiusage services: %v\n", err)
+		fmt.Fprintf(warn, "notice: could not install the aiusage service: %v\n", err)
 		return false
 	}
 	res, err := m.Install(ctx, o)
@@ -152,7 +142,7 @@ func superviseStart(ctx context.Context, cfg config.Config, f globalFlags, warn 
 		// A failure degrades to ONE line, the same one it always did. The
 		// account of a half-finished install would be several, in front of a
 		// command that is about to fall back and work anyway.
-		fmt.Fprintf(warn, "notice: could not install the aiusage services: %v\n", err)
+		fmt.Fprintf(warn, "notice: could not install the aiusage service: %v\n", err)
 		return false
 	}
 	reportSupervision(warn, res)
@@ -164,13 +154,10 @@ func superviseStart(ctx context.Context, cfg config.Config, f globalFlags, warn 
 //
 // The automatic install runs behind a command the user typed to see a number,
 // which pulls in two directions. Silence is wrong when something happened:
-// installing, enabling and STARTING two long-lived services - one of them a
-// network listener - is not a side effect to perform without a word, and the
-// case that made this necessary is a dashboard unit written but deliberately
-// not started because its port was taken, where the explanation was assembled
-// and then dropped on the floor. Noise is wrong the rest of the time: the
-// steady state is a dozen invocations a day finding everything already in
-// place, and a notice on each of them is a notice nobody reads.
+// installing, enabling and STARTING a long-lived service is not a side effect
+// to perform without a word. Noise is wrong the rest of the time: the steady
+// state is a dozen invocations a day finding everything already in place, and a
+// notice on each of them is a notice nobody reads.
 //
 // service.Result.Changed draws that line, so what prints here is exactly the
 // account of a run that did something: the first install, a rewrite, an enable
@@ -181,7 +168,7 @@ func reportSupervision(warn io.Writer, res service.Result) {
 	if !res.Changed {
 		return
 	}
-	fmt.Fprintln(warn, "notice: aiusage changed its own systemd user services (`aiusage setup --remove` removes them):")
+	fmt.Fprintln(warn, "notice: aiusage changed its own systemd user service (`aiusage setup --remove` removes them):")
 	// Written verbatim rather than as format strings: the lines carry paths,
 	// and a path with a percent sign in it is not a format verb.
 	for _, ln := range res.Lines {
@@ -193,10 +180,8 @@ func reportSupervision(warn io.Writer, res service.Result) {
 // is the supervised equivalent of stopping a daemon and spawning a new one.
 //
 // It restarts only what is already running, so it answers false whenever the
-// running collector is not the unit - a detached daemon from before the units
-// existed, say - leaving the stop-and-respawn path to the caller. The dashboard
-// is restarted alongside, since it does not re-exec itself when the binary
-// under it is replaced the way the collector does.
+// running collector is not the unit - a detached daemon from before the unit
+// existed, say - leaving the stop-and-respawn path to the caller.
 func superviseRestart(ctx context.Context, f globalFlags, warn io.Writer) bool {
 	m := newSupervisor()
 	if !autoInstall(f) {
@@ -210,7 +195,7 @@ func superviseRestart(ctx context.Context, f globalFlags, warn io.Writer) bool {
 	}
 	res, err := m.Restart(ctx)
 	if err != nil {
-		fmt.Fprintf(warn, "notice: could not restart the aiusage services: %v\n", err)
+		fmt.Fprintf(warn, "notice: could not restart the aiusage service: %v\n", err)
 		return false
 	}
 	reportSupervision(warn, res)

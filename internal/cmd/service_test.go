@@ -129,32 +129,16 @@ func (f *fakeUnits) ran(want string) bool {
 }
 
 // stubSupervisor installs a fake service manager writing into a temp unit
-// directory, for the test's duration.
-//
-// Dial answers "free" for every address: the dashboard unit binds the default
-// port, this machine has the developer's own dashboard on it, and a real probe
-// would make the install path behave differently here than on a clean machine.
+// directory, for the test's duration. The machine running these tests has a
+// real systemd user manager with the developer's own aiusage unit in it, and
+// nothing here may reach it.
 func stubSupervisor(t *testing.T) (*fakeUnits, string) {
 	t.Helper()
 	f := newFakeUnits()
 	dir := filepath.Join(t.TempDir(), "systemd", "user")
 	prev := newSupervisor
 	newSupervisor = func() *service.Manager {
-		return &service.Manager{UnitDir: dir, Run: f.run, Dial: func(string) bool { return false }}
-	}
-	t.Cleanup(func() { newSupervisor = prev })
-	return f, dir
-}
-
-// stubSupervisorWithBoundAddr is stubSupervisor with every address already
-// answering: the case where the dashboard unit is installed and deliberately
-// not started, which is where the install's account used to be discarded.
-func stubSupervisorWithBoundAddr(t *testing.T) (*fakeUnits, string) {
-	t.Helper()
-	f, dir := stubSupervisor(t)
-	prev := newSupervisor
-	newSupervisor = func() *service.Manager {
-		return &service.Manager{UnitDir: dir, Run: f.run, Dial: func(string) bool { return true }}
+		return &service.Manager{UnitDir: dir, Run: f.run}
 	}
 	t.Cleanup(func() { newSupervisor = prev })
 	return f, dir
@@ -635,10 +619,6 @@ func TestEnsureDaemonInstallsUnits(t *testing.T) {
 	if !unitExists(dir, service.CollectUnit) {
 		t.Fatalf("no collection unit written into %s", dir)
 	}
-	if unitExists(dir, service.WebUnit) != buildinfo.HasWebUI {
-		t.Errorf("dashboard unit present = %v, want %v (the build capability decides)",
-			unitExists(dir, service.WebUnit), buildinfo.HasWebUI)
-	}
 	if !f.ran("start " + service.CollectUnit) {
 		t.Errorf("collection unit was never started: %v", f.calls)
 	}
@@ -716,8 +696,7 @@ func TestEnsureDaemonDegradesWhenSupervisionFails(t *testing.T) {
 
 // TestEnsureDaemonRestartsTheUnitOnBuildMismatch is version sync under
 // supervision: the collector is replaced by restarting its unit, not by killing
-// a process systemd would only start again. The dashboard goes with it, because
-// it has no self-exec watch of its own.
+// a process systemd would only start again.
 func TestEnsureDaemonRestartsTheUnitOnBuildMismatch(t *testing.T) {
 	setVersion(t, "v9.9.9")
 	f, dir := stubSupervisor(t)
@@ -732,17 +711,15 @@ func TestEnsureDaemonRestartsTheUnitOnBuildMismatch(t *testing.T) {
 	cfg := config.Config{PIDPath: pidPath, DBPath: filepath.Join(t.TempDir(), "usage.db")}
 	collect.WriteDaemonVersion(cfg, "v1.0.0")
 
-	// Both units installed and running, which is what makes this a restart.
+	// Installed and running, which is what makes this a restart.
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir units: %v", err)
 	}
-	for _, name := range []string{service.CollectUnit, service.WebUnit} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("[Service]\n"), 0o644); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
-		}
-		f.active[name] = true
-		f.enabled[name] = true
+	if err := os.WriteFile(filepath.Join(dir, service.CollectUnit), []byte("[Service]\n"), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", service.CollectUnit, err)
 	}
+	f.active[service.CollectUnit] = true
+	f.enabled[service.CollectUnit] = true
 
 	calls, restore := stubSpawn(t)
 	defer restore()
@@ -756,9 +733,6 @@ func TestEnsureDaemonRestartsTheUnitOnBuildMismatch(t *testing.T) {
 	}
 	if !f.ran("restart " + service.CollectUnit) {
 		t.Errorf("the collection unit was not restarted: %v", f.calls)
-	}
-	if !f.ran("restart " + service.WebUnit) {
-		t.Errorf("the dashboard unit was not restarted, so it keeps running the old build: %v", f.calls)
 	}
 	if stopped != 0 || *calls != 0 {
 		t.Errorf("supervised restart also killed and respawned: stops=%d spawns=%d", stopped, *calls)
@@ -832,13 +806,12 @@ func TestDoctorReportsSupervision(t *testing.T) {
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatalf("mkdir units: %v", err)
 				}
-				for _, name := range []string{service.CollectUnit, service.WebUnit} {
-					if err := os.WriteFile(filepath.Join(dir, name), []byte("[Service]\n"), 0o644); err != nil {
-						t.Fatalf("seed %s: %v", name, err)
-					}
-					f.active[name] = tc.active
-					f.enabled[name] = tc.active
+				name := service.CollectUnit
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("[Service]\n"), 0o644); err != nil {
+					t.Fatalf("seed %s: %v", name, err)
 				}
+				f.active[name] = tc.active
+				f.enabled[name] = tc.active
 			}
 
 			home := t.TempDir()
@@ -925,8 +898,7 @@ func TestSetupBakesTheFlagsItWasGiven(t *testing.T) {
 	_, dir := stubSupervisor(t)
 	db := filepath.Join(t.TempDir(), "elsewhere.db")
 
-	out, err := runCmd(t, "--db", db, "--config", offlineConfig(t), "setup",
-		"--addr", "127.0.0.1:37999", "--allowed-hosts", "aiusage.example.net")
+	out, err := runCmd(t, "--db", db, "--config", offlineConfig(t), "setup")
 	if err != nil {
 		t.Fatalf("setup: %v\n%s", err, out)
 	}
@@ -937,34 +909,27 @@ func TestSetupBakesTheFlagsItWasGiven(t *testing.T) {
 	if !strings.Contains(string(body), "--db "+db) {
 		t.Errorf("explicit setup dropped --db:\n%s", body)
 	}
-	if !buildinfo.HasWebUI {
-		return
-	}
-	web, err := os.ReadFile(filepath.Join(dir, service.WebUnit))
-	if err != nil {
-		t.Fatalf("read web unit: %v", err)
-	}
-	for _, want := range []string{"--addr 127.0.0.1:37999", "--allowed-hosts aiusage.example.net", "--no-daemon"} {
-		if !strings.Contains(string(web), want) {
-			t.Errorf("dashboard unit missing %q:\n%s", want, web)
-		}
-	}
 }
 
-// TestSetupNoWebInstallsOnlyTheCollector: --no-web is the deliberate negation
-// and wins over the affirmative default.
-func TestSetupNoWebInstallsOnlyTheCollector(t *testing.T) {
+// TestSetupInstallsOnlyTheCollector: aiusage supervises one process. A second
+// unit file in the directory would be one this CLI never accounted for.
+func TestSetupInstallsOnlyTheCollector(t *testing.T) {
 	_, dir := stubSupervisor(t)
 
-	out, err := runCmd(t, "--config", offlineConfig(t), "setup", "--no-web")
+	out, err := runCmd(t, "--config", offlineConfig(t), "setup")
 	if err != nil {
-		t.Fatalf("setup --no-web: %v\n%s", err, out)
+		t.Fatalf("setup: %v\n%s", err, out)
 	}
-	if !unitExists(dir, service.CollectUnit) {
-		t.Fatalf("--no-web skipped the collection unit too:\n%s", out)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read unit dir: %v", err)
 	}
-	if unitExists(dir, service.WebUnit) {
-		t.Errorf("--no-web installed the dashboard unit:\n%s", out)
+	if len(entries) != 1 || entries[0].Name() != service.CollectUnit {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("setup wrote %v, want only %s:\n%s", names, service.CollectUnit, out)
 	}
 }
 
@@ -1017,19 +982,16 @@ func TestSetupWithoutSystemdSaysSo(t *testing.T) {
 // TestAutomaticInstallReportsItselfExactlyOnce is the account the automatic
 // path owes the user.
 //
-// Measured before it did: a build with the embedded UI, run as `aiusage today`
-// against an already-bound dashboard port, installed two systemd user units,
-// enabled and started one of them, deliberately skipped the other - and wrote
-// ZERO bytes to stderr. The notice explaining the skipped dashboard was
-// assembled by internal/service and dropped on the floor, and on a machine
-// where the port is free an ordinary report command installed, enabled and
-// STARTED a long-lived network listener with nothing said about it at all.
+// Measured before it gave one: an ordinary `aiusage today` installed a systemd
+// user unit, enabled it and STARTED a long-lived service - and wrote ZERO bytes
+// to stderr. Installing a background process is not a side effect to perform
+// without a word.
 //
 // The second half of the rule matters as much: the steady state is a dozen
 // report commands a day finding everything already in place, and a notice on
 // each of them is a notice nobody reads.
 func TestAutomaticInstallReportsItselfExactlyOnce(t *testing.T) {
-	f, dir := stubSupervisorWithBoundAddr(t)
+	f, dir := stubSupervisor(t)
 	setFlags(t, globalFlags{})
 	clearPathEnv(t)
 	calls, restore := stubSpawn(t)
@@ -1054,17 +1016,6 @@ func TestAutomaticInstallReportsItselfExactlyOnce(t *testing.T) {
 			t.Errorf("the install notice never mentions %q:\n%s", want, first)
 		}
 	}
-	// The dashboard case the notice was written for: installed, and not
-	// started, because something already answers on its address.
-	if buildinfo.HasWebUI {
-		if !strings.Contains(first, "already in use") {
-			t.Errorf("the dashboard was skipped for a busy address and the reason was not reported:\n%s", first)
-		}
-		if f.ran("start " + service.WebUnit) {
-			t.Errorf("the dashboard unit was started against a bound address: %v", f.calls)
-		}
-	}
-
 	// Second run: everything is already in place, so nothing may be printed.
 	warn.Reset()
 	if err := ensureDaemon(t.Context(), cfg, &warn); err != nil {
@@ -1126,7 +1077,7 @@ func execStartLine(t *testing.T, path string) string {
 }
 
 // TestDoctorSupervisionCannotOutlastItsBudget: doctor asks the service manager
-// five questions (availability, then enabled and active for two units), and a
+// several questions (availability, then enabled and active per unit), and a
 // manager answering each of them in four seconds - a loaded machine, not a
 // broken one - made the supervision block take a measured 20 seconds with
 // nothing printed until it finished. doctor is reached BECAUSE supervision is
@@ -1141,10 +1092,8 @@ func TestDoctorSupervisionCannotOutlastItsBudget(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir units: %v", err)
 	}
-	for _, name := range []string{service.CollectUnit, service.WebUnit} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("[Service]\n"), 0o644); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
-		}
+	if err := os.WriteFile(filepath.Join(dir, service.CollectUnit), []byte("[Service]\n"), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", service.CollectUnit, err)
 	}
 
 	home := t.TempDir()
@@ -1240,14 +1189,10 @@ func TestSetupRemoveRefusalIsNotSuccess(t *testing.T) {
 	}
 }
 
-// TestServeNeverInstallsTheDashboardUnit: `aiusage serve` binds the dashboard
-// port in this process, so an install hook on that command would start a second
-// process against the same port. It stays in daemonSkip, alongside setup, which
-// is the command that does the installing.
-func TestServeNeverInstallsTheDashboardUnit(t *testing.T) {
-	for _, name := range []string{"serve", "setup"} {
-		if !daemonSkip[name] {
-			t.Errorf("%q is not in daemonSkip", name)
-		}
+// TestSetupIsNotADaemonSpawner: setup is the command that does the installing,
+// so the automatic install hook must not also fire in front of it.
+func TestSetupIsNotADaemonSpawner(t *testing.T) {
+	if !daemonSkip["setup"] {
+		t.Error(`"setup" is not in daemonSkip`)
 	}
 }

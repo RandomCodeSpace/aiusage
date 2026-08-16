@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 )
 
 // errExitOne stands in for the exit status systemctl uses to say no. Every
@@ -33,8 +30,8 @@ type fakeSystemd struct {
 	linger  bool
 	// fail maps a verb (start, enable, show-environment, enable-linger, ...) to
 	// the error it answers with. A key of "verb unit" refuses that verb for one
-	// unit only, which is how a dashboard that will not start is told apart from
-	// a service manager that refuses everything.
+	// unit only, which is how a single stubborn unit is told apart from a
+	// service manager that refuses everything.
 	fail map[string]error
 }
 
@@ -142,19 +139,15 @@ func (f *fakeSystemd) ran(want string) bool {
 }
 
 // testManager returns a Manager wired to a fake service manager and a unit
-// directory under the test's temp dir.
-//
-// Dial answers "free" for every address. The machine running these tests has a
-// dashboard of the developer's own on the default port, and a probe that
-// reached it would make the install path behave differently here than on a
-// clean machine.
+// directory under the test's temp dir. Nothing here may reach the real
+// systemctl: the machine running these tests has the developer's own units in
+// its user manager.
 func testManager(t *testing.T) (*Manager, *fakeSystemd) {
 	t.Helper()
 	f := newFake()
 	return &Manager{
 		UnitDir: filepath.Join(t.TempDir(), "systemd", "user"),
 		Run:     f.run,
-		Dial:    func(string) bool { return false },
 	}, f
 }
 
@@ -166,18 +159,18 @@ func testOptions(t *testing.T) Options {
 		Exec:     filepath.Join(dir, "bin", "aiusage"),
 		DataDir:  filepath.Join(dir, "data"),
 		StateDir: filepath.Join(dir, "state"),
-		Web:      true,
-		WebAddr:  "127.0.0.1:37800",
 	}
 }
 
-// TestRenderedUnitsCarryTheHardening pins the directives that make a generated
+// TestRenderedUnitCarriesTheHardening pins the directives that make a generated
 // unit equivalent to the hand-written one it replaces. A sandbox that quietly
 // stopped being applied would never show up in behaviour: the daemon would keep
 // collecting, with more of the filesystem writable than it needs.
-func TestRenderedUnitsCarryTheHardening(t *testing.T) {
+func TestRenderedUnitCarriesTheHardening(t *testing.T) {
 	o := testOptions(t)
-	shared := []string{
+	body := renderCollect(o)
+
+	want := []string{
 		// The stamp is what --remove checks before deleting a file, so a unit
 		// rendered without one would be a unit aiusage could not take back.
 		unitStamp,
@@ -195,56 +188,23 @@ func TestRenderedUnitsCarryTheHardening(t *testing.T) {
 		"StartLimitBurst=5",
 		"[Install]",
 		"WantedBy=default.target",
+		"Description=aiusage collection daemon",
+		"After=network.target",
+		"ExecStart=" + o.Exec + " run",
+		"RestartSec=10",
+		"ReadWritePaths=" + o.DataDir + " " + o.StateDir,
 	}
-
-	tests := []struct {
-		name string
-		body string
-		want []string
-		deny []string
-	}{
-		{
-			name: CollectUnit,
-			body: renderCollect(o),
-			want: append([]string{
-				"Description=aiusage collection daemon",
-				"After=network.target",
-				"ExecStart=" + o.Exec + " run",
-				"RestartSec=10",
-				"ReadWritePaths=" + o.DataDir + " " + o.StateDir,
-			}, shared...),
-			deny: []string{"--addr", "--no-daemon"},
-		},
-		{
-			name: WebUnit,
-			body: renderWeb(o),
-			want: append([]string{
-				"Description=aiusage web UI and read-only API",
-				"After=network.target " + CollectUnit,
-				"ExecStart=" + o.Exec + " serve --addr 127.0.0.1:37800 --no-daemon",
-				"RestartSec=5",
-				"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
-				"ReadWritePaths=" + o.DataDir + "\n",
-			}, shared...),
-			// The dashboard never collects: a server that spawned a writer as a
-			// side effect of serving a page would be a second collector.
-			deny: []string{o.StateDir, " run "},
-		},
+	for _, w := range want {
+		if !strings.Contains(body, w) {
+			t.Errorf("unit is missing %q:\n%s", w, body)
+		}
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, w := range tc.want {
-				if !strings.Contains(tc.body, w) {
-					t.Errorf("unit is missing %q:\n%s", w, tc.body)
-				}
-			}
-			for _, d := range tc.deny {
-				if strings.Contains(tc.body, d) {
-					t.Errorf("unit unexpectedly contains %q:\n%s", d, tc.body)
-				}
-			}
-		})
+	// aiusage binds no port: the unit has no address to name, and nothing here
+	// may grow a subcommand flag by accident.
+	for _, d := range []string{"--addr", "--no-daemon", "--allowed-hosts", "RestrictAddressFamilies"} {
+		if strings.Contains(body, d) {
+			t.Errorf("unit unexpectedly contains %q:\n%s", d, body)
+		}
 	}
 }
 
@@ -254,18 +214,10 @@ func TestRenderedUnitsCarryTheHardening(t *testing.T) {
 func TestRenderedUnitForwardsGlobalFlags(t *testing.T) {
 	o := testOptions(t)
 	o.Args = []string{"--db", "/srv/usage.db", "--interval", "300"}
-	o.AllowedHosts = []string{"aiusage.example.net", "aiusage-dev.example.net"}
 
 	collect := renderCollect(o)
 	if want := "ExecStart=" + o.Exec + " run --db /srv/usage.db --interval 300\n"; !strings.Contains(collect, want) {
 		t.Errorf("collect unit ExecStart missing %q:\n%s", want, collect)
-	}
-
-	webUnit := renderWeb(o)
-	want := "ExecStart=" + o.Exec + " serve --addr 127.0.0.1:37800 --no-daemon " +
-		"--allowed-hosts aiusage.example.net,aiusage-dev.example.net --db /srv/usage.db --interval 300\n"
-	if !strings.Contains(webUnit, want) {
-		t.Errorf("web unit ExecStart missing %q:\n%s", want, webUnit)
 	}
 }
 
@@ -290,7 +242,7 @@ func TestQuoteProtectsUnitValues(t *testing.T) {
 }
 
 // TestInstallWritesEnablesAndStarts is the first-run path: nothing exists, so
-// both units are written, the manager is reloaded, and each unit is enabled
+// the unit is written, the manager is reloaded, and the unit is enabled
 // (survives a reboot) and started (collects now).
 func TestInstallWritesEnablesAndStarts(t *testing.T) {
 	m, f := testManager(t)
@@ -305,15 +257,11 @@ func TestInstallWritesEnablesAndStarts(t *testing.T) {
 	}
 
 	assertUnitFile(t, m, CollectUnit, true)
-	assertUnitFile(t, m, WebUnit, buildinfo.HasWebUI)
 
 	for _, want := range []string{"daemon-reload", "enable " + CollectUnit, "start " + CollectUnit} {
 		if !f.ran(want) {
 			t.Errorf("Install never ran %q; calls: %v", want, f.calls)
 		}
-	}
-	if buildinfo.HasWebUI && !f.ran("start "+WebUnit) {
-		t.Errorf("Install never started the dashboard unit; calls: %v", f.calls)
 	}
 	// Every command is non-interactive: a password prompt in front of a report
 	// command hangs a terminal the user thought was printing numbers.
@@ -410,42 +358,26 @@ func TestInstallEnablesAPresentButStoppedUnit(t *testing.T) {
 	}
 }
 
-// TestInstallWebUnitFollowsTheBuildCapability: serve exits 1 in a build with no
-// embedded UI, and a unit that exits 1 under Restart=always is a restart loop.
-// The rendered plan therefore tracks the build, not the request.
-func TestInstallWebUnitFollowsTheBuildCapability(t *testing.T) {
+// TestInstallInstallsExactlyOneUnit: aiusage supervises the collector and
+// nothing else. A second unit file appearing in the directory would be a
+// process this package never accounted for.
+func TestInstallInstallsExactlyOneUnit(t *testing.T) {
 	m, _ := testManager(t)
-	o := testOptions(t)
 
-	res, err := m.Install(t.Context(), o)
+	if _, err := m.Install(t.Context(), testOptions(t)); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	entries, err := os.ReadDir(m.unitDir())
 	if err != nil {
-		t.Fatalf("Install: %v", err)
+		t.Fatalf("read unit dir: %v", err)
 	}
-	assertUnitFile(t, m, WebUnit, buildinfo.HasWebUI)
-
-	skipped := false
-	for _, ln := range res.Lines {
-		if strings.Contains(ln, "skipped "+WebUnit) {
-			skipped = true
+	if len(entries) != 1 || entries[0].Name() != CollectUnit {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
 		}
+		t.Fatalf("unit directory holds %v, want only %s", names, CollectUnit)
 	}
-	if skipped == buildinfo.HasWebUI {
-		t.Fatalf("HasWebUI=%v but the dashboard unit was %s: %v",
-			buildinfo.HasWebUI, map[bool]string{true: "skipped", false: "installed"}[skipped], res.Lines)
-	}
-}
-
-// TestInstallWithoutWeb: --no-web installs the collector alone.
-func TestInstallWithoutWeb(t *testing.T) {
-	m, _ := testManager(t)
-	o := testOptions(t)
-	o.Web = false
-
-	if _, err := m.Install(t.Context(), o); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	assertUnitFile(t, m, CollectUnit, true)
-	assertUnitFile(t, m, WebUnit, false)
 }
 
 // TestInstallFailuresDegrade is the whole safety contract in one table: every
@@ -506,7 +438,6 @@ func TestRestartOnlyTouchesRunningUnits(t *testing.T) {
 	if _, err := m.Install(t.Context(), o); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	delete(f.active, WebUnit)
 	f.calls = nil
 
 	res, err := m.Restart(t.Context())
@@ -516,7 +447,15 @@ func TestRestartOnlyTouchesRunningUnits(t *testing.T) {
 	if !res.Collecting || !f.ran("restart "+CollectUnit) {
 		t.Errorf("Restart did not replace the running collector: %v", res.Lines)
 	}
-	if f.ran("restart " + WebUnit) {
+
+	// Stopped, so there is nothing to replace and nothing may be started.
+	delete(f.active, CollectUnit)
+	f.calls = nil
+	res, err = m.Restart(t.Context())
+	if err != nil {
+		t.Fatalf("Restart of a stopped unit: %v", err)
+	}
+	if res.Collecting || f.ran("restart ") || f.ran("start ") {
 		t.Errorf("Restart started a stopped unit; calls: %v", f.calls)
 	}
 }
@@ -551,7 +490,6 @@ func TestRemoveStopsDisablesAndDeletes(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 	assertUnitFile(t, m, CollectUnit, false)
-	assertUnitFile(t, m, WebUnit, false)
 	for _, want := range []string{"stop " + CollectUnit, "disable " + CollectUnit, "daemon-reload"} {
 		if !f.ran(want) {
 			t.Errorf("Remove never ran %q; calls: %v", want, f.calls)
@@ -643,51 +581,6 @@ func TestInstallMarksOnlyRunsThatChangedSomething(t *testing.T) {
 	}
 }
 
-// TestBusyDashboardAddressIsReportedOnceNotForever: the skipped-dashboard line
-// explains something that did NOT happen, and it repeats identically on every
-// invocation until somebody frees the port. It rides along with the install
-// that first produced it and is silent afterwards - the difference between a
-// report and a nag, in front of a command the user typed to see a number.
-func TestBusyDashboardAddressIsReportedOnceNotForever(t *testing.T) {
-	if !buildinfo.HasWebUI {
-		t.Skip("no dashboard unit in a build without the embedded UI")
-	}
-	m, _ := testManager(t)
-	o := testOptions(t)
-	m.Dial = func(addr string) bool { return addr == o.WebAddr }
-
-	res, err := m.Install(t.Context(), o)
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	if !res.Changed {
-		t.Fatal("the first install reported no change, so the skip notice would never be printed")
-	}
-	if !hasLineContaining(res.Lines, "already in use") {
-		t.Errorf("the dashboard was skipped without saying why:\n%v", res.Lines)
-	}
-
-	res, err = m.Install(t.Context(), o)
-	if err != nil {
-		t.Fatalf("second Install: %v", err)
-	}
-	if !hasLineContaining(res.Lines, "already in use") {
-		t.Errorf("the repeat install stopped explaining the skipped dashboard:\n%v", res.Lines)
-	}
-	if res.Changed {
-		t.Errorf("a port that is still busy was reported as a change:\n%v", res.Lines)
-	}
-}
-
-func hasLineContaining(lines []string, want string) bool {
-	for _, ln := range lines {
-		if strings.Contains(ln, want) {
-			return true
-		}
-	}
-	return false
-}
-
 // TestTimeoutSaysADeadlineExpired: a command killed for running out of time
 // reported the signal that killed it, so the caller's whole account of the
 // failure was "systemctl --user daemon-reload: signal: killed" - the mechanism,
@@ -736,7 +629,7 @@ func TestTimeoutSaysADeadlineExpired(t *testing.T) {
 	})
 }
 
-// TestStatusReportsUnknownRatherThanInactive: a diagnostic asks about two units
+// TestStatusReportsUnknownRatherThanInactive: a diagnostic asks its questions
 // under one deadline, and a manager that stops answering must not be reported
 // as a manager that said "inactive, not enabled". The unit file is on disk
 // either way, so Installed stays an answer.
@@ -758,25 +651,34 @@ func TestStatusReportsUnknownRatherThanInactive(t *testing.T) {
 	}
 }
 
-// TestStatusReportsBothUnits feeds the doctor line. A unit with no file is
+// TestStatusReportsTheUnit feeds the doctor line. A unit with no file is
 // reported absent without asking the service manager: the file is what this
 // package installs, and its absence is the answer.
-func TestStatusReportsBothUnits(t *testing.T) {
+func TestStatusReportsTheUnit(t *testing.T) {
 	m, f := testManager(t)
 	o := testOptions(t)
+
+	got := m.Status(t.Context())
+	if len(got) != 1 {
+		t.Fatalf("Status returned %d units, want 1", len(got))
+	}
+	if got[0] != (UnitStatus{Name: CollectUnit}) {
+		t.Errorf("status of an uninstalled unit = %+v, want absent", got[0])
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("Status asked the service manager about an absent unit: %v", f.calls)
+	}
+
 	seedUnit(t, m, CollectUnit, renderCollect(o))
 	f.enabled[CollectUnit] = true
 	f.active[CollectUnit] = true
 
-	got := m.Status(t.Context())
-	if len(got) != 2 {
-		t.Fatalf("Status returned %d units, want 2", len(got))
+	got = m.Status(t.Context())
+	if len(got) != 1 {
+		t.Fatalf("Status returned %d units, want 1", len(got))
 	}
 	if got[0] != (UnitStatus{Name: CollectUnit, Installed: true, Enabled: true, Active: true, StateKnown: true}) {
 		t.Errorf("collect status = %+v", got[0])
-	}
-	if got[1] != (UnitStatus{Name: WebUnit}) {
-		t.Errorf("web status = %+v, want absent", got[1])
 	}
 }
 
@@ -868,103 +770,6 @@ func TestExecRunnerReturnsWhenAGrandchildHoldsThePipe(t *testing.T) {
 	// plus waitDelay, and anything near ten means the pipe was waited on.
 	if elapsed, limit := time.Since(start), 3*time.Second; elapsed > limit {
 		t.Fatalf("execRunner blocked for %v behind a grandchild, want under %v", elapsed, limit)
-	}
-}
-
-// TestActivateLeavesAUnitAloneWhenItsAddressIsTaken: a build with the embedded
-// UI installs the dashboard unit as a side effect of any ordinary report
-// command, and a manual `aiusage serve` may already hold the port. A unit that
-// cannot bind under Restart=always is a restart loop until StartLimitBurst
-// trips, so the file is installed and nothing else happens - not even the
-// enable, which would only move the same collision to the next login.
-func TestActivateLeavesAUnitAloneWhenItsAddressIsTaken(t *testing.T) {
-	m, f := testManager(t)
-	const addr = "127.0.0.1:37800"
-	m.Dial = func(got string) bool { return got == addr }
-
-	var r Result
-	if err := m.activate(t.Context(), unitPlan{name: WebUnit, addr: addr}, &r); err != nil {
-		t.Fatalf("activate returned an error for a busy address: %v", err)
-	}
-	for _, unwanted := range []string{"enable ", "start "} {
-		if f.ran(unwanted) {
-			t.Errorf("activate ran %q against a busy address; calls: %v", unwanted, f.calls)
-		}
-	}
-	if len(r.Lines) != 1 || !strings.Contains(r.Lines[0], addr) {
-		t.Errorf("want one line naming the address, got %v", r.Lines)
-	}
-}
-
-// TestActivateStartsWhenTheAddressIsFree is the other half: the check only ever
-// refuses, and a free address changes nothing about the install.
-func TestActivateStartsWhenTheAddressIsFree(t *testing.T) {
-	m, f := testManager(t)
-
-	var r Result
-	if err := m.activate(t.Context(), unitPlan{name: WebUnit, addr: "127.0.0.1:37800"}, &r); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
-	if !f.ran("start " + WebUnit) {
-		t.Errorf("activate did not start a unit whose address is free; calls: %v", f.calls)
-	}
-}
-
-// TestAddrInUseProbesARealListener exercises the production probe itself, with
-// no Dial seam in the way: every other test in this file stubs it, so without
-// this one the check that decides whether to start the dashboard would never
-// meet a socket. The listener is on a port the kernel picks, so the test does
-// not care what the machine running it happens to be serving.
-func TestAddrInUseProbesARealListener(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("cannot listen on loopback: %v", err)
-	}
-	addr := ln.Addr().String()
-
-	var m Manager
-	if !m.addrInUse(addr) {
-		t.Fatalf("addrInUse(%s) = false with a listener on it", addr)
-	}
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	if m.addrInUse(addr) {
-		t.Errorf("addrInUse(%s) = true after the listener closed", addr)
-	}
-}
-
-// TestDashboardFailuresNeverAffectCollection: the collector is what records
-// data, so nothing the dashboard does may be reported as a collection failure.
-// Install returns the collection unit's error and no other.
-func TestDashboardFailuresNeverAffectCollection(t *testing.T) {
-	if !buildinfo.HasWebUI {
-		t.Skip("no embedded web UI in this build, so no dashboard unit is installed")
-	}
-	tests := []struct {
-		name string
-		fail string
-	}{
-		{name: "start refused", fail: "start " + WebUnit},
-		{name: "enable refused", fail: "enable " + WebUnit},
-		{name: "restart refused", fail: "restart " + WebUnit},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m, f := testManager(t)
-			f.fail[tc.fail] = errExitOne
-
-			res, err := m.Install(t.Context(), testOptions(t))
-			if err != nil {
-				t.Fatalf("a dashboard failure became an install error: %v", err)
-			}
-			if !res.Collecting {
-				t.Errorf("a dashboard failure cost the machine its collector: %v", res.Lines)
-			}
-			if !f.ran("start " + CollectUnit) {
-				t.Errorf("the collection unit was never started; calls: %v", f.calls)
-			}
-		})
 	}
 }
 

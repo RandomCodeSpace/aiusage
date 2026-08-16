@@ -3,12 +3,7 @@
 # (vX.Y.Z) and injected into the binary via ldflags so `aiusage version` and the
 # CLI/daemon version-sync report the real release version instead of "dev".
 #
-# The release binary embeds the web UI, so internal/web/dist must already hold
-# a Vite build before this config runs (release.yml does that in a workflow
-# step; see the builds' tags field below).
-#
 # Local dry run:
-#   (cd webui && npm ci && npm run build)
 #   goreleaser release --snapshot --clean --skip=publish
 version: 2
 
@@ -40,13 +35,6 @@ builds:
       - arm64
     flags:
       - -trimpath
-    # Releases ship the embedded web UI: this tag selects internal/web's
-    # embed_webui.go over its !webui stub, and its //go:embed all:dist requires
-    # internal/web/dist to exist at compile time. Not compiling when the assets
-    # are missing is the intended failure - a release that silently served an
-    # empty page would be worse.
-    tags:
-      - webui
     ldflags:
       - -s -w -X github.com/RandomCodeSpace/aiusage/internal/buildinfo.Version={{ .Version }}
 

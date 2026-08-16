@@ -7,18 +7,14 @@ import (
 	"strings"
 )
 
-// Unit file names. They are fixed rather than derived: a machine that was set
-// up by hand already carries these two files, and a generated install has to
-// land on them instead of creating a second pair under different names that
-// would fight the first for the collection lock.
-const (
-	// CollectUnit supervises the collection daemon (aiusage run).
-	CollectUnit = "aiusage-collect.service"
-	// WebUnit supervises the read-only dashboard (aiusage serve).
-	WebUnit = "aiusage-web.service"
-)
+// CollectUnit supervises the collection daemon (aiusage run). The name is fixed
+// rather than derived: a machine that was set up by hand already carries this
+// file, and a generated install has to land on it instead of creating a second
+// unit under a different name that would fight the first for the collection
+// lock.
+const CollectUnit = "aiusage-collect.service"
 
-// docURL is the Documentation= line both units carry.
+// docURL is the Documentation= line the unit carries.
 const docURL = "https://github.com/RandomCodeSpace/aiusage"
 
 // unitStamp is the comment line every unit this package renders begins with,
@@ -61,10 +57,10 @@ func hasStamp(path string) bool {
 	return strings.Contains(string(head), unitStamp)
 }
 
-// hardening is the sandbox both units share. It is copied from the hand-written
-// units this feature replaces: the collector and the server only ever read the
-// agent CLIs' own files and write inside their own data and state directories,
-// so everything else on the filesystem can stay read-only to them.
+// hardening is the unit's sandbox. It is copied from the hand-written unit this
+// feature replaces: the collector only ever reads the agent CLIs' own files and
+// writes inside its own data and state directories, so everything else on the
+// filesystem can stay read-only to it.
 const hardening = "NoNewPrivileges=yes\n" +
 	"PrivateTmp=yes\n" +
 	"ProtectSystem=strict\n" +
@@ -79,7 +75,7 @@ type Options struct {
 	// the shell that had the context to interpret it.
 	Exec string
 
-	// Args are the global flags forwarded into both units (--db, --config,
+	// Args are the global flags forwarded into the unit (--db, --config,
 	// --home, --interval), already in flag/value order. The automatic install
 	// passes none: see the override rule in internal/cmd.
 	Args []string
@@ -91,20 +87,7 @@ type Options struct {
 	DataDir  string
 	StateDir string
 
-	// Web requests the dashboard unit. It is honoured only in a build that
-	// carries the embedded UI (see Install): serve exits 1 without it, and a
-	// unit that exits 1 under Restart=always is a restart loop.
-	Web bool
-
-	// WebAddr is the address the dashboard binds. Empty omits --addr entirely
-	// and leaves serve on its own loopback default.
-	WebAddr string
-
-	// AllowedHosts are extra Host header names the dashboard answers to, for a
-	// deployment behind a reverse proxy that preserves the public name.
-	AllowedHosts []string
-
-	// Force rewrites unit files that already exist. Left off, install is
+	// Force rewrites a unit file that already exists. Left off, install is
 	// create-if-missing and a unit the user has edited stays theirs.
 	Force bool
 }
@@ -157,7 +140,7 @@ func renderCollect(o Options) string {
 	// The daemon holds the collection lock, so exactly one instance may run. It
 	// re-execs itself in place when the binary is replaced, keeping the same
 	// pid, which systemd sees as the same process rather than a restart.
-	b.WriteString("ExecStart=" + execStart(o, "run", nil) + "\n")
+	b.WriteString("ExecStart=" + execStart(o, "run") + "\n")
 	b.WriteString("Restart=always\n")
 	b.WriteString("RestartSec=10\n\n")
 	b.WriteString(hardening)
@@ -167,52 +150,11 @@ func renderCollect(o Options) string {
 	return b.String()
 }
 
-// renderWeb renders the dashboard unit.
-func renderWeb(o Options) string {
-	sub := []string{}
-	if o.WebAddr != "" {
-		sub = append(sub, "--addr", o.WebAddr)
-	}
-	// --no-daemon because a server must never start collecting as a side effect
-	// of serving a page; the collection unit is what collects.
-	sub = append(sub, "--no-daemon")
-	if hosts := strings.Join(o.AllowedHosts, ","); hosts != "" {
-		sub = append(sub, "--allowed-hosts", hosts)
-	}
-
-	var b strings.Builder
-	b.WriteString(generatedNote)
-	b.WriteString("\n[Unit]\n")
-	b.WriteString("Description=aiusage web UI and read-only API\n")
-	b.WriteString("Documentation=" + docURL + "\n")
-	b.WriteString("After=network.target " + CollectUnit + "\n")
-	b.WriteString("StartLimitIntervalSec=300\n")
-	b.WriteString("StartLimitBurst=5\n")
-	b.WriteString("\n[Service]\n")
-	b.WriteString("Type=simple\n")
-	b.WriteString("WorkingDirectory=%h\n")
-	b.WriteString("ExecStart=" + execStart(o, "serve", sub) + "\n")
-	b.WriteString("Restart=always\n")
-	b.WriteString("RestartSec=5\n\n")
-	b.WriteString(hardening)
-	b.WriteString("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n")
-	// The store is opened read-only, but SQLite still maintains the shm sidecar
-	// for a WAL database, so the data directory cannot be mounted read-only.
-	b.WriteString("ReadWritePaths=" + readWritePaths(o.DataDir) + "\n")
-	b.WriteString("\n[Install]\n")
-	b.WriteString("WantedBy=default.target\n")
-	return b.String()
-}
-
 // execStart renders one ExecStart line: the absolute binary, its subcommand,
-// the subcommand's own flags, then the global flags the installing invocation
-// forwarded.
-func execStart(o Options, sub string, subFlags []string) string {
-	parts := make([]string, 0, len(subFlags)+len(o.Args)+2)
+// then the global flags the installing invocation forwarded.
+func execStart(o Options, sub string) string {
+	parts := make([]string, 0, len(o.Args)+2)
 	parts = append(parts, quote(o.Exec), sub)
-	for _, a := range subFlags {
-		parts = append(parts, quote(a))
-	}
 	for _, a := range o.Args {
 		parts = append(parts, quote(a))
 	}

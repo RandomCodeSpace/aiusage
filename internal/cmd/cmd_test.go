@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
@@ -484,4 +486,35 @@ func TestDoctorWarnsOnLoosePerms(t *testing.T) {
 	if !strings.Contains(out, "warning: database") {
 		t.Errorf("doctor did not warn about the database:\n%s", out)
 	}
+}
+
+// TestOnceReportsARollupRebuild is the missing half of the daemon's log line
+// (finding D): `once` runs the same cycle, rebuilds the same rollup after a
+// migration, and used to spend that time silently.
+func TestOnceReportsARollupRebuild(t *testing.T) {
+	rebuilt := runPrintCycleStats(t, collect.CycleStats{Adapters: 1, Sources: 2, RollupRebuilt: true})
+	if !strings.Contains(rebuilt, "rebuilt the derived rollup") {
+		t.Errorf("a rebuilt rollup was not reported:\n%s", rebuilt)
+	}
+	if !strings.Contains(rebuilt, "adapters=1 sources=2") {
+		t.Errorf("the cycle counts went missing:\n%s", rebuilt)
+	}
+	if lines := strings.Count(strings.TrimSpace(rebuilt), "\n"); lines != 1 {
+		t.Errorf("want exactly two lines (notice + counts), got:\n%s", rebuilt)
+	}
+
+	quiet := runPrintCycleStats(t, collect.CycleStats{Adapters: 1, Sources: 2})
+	if strings.Contains(quiet, "rebuilt") {
+		t.Errorf("a cycle that rebuilt nothing said it did:\n%s", quiet)
+	}
+}
+
+// runPrintCycleStats captures what one cycle prints.
+func runPrintCycleStats(t *testing.T, s collect.CycleStats) string {
+	t.Helper()
+	c := &cobra.Command{}
+	var out bytes.Buffer
+	c.SetOut(&out)
+	printCycleStats(c, s)
+	return out.String()
 }

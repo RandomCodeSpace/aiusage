@@ -51,18 +51,11 @@ var flags globalFlags
 // effect. Everything else (the root TUI default plus today/last/summary/
 // sources/export) is data-facing and triggers ensureDaemon.
 //
-// serve is here for a different reason than the rest: it is a long-lived
-// read-only server, and spawning a background writer as a side effect of asking
-// for a web page is a surprise nobody asked for. It reports whether a daemon is
-// running instead, and the user starts one deliberately. Supervision gives that
-// entry a second job: `aiusage serve` binds the dashboard port itself, so a
-// hook here that installed and started the dashboard unit would put two
-// processes on one port. setup is skipped for the plain reason that it is the
-// command that does the installing.
+// setup is skipped for the plain reason that it is the command that does the
+// installing.
 var daemonSkip = map[string]bool{
 	"run":        true,
 	"once":       true,
-	"serve":      true,
 	"setup":      true,
 	"doctor":     true,
 	"completion": true,
@@ -162,7 +155,6 @@ func newRootCmd() *cobra.Command {
 		newSourcesCmd(),
 		newDoctorCmd(),
 		newExportCmd(),
-		newServeCmd(),
 		newSetupCmd(),
 		newVersionCmd(),
 	)
