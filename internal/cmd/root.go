@@ -28,6 +28,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/kimicode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
@@ -316,6 +317,12 @@ func discoveryEnv() []string {
 		codex.HomeEnv,
 		copilot.ExporterEnv,
 		hermes.HomeEnv,
+		// Both Kimi Code variables are named here even though the adapter is
+		// not in the registry yet: the guard reads the adapter SOURCES, and a
+		// variable that moves a discovery root has to suppress the install from
+		// the moment the code that reads it exists.
+		kimicode.HomeEnv,
+		kimicode.DataDirEnv,
 		opencode.DataDirEnv,
 	}
 }
