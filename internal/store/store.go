@@ -56,6 +56,17 @@ type Bucket struct {
 	// UnpricedEvents counts rows in the bucket whose cost_micro_usd is NULL
 	// (collected before v3, or a model the pricing ladder could not price).
 	UnpricedEvents int64
+	// ComputedCostEvents counts the PRICED rows of the bucket whose cost this
+	// project derived from a public rate card rather than reading off the
+	// harness (model.PriceProvenance). It is what lets a surface say the sum is
+	// an estimate: zero means every dollar in CostMicroUSD is one a vendor
+	// reported.
+	//
+	// It is always 0 in a RollupSummary, on the same terms as Sessions: the
+	// rollup keeps no price_source dimension, so provenance is not merely absent
+	// there but underivable, and a rollup-served figure must not be marked
+	// either way. See RollupSummary.
+	ComputedCostEvents int64
 }
 
 // UnpricedGroup aggregates the rows of one bucket that carry NO stamped cost,
@@ -94,6 +105,11 @@ type Summary struct {
 // a distinct-session count is not merely absent but underivable - reading the
 // zero as "no sessions" would be a lie the shape cannot prevent, which is why
 // this is a distinct type and not a Summary.
+//
+// Bucket.ComputedCostEvents is always 0 here for the same reason: the rollup
+// keeps no price_source dimension either, so a rollup-served cost cannot say
+// whether a vendor reported it or this project estimated it. A caller that
+// needs the provenance mark must ask Summarize.
 type RollupSummary struct {
 	GroupBy []string
 	Buckets []Bucket

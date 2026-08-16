@@ -88,6 +88,17 @@ type Model struct {
 	// leverage-ratio pivot. Presentation only — it reads the applied timeline.
 	heroPivot bool
 
+	// pivot is the Activity tab's reading: the activity ledger, or ONE of the
+	// five turn-context dimensions. Unlike heroPivot it is NOT presentation —
+	// each reading is a different query against a different table — so changing
+	// it dispatches a load. It is persisted with the range and the tab.
+	pivot ActivityPivot
+
+	// byToolAll is the By-Tool tab's unfolded row list. The displayed
+	// byTool.Rows is derived from it by foldMinorTools, so expanding the long
+	// tail is a re-render rather than a query (see applyByToolFold).
+	byToolAll []store.Bucket
+
 	// scrubComp holds each timeline bucket's by-tool composition, prewarmed by
 	// loadOverview from ONE [dim, tool] grouped query, index-aligned with
 	// tlData.Buckets. Scrubbing re-prices entirely from this — zero queries.
@@ -218,12 +229,16 @@ func NewModel(src DataSource, opt Options) Model {
 	// missing key falls back to the default.
 	rng := Range7d
 	view := ViewOverview
+	pivot := PivotCalls
 	if st := LoadUIState(opt.StatePath); st != (UIState{}) {
 		if r, ok := RangeFromKey(st.Range); ok {
 			rng = r
 		}
 		if v, ok := viewFromKey(st.Tab); ok {
 			view = v
+		}
+		if p, ok := PivotFromKey(st.Pivot); ok {
+			pivot = p
 		}
 	}
 
@@ -250,6 +265,7 @@ func NewModel(src DataSource, opt Options) Model {
 		reducedMotion: detectReducedMotion(),
 		view:          view,
 		rng:           rng,
+		pivot:         pivot,
 		sort:          SortTotal,
 		filterUI:      ti,
 		browse:        b,
@@ -287,6 +303,24 @@ func (m Model) spanLabels() []string { return m.span().labelForms(m.qnow()) }
 // none to advertise.
 func (m *Model) syncViewKeys() {
 	m.keys.Enter.SetEnabled(m.view != ViewActivity)
+	// The pivot key acts on exactly two tabs and means a different thing on
+	// each: on Overview it flips the hero's reading, on Activity it cycles which
+	// of the six partitions the tab is showing. Everywhere else it does nothing,
+	// and a disabled binding is skipped by both key.Matches and the help
+	// renderer — so the footer advertises it exactly where it acts.
+	m.keys.Pivot.SetEnabled(m.view == ViewOverview || m.view == ViewActivity)
+	m.keys.Pivot.SetHelp("p", m.pivotHelp())
+}
+
+// pivotHelp names what the pivot key would do on the current tab. On Activity it
+// names the NEXT reading rather than the current one: the footer is a list of
+// what pressing a key gets you, and "p pivot" over a screen of agents says
+// nothing about where the press lands.
+func (m Model) pivotHelp() string {
+	if m.view == ViewActivity {
+		return "pivot → " + m.pivot.Next().Label()
+	}
+	return "pivot"
 }
 
 // syncStepKeys keeps the [ / ] bindings honest: they are advertised only where
@@ -311,7 +345,7 @@ func (m Model) heroMode() views.HeroMode {
 // persistUI writes the current range + tab to the state file (best-effort). It is
 // called whenever the tab or range changes so a relaunch lands where we left off.
 func (m Model) persistUI() {
-	SaveUIState(m.statePath, UIState{Range: m.rng.Key(), Tab: m.view.Key()})
+	SaveUIState(m.statePath, UIState{Range: m.rng.Key(), Tab: m.view.Key(), Pivot: m.pivot.Key()})
 }
 
 // detectReducedMotion honours NO_COLOR / AIUSAGE_REDUCED_MOTION so motion can be
@@ -409,6 +443,14 @@ func (m Model) drill() (tea.Model, tea.Cmd) {
 	case ViewBrowse:
 		return m.drillBrowse()
 	case ViewByTool:
+		// The fold row is a control, not an entity: pressing it opens the tail
+		// in place. It has to be intercepted BEFORE the drill, because it does
+		// carry a bucket — the tail's real total — and drilling on it would
+		// descend into a Browse filtered by the empty tool name, which matches
+		// nothing and reads as "these tools have no sessions".
+		if m.toggleByToolFold() {
+			return m, nil
+		}
 		if b, ok := m.selectedByToolBucket(); ok {
 			return m.drillIntoBrowse("tool", b.Keys["tool"])
 		}

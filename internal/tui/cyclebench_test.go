@@ -186,6 +186,22 @@ func (c *countingSource) TopActivity(ctx context.Context, f store.ActivityFilter
 	return rows, err
 }
 
+func (c *countingSource) SummarizeTurnContext(ctx context.Context, dim model.TurnDimension, f store.ActivityFilter) (*store.TurnContextSummary, error) {
+	c.calls.Add(1)
+	t0 := time.Now()
+	s, err := c.src.SummarizeTurnContext(ctx, dim, f)
+	c.nanos.Add(int64(time.Since(t0)))
+	return s, err
+}
+
+func (c *countingSource) TopTurnContext(ctx context.Context, dim model.TurnDimension, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.TurnContextBucket, error) {
+	c.calls.Add(1)
+	t0 := time.Now()
+	rows, err := c.src.TopTurnContext(ctx, dim, f, by, limit)
+	c.nanos.Add(int64(time.Since(t0)))
+	return rows, err
+}
+
 // sample snapshots the counters so a benchmark loop can bill one iteration.
 func (c *countingSource) sample() (calls, nanos int64) {
 	return c.calls.Load(), c.nanos.Load()

@@ -123,8 +123,13 @@ func DefaultKeyMap() KeyMap {
 }
 
 // ShortHelp implements help.KeyMap: the compact one-line footer.
+// The footer lists Pivot because on the Activity tab it is the only way to
+// reach five of the tab's six readings, and a reading with no discoverable key
+// is a feature nobody finds. It is enabled only on the two tabs it acts on
+// (Model.syncViewKeys) and the help renderer skips disabled bindings, so it
+// costs the other three tabs nothing.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.NextPane, k.Left, k.Enter, k.Range, k.Sort, k.Filter, k.Help, k.Quit}
+	return []key.Binding{k.NextPane, k.Left, k.Enter, k.Pivot, k.Range, k.Sort, k.Filter, k.Help, k.Quit}
 }
 
 // FullHelp implements help.KeyMap: the expanded multi-column overlay.

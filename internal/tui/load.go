@@ -105,7 +105,6 @@ func (m *Model) loadOverview() {
 	m.overview = views.OverviewData{
 		Totals:      tot,
 		Prev:        m.prevTotals(),
-		ByTool:      filterBuckets(byTool.Buckets, "tool", m.filter),
 		Timeline:    tl.Buckets,
 		TimelineDim: dim,
 		RangeLbl:    m.spanLabel(),
@@ -113,9 +112,22 @@ func (m *Model) loadOverview() {
 		Cursor:      m.scrubIndex,
 		Pinned:      m.scrubPinned,
 	}
+	m.setOverviewTools(filterBuckets(byTool.Buckets, "tool", m.filter), tot.Total)
 	if m.scrubPinned {
 		m.syncScrub()
 	}
+}
+
+// setOverviewTools installs the Overview side card's by-tool rows with the long
+// tail folded against the same threshold the By-Tool tab uses. grand is the
+// denominator the card is a composition OF — the full-range total normally, and
+// the scrubbed bucket's total while the crosshair is pinned — so a tool that is
+// minor over a week but dominated one hour surfaces when you scrub to that hour.
+func (m *Model) setOverviewTools(rows []store.Bucket, grand int64) {
+	f := foldMinorTools(rows, grand, false)
+	m.overview.ByTool = f.Rows
+	m.overview.ByToolFold = f.Index
+	m.overview.ByToolFoldCount = f.Count
 }
 
 // loadByToolBase builds the by-tool bars (no detail leg — reloadWith picks the
@@ -127,14 +139,53 @@ func (m *Model) loadByToolBase() {
 		return
 	}
 	rows := filterBuckets(s.Buckets, "tool", m.filter)
-	m.byTool.Rows = rows
+	// The unfolded list is retained so expanding the fold is a pure re-render:
+	// the toggle changes what is SHOWN, not what was asked for, and dispatching
+	// a load for it would put a store query behind a keypress that has no new
+	// question to ask.
+	m.byToolAll = rows
+	// A load always lands collapsed. The fold is a reading aid for the list in
+	// front of you, and the list is replaced by every load — carrying an
+	// expansion across a range change would leave it open over a different
+	// window's tail, which is a different set of tools.
+	m.byTool.FoldOpen = false
 	m.byTool.Grand = grandOf(m.qctx(), m.data, m.qnow(), m.span(), m.crumbs, rows)
+	m.applyByToolFold()
 	m.byTool.RangeLbl = m.spanLabel()
 	m.byTool.ActivePane = views.PaneByXBars
 	m.byTool.Copilot = m.copilotState(rows)
-	if m.byTool.Selected >= len(rows) {
+	if m.byTool.Selected >= len(m.byTool.Rows) {
 		m.byTool.Selected = 0
 	}
+}
+
+// applyByToolFold recomputes the displayed rows from the retained unfolded list
+// and the current expansion state. It is the ONE place the fold is applied, so
+// the toggle and the load can never disagree about which tools are minor.
+func (m *Model) applyByToolFold() {
+	f := foldMinorTools(m.byToolAll, m.byTool.Grand, m.byTool.FoldOpen)
+	m.byTool.Rows = f.Rows
+	m.byTool.FoldIndex = f.Index
+	m.byTool.FoldCount = f.Count
+}
+
+// toggleByToolFold expands or collapses the long tail and re-selects the fold
+// row, which has moved by nothing but must stay under the cursor: the reader
+// pressed it, and a toggle that dropped the selection would make a second press
+// impossible without hunting for the row again. Returns false when the current
+// selection is not the fold row, which is what tells drill() to fall through to
+// its real drill.
+func (m *Model) toggleByToolFold() bool {
+	if m.byTool.FoldIndex < 0 || m.byTool.Selected != m.byTool.FoldIndex {
+		return false
+	}
+	m.byTool.FoldOpen = !m.byTool.FoldOpen
+	m.applyByToolFold()
+	m.byTool.Selected = m.byTool.FoldIndex
+	// The detail card follows the selection, and the fold row's card is built
+	// from the row itself — no query, warm or cold.
+	m.syncByToolDetail()
+	return true
 }
 
 // loadByToolDetail loads the selected tool's daily trend, querying the store —
@@ -143,6 +194,15 @@ func (m *Model) loadByToolBase() {
 // no per-session bucket materialization happens anywhere.
 func (m *Model) loadByToolDetail() {
 	b, ok := m.selectedByToolBucket()
+	// The fold row names no tool, so there is no trend to query for it: its card
+	// is built from its own summed numbers. Querying with its empty key would
+	// filter the ledger to tool='' and draw a flat line as if the tail were idle.
+	if m.byToolFoldSelected() {
+		m.byTool.SelTrend = nil
+		m.byTool.SelTrendErr = false
+		m.byTool.SelSessions = 0
+		return
+	}
 	if !ok {
 		m.byTool.SelTrend = nil
 		m.byTool.SelTrendErr = false
@@ -168,6 +228,12 @@ func (m *Model) loadByToolDetail() {
 // on screen and requests a debounced background load (detail.go).
 func (m *Model) syncByToolDetail() {
 	b, ok := m.selectedByToolBucket()
+	if m.byToolFoldSelected() {
+		m.byTool.SelTrend = nil
+		m.byTool.SelTrendErr = false
+		m.byTool.SelSessions = 0
+		return
+	}
 	if !ok {
 		m.byTool.SelTrend = nil
 		m.byTool.SelTrendErr = false
@@ -257,12 +323,24 @@ const activityRankLimit = 200
 // calls to another's cost.
 var activityRankDims = []string{"name", "kind", "tool"}
 
+// turnContextRankDims groups a turn-context ranking by the value and the tool
+// that reported it. The tool is in the key for the same reason it is in
+// activityRankDims: the same agent name run under two harnesses is two facts,
+// and merging them would attribute one harness's turns to another's cost. It is
+// also what feeds the coverage note — a value's rows say which tool produced
+// them.
+var turnContextRankDims = []string{"value", "tool"}
+
 // loadActivity builds the Activity tab: the ranked invocation page, the kind
 // breakdown (which also carries the grand total the honesty footnote quantifies
 // against) and the per-bucket call counts behind the summary heat strip. Three
 // queries, all through the ctx-aware cached path, none of them repeated when
 // the tab is revisited inside one load generation.
 func (m *Model) loadActivity() {
+	if dim, ok := m.pivot.Dimension(); ok {
+		m.loadTurnContext(dim)
+		return
+	}
 	now := m.qnow()
 	sp := m.span()
 
@@ -300,13 +378,119 @@ func (m *Model) loadActivity() {
 		Totals:     kinds.Totals,
 		Selected:   m.activity.Selected,
 		RangeLbl:   m.spanLabel(),
-		OrderLbl:   activityOrderLabel(m.sort),
+		OrderLbl:   activityOrderLabel(m.sort, PivotCalls),
 		Limit:      activityRankLimit,
 		ActivePane: views.PaneActivityRank,
 	}
-	if m.activity.Selected >= len(rows) || m.activity.Selected < 0 {
+	m.clampActivitySelection()
+}
+
+// loadTurnContext builds the Activity tab for ONE turn-context dimension: the
+// ranked page of values, the same window grouped by tool (which is both the
+// coverage note and the grand total), and the per-bucket turn counts behind the
+// summary heat strip.
+//
+// Three queries, mirroring the calls pivot's three, and EVERY one of them names
+// the same dim. There is no path here that reads two dimensions, which is what
+// makes the tab's numbers a partition rather than a sum — see the store's
+// SummarizeTurnContext contract.
+func (m *Model) loadTurnContext(dim model.TurnDimension) {
+	now := m.qnow()
+	sp := m.span()
+
+	rows, err := m.data.TurnContextRank(m.qctx(), now, sp, m.crumbs, dim, turnContextRankDims,
+		activityOrder(m.sort), activityRankLimit)
+	if err != nil {
+		m.err = err
+		return
+	}
+	tools, err := m.data.TurnContextGroup(m.qctx(), now, sp, m.crumbs, dim, []string{"tool"})
+	if err != nil {
+		m.err = err
+		return
+	}
+	bdim := timelineDim(sp.R)
+	buckets, err := m.data.TurnContextGroup(m.qctx(), now, sp, m.crumbs, dim, []string{bdim})
+	if err != nil {
+		m.err = err
+		return
+	}
+
+	rows = filterTurnContext(rows, m.filter)
+	if m.sort == SortName {
+		// Same contract as the calls pivot: the metric decided WHICH rows came
+		// back (the cap is applied in SQL) and the name mode only decides the
+		// order they are listed in, so the rows on screen are still the biggest.
+		rows = sortTurnContextByName(rows)
+	}
+
+	m.activity = views.ActivityData{
+		Pivot:      string(dim),
+		CtxRows:    rows,
+		CtxTools:   tools.Buckets,
+		CtxBuckets: sortTurnContextBuckets(buckets.Buckets, bdim),
+		CtxTotals:  tools.Totals,
+		CallsDim:   bdim,
+		Selected:   m.activity.Selected,
+		RangeLbl:   m.spanLabel(),
+		OrderLbl:   activityOrderLabel(m.sort, m.pivot),
+		Limit:      activityRankLimit,
+		ActivePane: views.PaneActivityRank,
+	}
+	m.clampActivitySelection()
+}
+
+// clampActivitySelection keeps the cursor inside whichever page the active
+// pivot loaded. It reads the view's own RowCount rather than one of the two row
+// slices: a pivot switch replaces the populated slice with the other one, and a
+// clamp against the wrong field would leave the cursor past the end of the list
+// now on screen.
+func (m *Model) clampActivitySelection() {
+	if n := m.activity.RowCount(); m.activity.Selected >= n || m.activity.Selected < 0 {
 		m.activity.Selected = 0
 	}
+}
+
+// filterTurnContext keeps rows whose context VALUE contains the
+// (case-insensitive) filter substring — the same contract filterActivity
+// applies to an invocation name.
+func filterTurnContext(rows []store.TurnContextBucket, filter string) []store.TurnContextBucket {
+	if filter == "" {
+		return rows
+	}
+	lf := strings.ToLower(filter)
+	out := make([]store.TurnContextBucket, 0, len(rows))
+	for _, b := range rows {
+		if strings.Contains(strings.ToLower(b.Keys["value"]), lf) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// sortTurnContextByName returns the page ordered by value, then tool, on a copy:
+// the slice handed back by TurnContextRank is the cached one, and the cache is
+// shared with the UI thread.
+func sortTurnContextByName(rows []store.TurnContextBucket) []store.TurnContextBucket {
+	out := append([]store.TurnContextBucket(nil), rows...)
+	slices.SortStableFunc(out, func(x, y store.TurnContextBucket) int {
+		if c := strings.Compare(x.Keys["value"], y.Keys["value"]); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Keys["tool"], y.Keys["tool"])
+	})
+	return out
+}
+
+// sortTurnContextBuckets orders time-keyed turn-context buckets ascending by
+// their (lexically sortable) bucket key, on a copy — same cache-sharing contract
+// as sortTurnContextByName.
+func sortTurnContextBuckets(rows []store.TurnContextBucket, dim string) []store.TurnContextBucket {
+	out := append([]store.TurnContextBucket(nil), rows...)
+	slices.SortStableFunc(out, func(x, y store.TurnContextBucket) int {
+		return strings.Compare(x.Keys[dim], y.Keys[dim])
+	})
+	return out
 }
 
 // filterActivity keeps rows whose invocation name contains the
@@ -452,7 +636,7 @@ func (m *Model) syncScrub() {
 		}
 		m.overview.Totals = tot
 		m.overview.Prev = prev
-		m.overview.ByTool = filterBuckets(byTool.Buckets, "tool", m.filter)
+		m.setOverviewTools(filterBuckets(byTool.Buckets, "tool", m.filter), tot.Total)
 		return
 	}
 
@@ -465,7 +649,7 @@ func (m *Model) syncScrub() {
 		m.overview.Prev = store.Bucket{}
 	}
 	if m.scrubIndex < len(m.scrubComp) {
-		m.overview.ByTool = filterBuckets(m.scrubComp[m.scrubIndex], "tool", m.filter)
+		m.setOverviewTools(filterBuckets(m.scrubComp[m.scrubIndex], "tool", m.filter), b.Total)
 	} else {
 		// Composition misaligned with the timeline (defensive; a load rebuilds
 		// both together) — keep the previous bars, reprice when the flight lands.

@@ -465,29 +465,41 @@ func TestBarZonesFollowTheWindowedPanel(t *testing.T) {
 	m := newTestModelWH(t, &wideData{}, 160, 44)
 	m = step(t, m, keyMsg("2")) // By-Tool, wideRows bars
 
+	// The long tail is folded, so the displayed list is shorter than wideRows
+	// and its last row is the fold. Everything below is driven off the rendered
+	// list rather than off wideRows, which is what keeps this a test of the
+	// WINDOW rather than of the fold threshold.
+	shown := len(m.byTool.Rows)
+	if shown >= wideRows || m.byTool.FoldIndex != shown-1 {
+		t.Fatalf("expected the tail folded into a trailing row: %d rows, fold at %d (of %d tools)",
+			shown, m.byTool.FoldIndex, wideRows)
+	}
+
 	// wheelOver fails the test if the pane zone does not resolve, which is the
 	// end-marker case: the notch has to reach the bars, not the fallback.
 	for i := 0; i < wideRows; i++ {
 		m = wheelOver(t, m, views.ZoneBars, tea.MouseWheelDown)
 	}
-	if got := m.byTool.Selected; got != wideRows-1 {
-		t.Fatalf("selection = %d after %d notches over the bars, want %d", got, wideRows, wideRows-1)
+	if got := m.byTool.Selected; got != shown-1 {
+		t.Fatalf("selection = %d after %d notches over the bars, want %d", got, wideRows, shown-1)
 	}
 
-	for i := 0; i < wideRows; i++ {
-		assertZoneShowsName(t, m, views.BarZone(fmt.Sprintf("tool-%02d", i)), fmt.Sprintf("tool-%02d", i))
+	for i := 0; i < m.byTool.FoldIndex; i++ {
+		name := fmt.Sprintf("tool-%02d", i)
+		assertZoneShowsName(t, m, views.BarZone(name), name)
 	}
 
-	// The selected bar is on screen: a selection the reader cannot see is the
-	// same bug as a row they cannot click.
-	sel := fmt.Sprintf("tool-%02d", wideRows-1)
-	if _, _, ok := zoneCenter(m, views.BarZone(sel)); !ok {
-		t.Fatalf("the selected bar %q is not on screen — the panel scrolled its selection below the fold", sel)
+	// The selected row is on screen: a selection the reader cannot see is the
+	// same bug as a row they cannot click. Here that row is the fold, which
+	// carries its own zone precisely because it names no tool.
+	if _, _, ok := zoneCenter(m, views.ZoneFold); !ok {
+		t.Fatalf("the selected fold row is not on screen — the panel scrolled its selection out of the window")
 	}
 	m = expireClick(m)
-	m = mustPress(t, m, views.BarZone(sel), tea.MouseLeft)
-	if m.byTool.Rows[m.byTool.Selected].Keys["tool"] != sel {
-		t.Fatalf("press on %q selected %q", sel, m.byTool.Rows[m.byTool.Selected].Keys["tool"])
+	m = mustPress(t, m, views.ZoneFold, tea.MouseLeft)
+	if m.byTool.Selected != m.byTool.FoldIndex {
+		t.Fatalf("press on the fold zone selected row %d, want the fold row %d",
+			m.byTool.Selected, m.byTool.FoldIndex)
 	}
 }
 
@@ -547,18 +559,27 @@ func TestInteractiveZonesScrolled(t *testing.T) {
 		}
 		assertZoneShowsName(t, m, views.RowZone(wideRows-1), last)
 
-		// By-Tool: same, driven by the wheel over the bars.
+		// By-Tool: same, driven to the end of the list. The long tail is folded
+		// there, so the far end is the fold row and its zone is the one that has
+		// to resolve — a fold row nobody can press is a fold nobody can open.
 		m = newTestModelWH(t, &wideData{}, sz.w, sz.h)
 		m = step(t, m, keyMsg("2"))
 		for i := 0; i < wideRows; i++ {
 			m = send(m, keyMsg("down"))
 		}
-		for _, id := range []string{views.ZoneBars, views.BarZone(last)} {
+		for _, id := range []string{views.ZoneBars, views.ZoneFold} {
 			if _, _, ok := zoneCenter(m, id); !ok {
 				t.Errorf("%dx%d By-Tool scrolled to the end: zone %q does not resolve", sz.w, sz.h, id)
 			}
 		}
-		assertZoneShowsName(t, m, views.BarZone(last), last)
+		// The last MAJOR tool still has a bar zone of its own.
+		major := fmt.Sprintf("tool-%02d", m.byTool.FoldIndex-1)
+		m2 := newTestModelWH(t, &wideData{}, sz.w, sz.h)
+		m2 = step(t, m2, keyMsg("2"))
+		for i := 0; i < m2.byTool.FoldIndex-1; i++ {
+			m2 = send(m2, keyMsg("down"))
+		}
+		assertZoneShowsName(t, m2, views.BarZone(major), major)
 	}
 }
 

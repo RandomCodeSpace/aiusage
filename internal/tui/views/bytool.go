@@ -6,6 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
@@ -32,7 +33,7 @@ const (
 // left, a detail card for the selected tool on the right (trend sparkline +
 // stats). Copilot carries the discovery-sourced footnote state.
 type ByToolData struct {
-	Rows        []store.Bucket // grouped by tool, sorted
+	Rows        []store.Bucket // grouped by tool, sorted, long tail already folded
 	Grand       int64          // grand total for share %
 	Selected    int            // index of the selected/focused bar
 	SelTrend    []store.Bucket // selected tool's daily trend (ascending)
@@ -41,6 +42,17 @@ type ByToolData struct {
 	RangeLbl    string
 	ActivePane  int                // PaneByX* — which pane wears the ring
 	Copilot     CopilotSourceState // drives the absent/idle source footnote
+
+	// FoldIndex is the position in Rows of the synthetic long-tail row, FoldCount
+	// how many real tools it stands for, and FoldOpen whether the tail below it
+	// is listed. A ZERO FoldCount is what means "nothing folded" — index 0 is a
+	// legitimate fold position, so the count is the flag and the zero value of
+	// this struct carries no fold. The fold is computed by the root model
+	// (tui.foldMinorTools) against the same denominator Grand carries, so a row
+	// reading "<1%" is exactly a row the fold would take.
+	FoldIndex int
+	FoldCount int
+	FoldOpen  bool
 }
 
 // By-Tool / By-Model view panes (pane 0 = rail).
@@ -62,6 +74,10 @@ func ByTool(c Ctx, d ByToolData, lay Layout) string {
 		selSess:    d.SelSessions,
 		activePane: d.ActivePane,
 		footnote:   copilotFootnote(c, d.Copilot),
+		foldIndex:  d.FoldIndex,
+		foldCount:  d.FoldCount,
+		foldOpen:   d.FoldOpen,
+		capability: true,
 	}, lay)
 }
 
@@ -78,7 +94,27 @@ type byEntityData struct {
 	activePane int
 	ownerTool  func(store.Bucket) string // for by-model: dominant owning tool
 	footnote   string                    // optional footer note
+
+	// Long-tail fold (By-Tool only). See ByToolData.
+	foldIndex int
+	foldCount int
+	foldOpen  bool
+	// capability adds the per-tool capability block to the detail card. Only
+	// By-Tool sets it: the declarations are per TOOL, and a model id has none.
+	capability bool
+	// reasoning adds the reasoning-share line to the detail card. Only By-Model
+	// sets it — see byModelReasoningLine.
+	reasoning bool
 }
+
+// hasFold reports whether this list carries a synthetic long-tail row. The test
+// is the COUNT and not the index, so the zero value of byEntityData is inert:
+// an index of 0 is a legitimate position for a fold row, and a struct nobody set
+// the fold fields on would otherwise render its first tool as the tail.
+func (d byEntityData) hasFold() bool { return d.foldCount > 0 && d.foldIndex >= 0 }
+
+// isFold reports whether row idx is the fold row.
+func (d byEntityData) isFold(idx int) bool { return d.hasFold() && idx == d.foldIndex }
 
 // byEntity renders the shared bars-left / detail-right layout. The detail card
 // appears only when the layout grants a side panel; otherwise the bars take the
@@ -166,6 +202,14 @@ func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
 			nameW = w
 		}
 	}
+	// The fold row's label is a name too, and the widest form of it is the one
+	// carrying the row count. Sizing the column without it would guarantee the
+	// count is the first thing truncated on every terminal.
+	if d.hasFold() && d.foldIndex < len(d.rows) {
+		if w := lipgloss.Width(foldLabelForms(c, d)[0]); w > nameW {
+			nameW = w
+		}
+	}
 	if maxName := avail * 3 / 5; nameW > maxName {
 		nameW = maxName
 	}
@@ -204,6 +248,11 @@ func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
 		if idx == d.selected {
 			rc = c.On(ElevRaised)
 		}
+		if d.isFold(idx) {
+			rows = append(rows, c.mark(ZoneFold,
+				foldRow(rc, d, b, max, nameW, barW, numW, shareW, idx == d.selected)))
+			continue
+		}
 		glyph := rc.fg(rc.ToolAccent(ownTool)).Render(rc.ToolGlyph(ownTool))
 
 		var bar string
@@ -229,6 +278,63 @@ func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
 		content += "\n" + d.footnote
 	}
 	return c.mark(ZoneBars, style.Render(content))
+}
+
+// foldGlyph is the fold row's stand-in for a tool glyph: three dots, the
+// typographic sign for elided material, in place of a per-tool mark it has no
+// right to wear.
+const foldGlyph = "⋯"
+
+// foldOpenMark / foldShutMark are the disclosure triangles, drawn in the DRILL
+// slot. The slot is one cell at every width (DrillMark), so swapping the chevron
+// for a triangle changes what the row advertises without moving a column: on a
+// tool row that cell says "this descends into Sessions", on the fold row it says
+// "this opens in place".
+const (
+	foldShutMark = "▸"
+	foldOpenMark = "▾"
+)
+
+// foldLabelForms names the fold row in every form the name column may choose
+// between, widest first, on the same contract Span.labelForms uses: each form is
+// complete, so a narrow column picks a shorter name instead of truncating a
+// longer one into "9 others · 14…", which reads as a count and is not one.
+//
+// The token total is NOT in these forms — it is the row's own number column, a
+// cell to the right, and stating it twice would cost the count its space.
+func foldLabelForms(c Ctx, d byEntityData) []string {
+	n := strconv.Itoa(d.foldCount)
+	rows := int64(0)
+	if d.hasFold() && d.foldIndex < len(d.rows) {
+		rows = d.rows[d.foldIndex].Events
+	}
+	return []string{
+		n + " others · " + hl(c, rows) + " rows",
+		n + " others · " + hl(c, rows),
+		n + " others",
+		n + " oth",
+	}
+}
+
+// foldRow renders the synthetic long-tail row. It carries the tail's REAL
+// aggregate composition bar, token total and share, because it is a total and
+// not a placeholder: the panel still adds up to the window whether the fold is
+// open or shut.
+func foldRow(c Ctx, d byEntityData, b store.Bucket, max int64, nameW, barW, numW, shareW int, selected bool) string {
+	mark := foldShutMark
+	if d.foldOpen {
+		mark = foldOpenMark
+	}
+	glyph := c.Subtle.Render(foldGlyph)
+	label := pickForm(foldLabelForms(c, d), nameW)
+	bar := c.CompBar(Split(b), max, barW)
+	if b.Total == 0 {
+		bar = c.Faint.Render(c.PadRight("∅ zero tokens", barW))
+	}
+	body := glyph + c.pad(1) + c.Subtle.Render(c.PadRight(label, nameW)) + c.pad(1) +
+		bar + c.pad(1) + c.Number.Render(c.PadLeft(c.Humanize(b.Total), numW)) + c.pad(1) +
+		c.Subtle.Render(c.PadLeft(c.Percent(b.Total, d.grand), shareW))
+	return c.FocusMark(selected) + c.pad(1) + c.Subtle.Render(mark) + c.pad(1) + body
 }
 
 // barWindow returns the half-open row range the bars panel renders: the page of
@@ -279,6 +385,14 @@ func detailCard(c Ctx, d byEntityData, w, h int, focus bool) string {
 
 	glyph := c.fg(c.ToolAccent(ownTool)).Render(c.ToolGlyph(ownTool))
 	header := glyph + c.pad(1) + c.tool(ownTool).Render(displayName(c, name, inner-3))
+	folded := d.isFold(d.selected)
+	if folded {
+		// The fold row is several tools at once, so it has no identity to head the
+		// card with and no capability declaration to make. Its numbers are real
+		// and are shown; everything per-tool below is skipped.
+		header = c.Subtle.Render(foldGlyph) + c.pad(1) +
+			c.Stat.Render(truncTo(c, pickForm(foldLabelForms(c, d), inner-2), inner-2))
+	}
 
 	spark := trendStrip(c, d.selTrend, inner, 4)
 	if d.selErr {
@@ -303,10 +417,125 @@ func detailCard(c Ctx, d byEntityData, w, h int, focus bool) string {
 		stat("events", c.Humanize(b.Events)),
 		stat("share", c.Percent(b.Total, d.grand)),
 	)
+	// The cost total is BOUNDED and provenance-marked: unpriced rows in the
+	// selection make it a floor, and a rate-card price makes it an estimate. The
+	// budget is the card's interior minus the 9-cell stat label.
+	if cost := costText(c, b.CostMicroUSD, b.UnpricedEvents, b.ComputedCostEvents, inner-9); cost != "" {
+		lines = append(lines, stat("cost", cost))
+	}
 	if d.selSess > 0 {
 		lines = append(lines, stat("sessions", c.Humanize(d.selSess)))
 	}
+	if d.reasoning {
+		if line := reasoningShareLine(c, b, inner); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if d.capability && !folded {
+		lines = append(lines, capabilityLines(c, name, inner)...)
+	}
+	// The card is as tall as the bars panel beside it. Trimming trailing lines
+	// here rather than letting the root frame clamp the overflow means the rows
+	// that go are chosen by what matters least — the capability block, then the
+	// per-series split — instead of by arithmetic.
+	if avail := maxInt(h, 3) - 2*blockPadY - 1; avail > 0 && len(lines) > avail {
+		lines = lines[:avail]
+	}
 	return c.mark(ZonePreview, style.Render(c.titleRule("DETAIL", inner, focus)+"\n"+strings.Join(lines, "\n")))
+}
+
+// reasoningShareLine states what fraction of the selected model's OUTPUT tokens
+// were reasoning: "reasoning 31% of output". One line, on the By-Model card
+// only.
+//
+// The denominator is output and not the total, because that is the only ratio
+// the number means anything as. Every tool that reports a reasoning count either
+// carries it inside output or beside it (model.ReasoningReportFor), so the share
+// is either "how much of the output was thinking" or "how much thinking rode
+// alongside it" — both read against output, neither against a total that is
+// mostly cache. A model whose rows report no reasoning at all renders nothing:
+// a "0% of output" would claim the source measured it and found none.
+func reasoningShareLine(c Ctx, b store.Bucket, inner int) string {
+	if b.Reasoning <= 0 || b.Output <= 0 || c.Percent == nil {
+		return ""
+	}
+	return c.StatLabel.Render(c.PadRight("reasoning", 9)) +
+		c.Number.Render(truncTo(c, c.Percent(b.Reasoning, b.Output)+" of output", inner-9))
+}
+
+// capabilityLines renders the four per-tool declarations: where a cost figure
+// came from, whether a tool call can be joined to the turn that paid for it, how
+// the source reports reasoning, and how well the adapter is verified
+// (model.CapabilityFor).
+//
+// They are the answer to the question the numbers above raise and cannot
+// answer: a tool showing "-" for cost and one showing "$12.40" differ because of
+// what their SOURCE exposes, not because of what was spent, and without this
+// block the difference reads as a bug. A tool id the table has not been taught
+// about renders one honest line saying so, rather than four plausible defaults.
+func capabilityLines(c Ctx, tool string, inner int) []string {
+	if tool == "" {
+		return nil
+	}
+	head := c.Rule(c.StatLabel.Render("SOURCE"), inner)
+	cap, ok := model.CapabilityFor(tool)
+	if !ok {
+		return []string{head, c.Faint.Render(truncTo(c, "no capability declaration", inner))}
+	}
+	// Each value gets its own width ladder. A truncated declaration is worse
+	// than a shorter one: "recorded, unattribu…" reads as a rendering fault,
+	// while "unattributed" is the same claim in fewer cells. Every rung is a
+	// complete statement, on the contract Span.labelForms established.
+	// 10, not 9: "reasoning" is exactly nine cells, and padding it to its own
+	// width leaves no gap at all ("reasoningsubset").
+	const capLabelW = 10
+	row := func(label string, forms []string) string {
+		return c.StatLabel.Render(c.PadRight(label, capLabelW)) +
+			c.Subtle.Render(pickForm(forms, inner-capLabelW))
+	}
+	return []string{
+		head,
+		row("cost", costProvenanceForms(cap.Cost)),
+		row("activity", activityCaptureForms(cap.Activity)),
+		row("reasoning", reasoningReportForms(cap.Reasoning)),
+		row("tier", []string{string(cap.Tier)}),
+	}
+}
+
+// costProvenanceForms names a cost provenance, widest first.
+func costProvenanceForms(p model.CostProvenance) []string {
+	switch p {
+	case model.CostVendor:
+		return []string{"vendor-reported", "vendor"}
+	case model.CostComputed:
+		return []string{"computed", "est."}
+	default:
+		return []string{string(p)}
+	}
+}
+
+// activityCaptureForms names an activity capability, widest first. The shortest
+// rung of the unattributed case keeps the WORD rather than shortening to a
+// symbol: "unattributed" is the whole point of that declaration.
+func activityCaptureForms(a model.ActivityCapture) []string {
+	switch a {
+	case model.ActivityExact:
+		return []string{"exact join", "exact"}
+	case model.ActivityUnattributed:
+		return []string{"recorded, unattributed", "unattributed"}
+	default:
+		return []string{string(a)}
+	}
+}
+
+// reasoningReportForms names a reasoning report, widest first. "not reported"
+// never shortens to "none": in this column "none" would read as "no reasoning
+// happened", which is the confusion the third state exists to prevent.
+func reasoningReportForms(r model.ReasoningReport) []string {
+	if r == model.ReasoningReportNone {
+		return []string{"not reported", "unreported"}
+	}
+	return []string{string(r)}
 }
 
 // displayName truncates an entity name to width.

@@ -158,6 +158,13 @@ type ActivityBucket struct {
 	// stamped cost (collected before v3, or a model the price ladder could not
 	// price). Their tokens are attributed; their cost is not.
 	UnpricedCalls int64
+	// ComputedCostCalls counts calls whose joined usage row was priced from a
+	// public rate card rather than by the harness (model.PriceProvenance). Zero
+	// means every dollar in AttributedCostMicroUSD traces to a vendor's own
+	// number. It counts CALLS, not usage rows: several calls sharing one turn
+	// each carry that turn's provenance, which is the level the figure they
+	// qualify is summed at.
+	ComputedCostCalls int64
 }
 
 // ActivitySummary is the result of SummarizeActivity: grouped buckets plus a
@@ -235,14 +242,19 @@ const (
 
 // activitySelectSQL is the metric half of both queries' select list, in the
 // order scanActivityBucket reads it.
-const activitySelectSQL = `COUNT(*),
+//
+// It is a var rather than a const only because its last column is assembled
+// from model's vendor price-source vocabulary at init (computedCostCountSQL);
+// nothing writes to it after that.
+var activitySelectSQL = `COUNT(*),
 	COUNT(DISTINCT CASE WHEN a.session_id <> '' THEN a.session_id END),
 	COALESCE(SUM(u.input_tokens / ` + activityDivisorSQL + `),0),
 	COALESCE(SUM(u.output_tokens / ` + activityDivisorSQL + `),0),
 	` + activityTokensSQL + `,
 	` + activityCostSQL + `,
 	COALESCE(SUM(CASE WHEN u.dedup_key IS NULL THEN 1 ELSE 0 END),0),
-	COALESCE(SUM(CASE WHEN u.dedup_key IS NOT NULL AND u.cost_micro_usd IS NULL THEN 1 ELSE 0 END),0)`
+	COALESCE(SUM(CASE WHEN u.dedup_key IS NOT NULL AND u.cost_micro_usd IS NULL THEN 1 ELSE 0 END),0),
+	` + computedCostCountSQL("u.cost_micro_usd", "u.price_source")
 
 // activityFromSQL is the joined source. The LEFT JOIN is load-bearing: rows
 // whose usage_dedup_key is ” (codex calls, hooks) match nothing — ” is never
@@ -386,6 +398,7 @@ func (s *SQLite) SummarizeActivity(ctx context.Context, f ActivityFilter) (*Acti
 		sum.Totals.AttributedCostMicroUSD += b.AttributedCostMicroUSD
 		sum.Totals.UnattributedCalls += b.UnattributedCalls
 		sum.Totals.UnpricedCalls += b.UnpricedCalls
+		sum.Totals.ComputedCostCalls += b.ComputedCostCalls
 	}
 	if len(buckets) > 0 {
 		n, err := s.distinctActivitySessions(ctx, where, args)
@@ -447,7 +460,8 @@ func (s *SQLite) queryActivityBuckets(ctx context.Context, q string, args []any,
 		var b ActivityBucket
 		dest = append(dest, &b.Calls, &b.Sessions,
 			&b.AttributedInput, &b.AttributedOutput, &b.AttributedTotal,
-			&b.AttributedCostMicroUSD, &b.UnattributedCalls, &b.UnpricedCalls)
+			&b.AttributedCostMicroUSD, &b.UnattributedCalls, &b.UnpricedCalls,
+			&b.ComputedCostCalls)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan activity row: %w", err)
 		}

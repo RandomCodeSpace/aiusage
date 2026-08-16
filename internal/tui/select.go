@@ -29,9 +29,17 @@ func (m Model) selectionRows() []store.Bucket {
 // one slice type would mean projecting one onto the other somewhere.
 func (m Model) selectionCount() int {
 	if m.view == ViewActivity {
-		return len(m.activity.Rows)
+		return m.activity.RowCount()
 	}
 	return len(m.selectionRows())
+}
+
+// byToolFoldSelected reports whether the By-Tool cursor is on the synthetic
+// long-tail row. It is the guard every per-tool operation needs: the row carries
+// a real bucket but names no tool, so anything that would query or filter by its
+// name has to stop here.
+func (m Model) byToolFoldSelected() bool {
+	return m.view == ViewByTool && m.byTool.FoldIndex >= 0 && m.byTool.Selected == m.byTool.FoldIndex
 }
 
 // currentSelection returns the active bar index for the current view.

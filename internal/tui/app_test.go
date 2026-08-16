@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 )
@@ -179,9 +180,108 @@ func (f *fakeData) TopActivity(_ context.Context, fl store.ActivityFilter, by st
 	return rows, nil
 }
 
+// fakeTurnContext returns canned turn-context buckets for one dimension and a
+// grouping. Only claude-code contributes, which is the real shape: the five
+// attribution strings are its transcripts' and nothing else on this machine
+// writes four of them. The agent dimension carries the volume, skill a handful
+// of values, and the remaining dimensions nothing at all — so a pivot cycle
+// crosses a populated partition, a sparse one and an empty one.
+func fakeTurnContext(dim model.TurnDimension, dims []string) []store.TurnContextBucket {
+	mk := func(keys map[string]string, turns, tokens, cost, unpriced, computed int64) store.TurnContextBucket {
+		return store.TurnContextBucket{
+			Keys: keys, OrderedKeys: dims,
+			Turns: turns, Sessions: turns / 4,
+			InputTokens: tokens / 4, OutputTokens: tokens / 4, TotalTokens: tokens,
+			CostMicroUSD: cost, UnpricedTurns: unpriced, ComputedCostTurns: computed,
+		}
+	}
+	val := func(v string, turns, tokens, cost, unpriced, computed int64) store.TurnContextBucket {
+		return mk(map[string]string{"value": v, "tool": "claude-code"}, turns, tokens, cost, unpriced, computed)
+	}
+	switch dim {
+	case model.DimensionAgent:
+		switch strings.Join(dims, ",") {
+		case "value,tool":
+			return []store.TurnContextBucket{
+				val("Explore", 812, 4_000_000, 6_200_000, 0, 812),
+				val("fork", 311, 1_400_000, 2_100_000, 12, 0),
+				val("general-purpose", 44, 90_000, 120_000, 0, 44),
+			}
+		case "tool":
+			return []store.TurnContextBucket{
+				mk(map[string]string{"tool": "claude-code"}, 1167, 5_490_000, 8_420_000, 12, 856),
+			}
+		case "day":
+			return []store.TurnContextBucket{
+				mk(map[string]string{"day": "2026-05-28"}, 500, 2_000_000, 3_000_000, 0, 400),
+				mk(map[string]string{"day": "2026-05-29"}, 667, 3_490_000, 5_420_000, 12, 456),
+			}
+		case "hour":
+			return []store.TurnContextBucket{
+				mk(map[string]string{"hour": "2026-05-29 13"}, 300, 1_000_000, 1_500_000, 0, 200),
+				mk(map[string]string{"hour": "2026-05-29 14"}, 367, 2_490_000, 3_920_000, 12, 256),
+			}
+		}
+	case model.DimensionSkill:
+		switch strings.Join(dims, ",") {
+		case "value,tool":
+			return []store.TurnContextBucket{val("adhd", 96, 700_000, 900_000, 0, 96)}
+		case "tool":
+			return []store.TurnContextBucket{
+				mk(map[string]string{"tool": "claude-code"}, 96, 700_000, 900_000, 0, 96),
+			}
+		case "day":
+			return []store.TurnContextBucket{mk(map[string]string{"day": "2026-05-29"}, 96, 700_000, 900_000, 0, 96)}
+		case "hour":
+			return []store.TurnContextBucket{mk(map[string]string{"hour": "2026-05-29 14"}, 96, 700_000, 900_000, 0, 96)}
+		}
+	}
+	return nil
+}
+
+func (f *fakeData) SummarizeTurnContext(_ context.Context, dim model.TurnDimension, fl store.ActivityFilter) (*store.TurnContextSummary, error) {
+	f.summarizeCalls.Add(1)
+	buckets := fakeTurnContext(dim, fl.GroupBy)
+	s := &store.TurnContextSummary{Dimension: dim, GroupBy: fl.GroupBy, Buckets: buckets}
+	for _, b := range buckets {
+		s.Totals.Turns += b.Turns
+		s.Totals.InputTokens += b.InputTokens
+		s.Totals.OutputTokens += b.OutputTokens
+		s.Totals.TotalTokens += b.TotalTokens
+		s.Totals.CostMicroUSD += b.CostMicroUSD
+		s.Totals.UnjoinedTurns += b.UnjoinedTurns
+		s.Totals.UnpricedTurns += b.UnpricedTurns
+		s.Totals.ComputedCostTurns += b.ComputedCostTurns
+	}
+	if len(buckets) > 0 {
+		s.Totals.Sessions = 9
+	}
+	return s, nil
+}
+
+func (f *fakeData) TopTurnContext(_ context.Context, dim model.TurnDimension, fl store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.TurnContextBucket, error) {
+	f.summarizeCalls.Add(1)
+	rows := append([]store.TurnContextBucket(nil), fakeTurnContext(dim, fl.GroupBy)...)
+	metric := func(b store.TurnContextBucket) int64 {
+		switch by {
+		case store.ActivityByCost:
+			return b.CostMicroUSD
+		case store.ActivityByTokens:
+			return b.TotalTokens
+		default:
+			return b.Turns
+		}
+	}
+	slices.SortStableFunc(rows, func(x, y store.TurnContextBucket) int { return cmp.Compare(metric(y), metric(x)) })
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
 // noActivity is the activity half of DataSource for fakes whose tests never
 // open the Activity tab: it answers empty, exactly as a database carrying no
-// activity rows would.
+// activity rows and no turn contexts would.
 type noActivity struct{}
 
 func (noActivity) SummarizeActivity(context.Context, store.ActivityFilter) (*store.ActivitySummary, error) {
@@ -189,6 +289,14 @@ func (noActivity) SummarizeActivity(context.Context, store.ActivityFilter) (*sto
 }
 
 func (noActivity) TopActivity(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.ActivityBucket, error) {
+	return nil, nil
+}
+
+func (noActivity) SummarizeTurnContext(_ context.Context, dim model.TurnDimension, _ store.ActivityFilter) (*store.TurnContextSummary, error) {
+	return &store.TurnContextSummary{Dimension: dim}, nil
+}
+
+func (noActivity) TopTurnContext(context.Context, model.TurnDimension, store.ActivityFilter, store.ActivityOrder, int) ([]store.TurnContextBucket, error) {
 	return nil, nil
 }
 

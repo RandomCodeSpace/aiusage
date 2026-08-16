@@ -398,6 +398,12 @@ func (b Browse) previewPanel() string {
 		c.StatLabel.Render("events ")+c.Number.Render(c.Humanize(sb.Events)),
 		c.StatLabel.Render("total  ")+c.Number.Render(c.Humanize(sb.Total)),
 	)
+	// The selected row's spend, BOUNDED: a session drilled down to may hold rows
+	// nothing could price, and a bare "$0.30" beside them would read as the
+	// whole bill. The 7 cells are the label column above.
+	if cost := costText(c, sb.CostMicroUSD, sb.UnpricedEvents, sb.ComputedCostEvents, inner-7); cost != "" {
+		lines = append(lines, c.StatLabel.Render("cost   ")+c.Number.Render(cost))
+	}
 	return c.mark(ZonePreview, style.Render(c.titleRule("PREVIEW", inner, pfocus)+"\n"+strings.Join(lines, "\n")))
 }
 

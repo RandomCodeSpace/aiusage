@@ -567,7 +567,8 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
 		COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(cost_micro_usd),0),
-		COALESCE(SUM(CASE WHEN cost_micro_usd IS NULL THEN 1 ELSE 0 END),0)
+		COALESCE(SUM(CASE WHEN cost_micro_usd IS NULL THEN 1 ELSE 0 END),0),
+		` + computedCostCountSQL("cost_micro_usd", "price_source") + `
 		FROM usage_events`)
 	sb.WriteString(where)
 	if len(groupExprs) > 0 {
@@ -592,7 +593,7 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		}
 		var b Bucket
 		dest = append(dest, &b.Events, &b.Sessions, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.Reasoning, &b.Total,
-			&b.CostMicroUSD, &b.UnpricedEvents)
+			&b.CostMicroUSD, &b.UnpricedEvents, &b.ComputedCostEvents)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan summary row: %w", err)
 		}
@@ -629,6 +630,7 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 		sum.Totals.Total += b.Total
 		sum.Totals.CostMicroUSD += b.CostMicroUSD
 		sum.Totals.UnpricedEvents += b.UnpricedEvents
+		sum.Totals.ComputedCostEvents += b.ComputedCostEvents
 	}
 	if len(sum.Buckets) > 0 {
 		n, err := s.distinctSessions(ctx, where, args)

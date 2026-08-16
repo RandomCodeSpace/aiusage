@@ -16,6 +16,7 @@ const (
 	zoneFreshness = "freshness" // header freshness chip (click = force refresh)
 	zoneSort      = "sort"      // breadcrumb-bar sort chip (click = cycle sort)
 	zoneFilter    = "filter"    // footer filter chip (click = focus the input)
+	zoneFold      = "fold"      // by-tool long-tail row (click = select, press = toggle)
 )
 
 // Exported zone-ID builders/constants so package tui can resolve clicks without
@@ -51,6 +52,11 @@ const ZoneSort = zoneSort
 // ZoneFilter is the footer's active-filter chip: pressing it reopens the filter
 // input with the current term, exactly as `/` does.
 const ZoneFilter = zoneFilter
+
+// ZoneFold is the By-Tool long-tail row. It gets its own constant rather than a
+// BarZone: the fold row names no tool, so BarZone would key it on the empty
+// string and collide with a real bucket whose grouping value is unknown.
+const ZoneFold = zoneFold
 
 // RailZone returns the click-zone id for a nav-rail entry (a view index).
 func RailZone(viewIdx int) string { return "rail:" + strconv.Itoa(viewIdx) }

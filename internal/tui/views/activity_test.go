@@ -203,21 +203,42 @@ func TestActivityUnknownCostIsNotZero(t *testing.T) {
 	}
 }
 
-// A row with SOME unattributed or unpriced calls is an understatement, and says
-// so with the approximate mark rather than presenting a partial bill as exact.
-func TestActivityPartialCostIsMarkedApproximate(t *testing.T) {
+// A row with SOME unattributed or unpriced calls is an understatement and says
+// so with the BOUND mark; a row whose price came off a rate card says so with
+// the PROVENANCE mark. The two are independent — the same figure can be both a
+// floor and an estimate, and neither implies the other.
+func TestActivityCostCarriesBoundAndProvenanceSeparately(t *testing.T) {
 	c := activityTestCtx()
-	partial := store.ActivityBucket{
-		Keys:  map[string]string{"name": "n", "kind": "tool", "tool": "t"},
-		Calls: 100, AttributedTotal: 1000, AttributedCostMicroUSD: 2_000_000, UnpricedCalls: 5,
+	base := invRow{name: "n", kind: "tool", tool: "t", count: 100, total: 1000, cost: 2_000_000}
+
+	partial := base
+	partial.unpriced = 5
+	estimated := base
+	estimated.computed = 100
+	both := partial
+	both.computed = 100
+
+	if got := activityCostForm(c, base, 40); got != "$2.00" {
+		t.Errorf("complete vendor cost = %q, want a bare $2.00 — no bound, no tilde", got)
 	}
-	exact := partial
-	exact.UnpricedCalls = 0
-	if got := activityCostText(c, partial); !strings.HasPrefix(got, "~") {
-		t.Errorf("partial cost = %q, want the approximate mark", got)
+	if got := activityCostForm(c, partial, 40); !strings.HasPrefix(got, boundedMark) {
+		t.Errorf("partial cost = %q, want the %q bound", got, boundedMark)
 	}
-	if got := activityCostText(c, exact); strings.HasPrefix(got, "~") {
-		t.Errorf("complete cost = %q, want no approximate mark", got)
+	if got := activityCostForm(c, partial, 40); strings.Contains(got, "~") {
+		t.Errorf("partial-but-vendor-priced cost = %q, want no tilde: nothing in it was estimated", got)
+	}
+	if got := activityCostForm(c, estimated, 40); got != "~$2.00" {
+		t.Errorf("estimated complete cost = %q, want ~$2.00 — a tilde and no bound", got)
+	}
+	if got := activityCostForm(c, both, 40); !strings.HasPrefix(got, boundedMark) || !strings.Contains(got, "~") {
+		t.Errorf("partial estimated cost = %q, want both marks", got)
+	}
+	// The bound survives the narrowest cell; only the rider is allowed to go.
+	if got := activityCostForm(c, both, 11); strings.Contains(got, "unknown") {
+		t.Errorf("narrow cost cell = %q, want the rider dropped", got)
+	}
+	if got := activityCostForm(c, both, 11); !strings.HasPrefix(got, boundedMark) {
+		t.Errorf("narrow cost cell = %q, want the bound kept", got)
 	}
 }
 
@@ -240,11 +261,11 @@ func TestActivityEmptyRenders(t *testing.T) {
 // The token split projects the real attributed columns and derives cache as the
 // remainder, never a negative segment.
 func TestActivitySplitClampsDerivedCache(t *testing.T) {
-	got := activitySplit(store.ActivityBucket{AttributedInput: 10, AttributedOutput: 20, AttributedTotal: 100})
+	got := activitySplit(rowFromActivity(store.ActivityBucket{AttributedInput: 10, AttributedOutput: 20, AttributedTotal: 100}))
 	if got.Input != 10 || got.Output != 20 || got.CacheRead != 70 {
 		t.Errorf("split = %+v, want input 10 output 20 cache 70", got)
 	}
-	if got := activitySplit(store.ActivityBucket{AttributedInput: 90, AttributedOutput: 90, AttributedTotal: 100}); got.CacheRead != 0 {
+	if got := activitySplit(rowFromActivity(store.ActivityBucket{AttributedInput: 90, AttributedOutput: 90, AttributedTotal: 100})); got.CacheRead != 0 {
 		t.Errorf("derived cache = %d, want it clamped to 0", got.CacheRead)
 	}
 }

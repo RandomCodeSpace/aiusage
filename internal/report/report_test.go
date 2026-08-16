@@ -291,10 +291,15 @@ func TestWriteSummaryJSONUnpricedIsNotZero(t *testing.T) {
 // keys existing consumers already read, plus the three cost keys. Removing or
 // renaming any of them breaks a consumer silently.
 func TestWriteSummaryJSONKeysStable(t *testing.T) {
+	// ComputedCostEvents joined the set with the provenance work: it counts the
+	// PRICED rows of a bucket that this project valued from a public rate card
+	// rather than reading off the harness. Adding a key is additive — no
+	// consumer reads a key it does not know about — while removing or renaming
+	// one is what this test exists to catch.
 	wantBucketKeys := []string{
-		"CacheCreation", "CacheRead", "CostApproximate", "CostKnown", "CostMicroUSD",
-		"DisplayCostMicroUSD", "Events", "Input", "Keys", "OrderedKeys", "Output",
-		"Reasoning", "Sessions", "Total", "UnpricedEvents",
+		"CacheCreation", "CacheRead", "ComputedCostEvents", "CostApproximate", "CostKnown",
+		"CostMicroUSD", "DisplayCostMicroUSD", "Events", "Input", "Keys", "OrderedKeys",
+		"Output", "Reasoning", "Sessions", "Total", "UnpricedEvents",
 	}
 
 	var buf bytes.Buffer

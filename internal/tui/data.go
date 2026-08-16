@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
@@ -244,6 +245,14 @@ type DataSource interface {
 	// method is a compile error where a failed assertion is a silent lie.
 	SummarizeActivity(ctx context.Context, f store.ActivityFilter) (*store.ActivitySummary, error)
 	TopActivity(ctx context.Context, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.ActivityBucket, error)
+
+	// SummarizeTurnContext and TopTurnContext are the turn-context table's half,
+	// read by the Activity tab's five non-call pivots. They are on this
+	// interface for the same reason the activity pair is, and they take the
+	// dimension the way the store does — as a REQUIRED argument the caller
+	// cannot leave unset, so a pivot is always exactly one partition.
+	SummarizeTurnContext(ctx context.Context, dim model.TurnDimension, f store.ActivityFilter) (*store.TurnContextSummary, error)
+	TopTurnContext(ctx context.Context, dim model.TurnDimension, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.TurnContextBucket, error)
 }
 
 // compile-time guarantee that a *store.Store satisfies DataSource.
@@ -327,16 +336,26 @@ type Data struct {
 	// ranking key carries the metric and the cap).
 	act  *lru[*store.ActivitySummary]
 	rank *lru[[]store.ActivityBucket]
+	// tctx and tcRank are the turn-context table's pair. They are separate
+	// instances again, and their keys carry the DIMENSION: the same window
+	// grouped the same way along two axes is two different answers over the same
+	// dollars, and one cache holding both under one key would serve a skill
+	// ranking to an agent pivot — the exact cross-partition confusion the store
+	// refuses to express in SQL, reintroduced in memory.
+	tctx   *lru[*store.TurnContextSummary]
+	tcRank *lru[[]store.TurnContextBucket]
 }
 
 // NewData builds a Data over src.
 func NewData(src DataSource) *Data {
 	return &Data{
-		src:   src,
-		now:   time.Now,
-		cache: newLRU[*store.Summary](summaryCacheCap),
-		act:   newLRU[*store.ActivitySummary](summaryCacheCap),
-		rank:  newLRU[[]store.ActivityBucket](summaryCacheCap),
+		src:    src,
+		now:    time.Now,
+		cache:  newLRU[*store.Summary](summaryCacheCap),
+		act:    newLRU[*store.ActivitySummary](summaryCacheCap),
+		rank:   newLRU[[]store.ActivityBucket](summaryCacheCap),
+		tctx:   newLRU[*store.TurnContextSummary](summaryCacheCap),
+		tcRank: newLRU[[]store.TurnContextBucket](summaryCacheCap),
 	}
 }
 
@@ -350,6 +369,8 @@ func (d *Data) Invalidate() {
 	d.cache = newLRU[*store.Summary](summaryCacheCap)
 	d.act = newLRU[*store.ActivitySummary](summaryCacheCap)
 	d.rank = newLRU[[]store.ActivityBucket](summaryCacheCap)
+	d.tctx = newLRU[*store.TurnContextSummary](summaryCacheCap)
+	d.tcRank = newLRU[[]store.TurnContextBucket](summaryCacheCap)
 }
 
 // filterFor builds a store.Filter from a range, drill stack and group-by dims.
@@ -616,6 +637,79 @@ func (d *Data) ActivityRank(ctx context.Context, now time.Time, sp Span, crumbs 
 	return rows, nil
 }
 
+// turnContextKey derives a stable cache key for one dimension's slice of the
+// turn-context table. The DIMENSION IS THE FIRST FIELD OF THE KEY, and it is not
+// optional: every other component of the key is identical between two pivots of
+// the same window, so a key that omitted it would hand a skill query's rows to
+// an agent query and call it a cache hit.
+func turnContextKey(dim model.TurnDimension, f store.ActivityFilter) string {
+	return string(dim) + "|" + activityKey(f)
+}
+
+// TurnContextGroup returns one dimension's grouped turn-context summary for the
+// current window and drill stack. Like summarize it serves a cache hit whatever
+// ctx says and bails on a MISS under a cancelled context, so a superseded flight
+// stops at this stage boundary rather than opening a join nobody will read.
+func (d *Data) TurnContextGroup(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dim model.TurnDimension, dims []string) (*store.TurnContextSummary, error) {
+	f := d.turnContextFilterFor(now, sp, crumbs, dims)
+	k := turnContextKey(dim, f)
+	d.mu.Lock()
+	cache := d.tctx
+	s, ok := cache.get(k)
+	d.mu.Unlock()
+	if ok {
+		return s, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s, err := d.src.SummarizeTurnContext(ctx, dim, f)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	cache.put(k, s) // the instance captured before the query (see summarize)
+	d.mu.Unlock()
+	return s, nil
+}
+
+// TurnContextRank returns the top `limit` buckets of one dimension, ranked by
+// one metric, ordering and capping in SQL. The metric and the cap join the
+// dimension in the key for the same reason they do in ActivityRank: two
+// rankings of one window by different metrics are different answers, and the
+// cap decides which rows came back.
+func (d *Data) TurnContextRank(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dim model.TurnDimension, dims []string, by store.ActivityOrder, limit int) ([]store.TurnContextBucket, error) {
+	f := d.turnContextFilterFor(now, sp, crumbs, dims)
+	k := turnContextKey(dim, f) + "|" + string(by) + "|" + strconv.Itoa(limit)
+	d.mu.Lock()
+	cache := d.tcRank
+	rows, ok := cache.get(k)
+	d.mu.Unlock()
+	if ok {
+		return rows, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := d.src.TopTurnContext(ctx, dim, f, by, limit)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	cache.put(k, rows)
+	d.mu.Unlock()
+	return rows, nil
+}
+
+// turnContextFilterFor builds the filter for a turn-context query. It is
+// activityFilterFor minus the two dimensions the table refuses — Kinds and
+// Names select activity CALLS and the store errors on either — which the drill
+// stack cannot produce anyway; applyActivityCrumb only ever sets tool, model,
+// project and session, every one of which is a column on usage_turn_context.
+func (d *Data) turnContextFilterFor(now time.Time, sp Span, crumbs []Crumb, groupBy []string) store.ActivityFilter {
+	return d.activityFilterFor(now, sp, crumbs, groupBy)
+}
+
 // activityOrder maps the shared sort mode onto the activity ledger's ranking
 // metric. "events" is calls (one activity row IS one invocation), "total" is
 // attributed tokens and "cost" is attributed cost. "name" has no SQL ranking:
@@ -637,9 +731,17 @@ func activityOrder(s Sort) store.ActivityOrder {
 // activityOrderLabel names the metric a ranking is ordered by, for the panel
 // title. It says what the list IS, which the sort chip alone does not: "name"
 // ranks by calls and then sorts the page.
-func activityOrderLabel(s Sort) string {
+//
+// The count metric is named by the PIVOT. store.ActivityByCalls is one order
+// constant, but it ranks activity rows by calls and turn contexts by TURNS —
+// there is no per-call row in that table to count — and a title reading "by
+// calls" over a list of turn counts would misname every number under it.
+func activityOrderLabel(s Sort, p ActivityPivot) string {
 	switch s {
 	case SortEvents:
+		if p != PivotCalls {
+			return "turns"
+		}
 		return "calls"
 	case SortCost:
 		return "cost"

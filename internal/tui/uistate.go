@@ -16,6 +16,12 @@ import (
 type UIState struct {
 	Range string `json:"range"` // Range key (see rangeFromKey/Range.key)
 	Tab   string `json:"tab"`   // View key (see viewFromKey/View.key)
+	// Pivot is the Activity tab's reading (see PivotFromKey/ActivityPivot.Key).
+	// It persists for the same reason the range does: it is a question the
+	// reader chose, and coming back to a dashboard that forgot which of the six
+	// partitions was on screen costs them the same rediscovery every launch. An
+	// absent or unknown value falls back to the calls reading.
+	Pivot string `json:"pivot,omitempty"`
 }
 
 // LoadUIState reads the state file, returning a zero UIState when it is missing

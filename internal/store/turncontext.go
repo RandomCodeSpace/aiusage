@@ -296,6 +296,10 @@ type TurnContextBucket struct {
 	// cost (collected before v3, or a model the price ladder could not price).
 	// Their tokens are counted; their cost is not.
 	UnpricedTurns int64
+	// ComputedCostTurns counts turns whose joined usage row was priced from a
+	// public rate card rather than by the harness (model.PriceProvenance). Zero
+	// means every dollar in CostMicroUSD traces to a vendor's own number.
+	ComputedCostTurns int64
 }
 
 // TurnContextSummary is the result of SummarizeTurnContext: grouped buckets plus
@@ -322,14 +326,19 @@ type (
 // turnContextSelectSQL is the metric half of both queries' select list, in the
 // order queryTurnContextBuckets scans it. Note the absence of any division: see
 // the package comment on why a turn context has no divisor.
-const turnContextSelectSQL = `COUNT(*),
+//
+// It is a var rather than a const only because its last column is assembled
+// from model's vendor price-source vocabulary at init (computedCostCountSQL);
+// nothing writes to it after that.
+var turnContextSelectSQL = `COUNT(*),
 	COUNT(DISTINCT CASE WHEN c.session_id <> '' THEN c.session_id END),
 	COALESCE(SUM(u.input_tokens),0),
 	COALESCE(SUM(u.output_tokens),0),
 	COALESCE(SUM(u.total_tokens),0),
 	COALESCE(SUM(u.cost_micro_usd),0),
 	COALESCE(SUM(CASE WHEN u.dedup_key IS NULL THEN 1 ELSE 0 END),0),
-	COALESCE(SUM(CASE WHEN u.dedup_key IS NOT NULL AND u.cost_micro_usd IS NULL THEN 1 ELSE 0 END),0)`
+	COALESCE(SUM(CASE WHEN u.dedup_key IS NOT NULL AND u.cost_micro_usd IS NULL THEN 1 ELSE 0 END),0),
+	` + computedCostCountSQL("u.cost_micro_usd", "u.price_source")
 
 // turnContextFromSQL is the joined source. Both sides of the ON are unique keys
 // — usage_turn_context's PRIMARY KEY, once the dimension is pinned, and
@@ -560,6 +569,7 @@ func (s *SQLite) SummarizeTurnContext(ctx context.Context, dim model.TurnDimensi
 		sum.Totals.CostMicroUSD += b.CostMicroUSD
 		sum.Totals.UnjoinedTurns += b.UnjoinedTurns
 		sum.Totals.UnpricedTurns += b.UnpricedTurns
+		sum.Totals.ComputedCostTurns += b.ComputedCostTurns
 	}
 	if len(buckets) > 0 {
 		n, err := s.distinctTurnContextSessions(ctx, where, args)
@@ -637,7 +647,7 @@ func (s *SQLite) queryTurnContextBuckets(ctx context.Context, q string, args []a
 		var b TurnContextBucket
 		dest = append(dest, &b.Turns, &b.Sessions,
 			&b.InputTokens, &b.OutputTokens, &b.TotalTokens,
-			&b.CostMicroUSD, &b.UnjoinedTurns, &b.UnpricedTurns)
+			&b.CostMicroUSD, &b.UnjoinedTurns, &b.UnpricedTurns, &b.ComputedCostTurns)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan turn context row: %w", err)
 		}

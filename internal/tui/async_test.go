@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 )
 
@@ -198,6 +199,18 @@ func (b *blockingSource) SummarizeActivity(ctx context.Context, _ store.Activity
 }
 
 func (b *blockingSource) TopActivity(ctx context.Context, _ store.ActivityFilter, _ store.ActivityOrder, _ int) ([]store.ActivityBucket, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingSource) SummarizeTurnContext(ctx context.Context, _ model.TurnDimension, _ store.ActivityFilter) (*store.TurnContextSummary, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingSource) TopTurnContext(ctx context.Context, _ model.TurnDimension, _ store.ActivityFilter, _ store.ActivityOrder, _ int) ([]store.TurnContextBucket, error) {
 	b.once.Do(func() { close(b.entered) })
 	<-ctx.Done()
 	return nil, ctx.Err()

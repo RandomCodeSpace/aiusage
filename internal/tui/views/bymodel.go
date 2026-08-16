@@ -40,5 +40,10 @@ func ByModel(c Ctx, d ByModelData, lay Layout) string {
 		selErr:     d.SelTrendErr,
 		activePane: d.ActivePane,
 		ownerTool:  owner,
+		// No fold here: the long tail is folded by SHARE OF TOOL, and a model
+		// list is not a tool list — the same model reached through two harnesses
+		// is two rows, and collapsing the small ones would hide exactly the
+		// comparison this tab exists for. A zero foldCount is what says so.
+		reasoning: true,
 	}, lay)
 }

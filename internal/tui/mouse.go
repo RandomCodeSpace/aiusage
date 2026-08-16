@@ -131,6 +131,19 @@ func (m Model) click(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case zid == views.ZoneFold:
+		// The fold row follows the bars' uniform contract — a press selects, a
+		// second press acts — but what it ACTS is a toggle, not a drill. It has
+		// nothing under it to descend into, and the disclosure triangle it wears
+		// is the affordance for exactly this.
+		toggle := dbl || (m.rowChosen && m.byToolFoldSelected())
+		m.setSelection(m.byTool.FoldIndex)
+		m.rowChosen = true
+		if toggle {
+			m.toggleByToolFold()
+		}
+		return m, nil
+
 	case strings.HasPrefix(zid, "bar:"):
 		name := strings.TrimPrefix(zid, "bar:")
 		drill := dbl || (m.rowChosen && m.barSelected(name))
@@ -319,8 +332,16 @@ func (m Model) itemZoneCandidates() []string {
 	}
 	switch m.view {
 	case ViewByTool:
+		// The fold row is listed FIRST so it resolves ahead of the bar zones. It
+		// names no tool, so it would otherwise be a BarZone("") — an id a bucket
+		// whose grouping value is genuinely unknown also claims.
+		if m.byTool.FoldIndex >= 0 {
+			out = append(out, views.ZoneFold)
+		}
 		for _, b := range m.byTool.Rows {
-			out = append(out, views.BarZone(b.Keys["tool"]))
+			if name := b.Keys["tool"]; name != "" {
+				out = append(out, views.BarZone(name))
+			}
 		}
 	case ViewByModel:
 		for _, b := range m.byModel.Rows {

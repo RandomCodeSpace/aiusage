@@ -1,6 +1,7 @@
 package views
 
 import (
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -13,9 +14,21 @@ import (
 // from the by-tool grouping. When the scrub crosshair is pinned, ScrubBucket /
 // ScrubByTool carry that single instant's values and the KPI tiles re-price.
 type OverviewData struct {
-	Totals      store.Bucket   // grand total for the active range (or scrubbed bucket)
-	Prev        store.Bucket   // prior equal-length period, for deltas
-	ByTool      []store.Bucket // grouped by tool (sorted desc) — full range or scrubbed
+	Totals store.Bucket   // grand total for the active range (or scrubbed bucket)
+	Prev   store.Bucket   // prior equal-length period, for deltas
+	ByTool []store.Bucket // grouped by tool (sorted desc) — full range or scrubbed
+	// ByToolFold is the index in ByTool of the folded long-tail row and
+	// ByToolFoldCount how many tools it stands for. A ZERO count means nothing
+	// was folded — index 0 is a legitimate fold position, so the count is the
+	// flag and the zero value of this struct carries no fold. This card is
+	// READ-ONLY — there is no selection here and therefore no way to expand it —
+	// so the fold is always collapsed and the row is the tail's real total. It
+	// shares the threshold and the denominator with the By-Tool tab
+	// (tui.foldMinorTools), so the two never disagree about which tools are
+	// small enough to hide.
+	ByToolFold      int
+	ByToolFoldCount int
+
 	Timeline    []store.Bucket // day/hour buckets ascending (hero + sparklines)
 	TimelineDim string         // "day" or "hour"
 	RangeLbl    string
@@ -131,6 +144,11 @@ type kpiSpec struct {
 	// so it carries its own renderer rather than being humanized into a bare
 	// number with no currency.
 	fmtVal func(int64) string
+	// footForms is the foot's width ladder, widest first, for a tile whose foot
+	// discloses something (the cost tile's unpriced count). Every rung is
+	// complete on its own, so a narrow tile shows a shorter statement rather
+	// than a truncated one. Empty falls back to foot.
+	footForms []string
 }
 
 // kpiTileH is the tallest a KPI tile renders: the card's two padding rows over
@@ -214,23 +232,22 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 	// prints. Where there is slack — 120 columns and up, the common case — it
 	// costs nothing.
 	if c.Money != nil && (len(specs)+1+per-1)/per == (len(specs)+per-1)/per {
-		// A range holding rows nothing could price understates the bill, so the
-		// figure is marked approximate rather than presented as exact. The foot
-		// says which of the two the tile is showing.
-		approx := d.Totals.UnpricedEvents > 0
-		// Nothing in range could be priced: show the unpriced mark, not a zero.
-		known := d.Totals.CostMicroUSD > 0 || d.Totals.UnpricedEvents == 0
-		foot := "spend"
-		if approx {
-			foot = "spend (partial)"
-		}
+		// The number itself carries the two marks: "≥" when the window holds rows
+		// nothing could price (the sum is a floor, not a bill) and "~" when any
+		// of the priced rows was valued from a rate card rather than reported by
+		// the harness. The RIDER — how many rows are unpriced — rides in the
+		// foot, because the tile's number row is a dozen cells wide and a count
+		// there would push the figure out of it.
+		t := d.Totals
 		specs = append(specs, kpiSpec{
-			label:  "cost",
-			foot:   foot,
-			value:  d.Totals.CostMicroUSD,
-			prev:   d.Prev.CostMicroUSD,
-			style:  c.Subtle,
-			fmtVal: func(v int64) string { return c.Money(v, approx, known) },
+			label:     "cost",
+			footForms: costFootForms(c, t.UnpricedEvents, t.ComputedCostEvents),
+			value:     t.CostMicroUSD,
+			prev:      d.Prev.CostMicroUSD,
+			style:     c.Subtle,
+			fmtVal: func(v int64) string {
+				return costValue(c, v, t.UnpricedEvents, t.ComputedCostEvents)
+			},
 		})
 	}
 
@@ -326,10 +343,14 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 	}
 	numberRow := c.Stat.Render(num) + c.pad(gap) + deltaStyle.Render(deltaTxt)
 
-	footRow := c.StatLabel.Render(c.Truncate(s.foot, cw))
+	foot := s.foot
+	if len(s.footForms) > 0 {
+		foot = pickForm(s.footForms, cw)
+	}
+	footRow := c.StatLabel.Render(c.Truncate(foot, cw))
 	if s.shareTot > 0 {
 		footRow = c.fg(s.style.GetForeground()).Render(c.Percent(s.shareVal, s.shareTot)) + c.pad(1) +
-			c.StatLabel.Render(c.Truncate(s.foot, cw-5))
+			c.StatLabel.Render(c.Truncate(foot, cw-5))
 	}
 
 	body := numberRow
@@ -370,15 +391,19 @@ func sidePanel(c Ctx, d OverviewData, w, h int, focus bool) string {
 		inner = 4
 	}
 	title := c.titleRule("BY TOOL · "+d.RangeLbl, inner, focus)
-	body := toolRows(c, d.ByTool, inner)
+	body := toolRows(c, d, inner)
 	gauge := splitGauge(c, d.Totals, inner)
 	content := title + "\n" + body + "\n" + gauge
 	return style.Render(content)
 }
 
 // toolRows renders one per-tool row: glyph + colored name + a four-component
-// composition bar + humanized total.
-func toolRows(c Ctx, buckets []store.Bucket, inner int) string {
+// composition bar + humanized total. The folded long-tail row (ByToolFold) is
+// rendered in place of a tool, carrying the tail's real total — this card is the
+// legend for the tools on screen, so a tool it does not name must not be a
+// silent omission from the numbers either.
+func toolRows(c Ctx, d OverviewData, inner int) string {
+	buckets := d.ByTool
 	if len(buckets) == 0 {
 		return EmptyState(c, EmptyNoRows, inner)
 	}
@@ -398,15 +423,36 @@ func toolRows(c Ctx, buckets []store.Bucket, inner int) string {
 		barW = 6
 	}
 	var rows []string
-	for _, b := range buckets {
+	for i, b := range buckets {
 		tool := b.Keys["tool"]
 		bar := c.CompBar(Split(b), max, barW)
 		name := c.tool(tool).Render(c.PadRight(tool, nameW))
-		num := c.Number.Render(c.PadLeft(c.Humanize(b.Total), numW))
 		glyphStyled := c.fg(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))
+		if d.foldedAt(i) {
+			glyphStyled = c.Subtle.Render(foldGlyph)
+			name = c.Subtle.Render(c.PadRight(
+				pickForm(overviewFoldForms(d.ByToolFoldCount), nameW), nameW))
+		}
+		num := c.Number.Render(c.PadLeft(c.Humanize(b.Total), numW))
 		rows = append(rows, glyphStyled+c.pad(1)+name+c.pad(1)+bar+c.pad(1)+num)
 	}
 	return strings.Join(rows, "\n")
+}
+
+// foldedAt reports whether row i of ByTool is the folded long-tail row. The
+// test is the COUNT, so the zero value of OverviewData carries no fold — see
+// ByToolFold.
+func (d OverviewData) foldedAt(i int) bool {
+	return d.ByToolFoldCount > 0 && d.ByToolFold >= 0 && i == d.ByToolFold
+}
+
+// overviewFoldForms names the read-only fold row, widest first. It carries no
+// row count: this card's number column is the tail's tokens and the card has no
+// room for a second figure, while the By-Tool tab — where a reader went to ask
+// the question — carries both.
+func overviewFoldForms(n int) []string {
+	s := strconv.Itoa(n)
+	return []string{s + " others", s + " oth", s + "+"}
 }
 
 // splitGauge renders the four-component split of t as a full-width composition
@@ -445,10 +491,18 @@ func compactToolStrip(c Ctx, d OverviewData, width int) string {
 	if limit > 4 {
 		limit = 4
 	}
-	for _, b := range d.ByTool[:limit] {
+	for i, b := range d.ByTool[:limit] {
 		tool := b.Keys["tool"]
-		parts = append(parts, c.fg(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))+c.pad(1)+
-			c.tool(tool).Render(tool)+c.pad(1)+c.Number.Render(c.Humanize(b.Total)))
+		glyph := c.fg(c.ToolAccent(tool)).Render(c.ToolGlyph(tool))
+		name := c.tool(tool).Render(tool)
+		if d.foldedAt(i) {
+			// The fold row reaches this strip only when fewer than four tools
+			// cleared the threshold. Without this it would print an empty name
+			// beside a real total, which reads as a bug rather than as a fold.
+			glyph = c.Subtle.Render(foldGlyph)
+			name = c.Subtle.Render(overviewFoldForms(d.ByToolFoldCount)[0])
+		}
+		parts = append(parts, glyph+c.pad(1)+name+c.pad(1)+c.Number.Render(c.Humanize(b.Total)))
 	}
 	return card.Render(title + "\n" + c.fitParts(parts, c.pad(3), inner))
 }

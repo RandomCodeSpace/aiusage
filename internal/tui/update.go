@@ -126,12 +126,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.stepWindow(+1)
 
 	case key.Matches(msg, m.keys.Pivot):
-		// Pure presentation: the pivot re-reads the timeline already applied, so
-		// it never dispatches a load. Only Overview owns a hero.
-		if m.view == ViewOverview {
-			m.heroPivot = !m.heroPivot
-		}
-		return m, nil
+		return m.cyclePivot()
 
 	case key.Matches(msg, m.keys.Sort):
 		m.sort = m.sort.Next()
@@ -260,6 +255,31 @@ func (m *Model) scrubBy(dir int) {
 		m.scrubIndex = n - 1
 	}
 	m.syncScrub()
+}
+
+// cyclePivot advances whichever pivot the active tab owns.
+//
+// The two are deliberately different in cost. Overview's hero pivot is PURE
+// PRESENTATION — it re-reads the timeline already applied and dispatches
+// nothing. The Activity pivot is a different QUESTION: each of the six readings
+// is its own query against its own table, and there is no way to derive one from
+// another (that is what "six partitions" means), so it takes the ordinary async
+// load path like a range change does. The selection resets because row 3 of the
+// agent list has nothing to do with row 3 of the skill list.
+func (m Model) cyclePivot() (tea.Model, tea.Cmd) {
+	switch m.view {
+	case ViewOverview:
+		m.heroPivot = !m.heroPivot
+		return m, nil
+	case ViewActivity:
+		m.pivot = m.pivot.Next()
+		m.activity.Selected = 0
+		m.syncViewKeys()
+		m.persistUI()
+		cmd := m.startLoad()
+		return m, cmd
+	}
+	return m, nil
 }
 
 // cycleRange advances the range, resetting scrub + drill path, persists the new
