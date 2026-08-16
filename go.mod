@@ -7,6 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
+	github.com/klauspost/compress v1.19.2
 	github.com/lrstanley/bubblezone/v2 v2.0.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.43.0
