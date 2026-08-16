@@ -32,6 +32,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/kimicode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/pi"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/reasonix"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
@@ -298,6 +299,7 @@ func defaultRegistry() *adapter.Registry {
 		hermes.New(),
 		agy.New(),
 		crush.New(),
+		reasonix.New(),
 	)
 }
 
@@ -348,6 +350,10 @@ func discoveryEnv() []string {
 		pi.OpenClawStateDirEnv,
 		pi.OpenClawHomeEnv,
 		pi.OpenClawAgentDirEnv,
+		// Reasonix resolves its state root from the first of these two that is
+		// set, so either one moves every stats file the adapter reads.
+		reasonix.StateHomeEnv,
+		reasonix.HomeEnv,
 	}
 }
 
