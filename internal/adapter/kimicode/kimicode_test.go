@@ -460,9 +460,12 @@ func TestIncrementalTailReadMatchesFullRead(t *testing.T) {
 	lines := readLines(t, sourceFor(t, synthSession, "main").Path)
 	dir := t.TempDir()
 	path := filepath.Join(dir, fileWire)
-	// Split AFTER the first request+usage pair so the tail read starts past the
-	// llm.request its records depend on.
-	const split = 5
+	// Split immediately AFTER the first llm.request, so the tail read STARTS on
+	// a usage record whose model and dedup key can only come from a request the
+	// tail never sees. That is the whole reason the carry-forward is persisted;
+	// splitting any later leaves every tail record with its own request beside
+	// it and proves nothing.
+	const split = 4
 	writeLines(t, path, lines[:split])
 
 	src := adapter.Source{
