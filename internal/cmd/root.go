@@ -29,6 +29,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/pi"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
@@ -317,6 +318,22 @@ func discoveryEnv() []string {
 		copilot.ExporterEnv,
 		hermes.HomeEnv,
 		opencode.DataDirEnv,
+		// Pi and OpenClaw share one package and one session format, and
+		// PI_CODING_AGENT_DIR moves BOTH surfaces: OpenClaw resolves its agent
+		// dir as OPENCLAW_AGENT_DIR || PI_CODING_AGENT_DIR.
+		//
+		// Only the variables the package actually READS are listed. The two it
+		// merely declares are not: OPENCLAW_PROFILE relocates the state root to
+		// ~/.openclaw-<name>, which discovery finds by globbing the sibling
+		// roots whether the variable is exported or not, and
+		// OPENCLAW_CONFIG_PATH names a config this adapter does not parse, so a
+		// unit and the shell that installed it read exactly the same tree under
+		// both. Listing them would cost supervision for no disagreement.
+		pi.AgentDirEnv,
+		pi.SessionDirEnv,
+		pi.OpenClawStateDirEnv,
+		pi.OpenClawHomeEnv,
+		pi.OpenClawAgentDirEnv,
 	}
 }
 
