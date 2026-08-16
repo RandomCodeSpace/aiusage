@@ -83,13 +83,20 @@ type contentBlock struct {
 // and totalTokens is their sum; reasoning is a SUBSET of output; cost is pi's
 // own per-call computation in USD.
 type usage struct {
-	Input       int64 `json:"input"`
-	Output      int64 `json:"output"`
-	CacheRead   int64 `json:"cacheRead"`
-	CacheWrite  int64 `json:"cacheWrite"`
-	Reasoning   int64 `json:"reasoning"`
-	TotalTokens int64 `json:"totalTokens"`
-	Cost        cost  `json:"cost"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
+	// CacheWrite1h is the SUBSET of CacheWrite written with 1h retention. Only
+	// Anthropic reports the split, and it is the one token count whose price
+	// differs from its own siblings: pi-ai bills it at 2x the base INPUT rate
+	// while a 5m write goes at the cacheWrite rate. Dropping it would leave the
+	// pricing engine to charge every write at the 5m rate — an under-price that
+	// is silent because the token totals still add up.
+	CacheWrite1h int64 `json:"cacheWrite1h"`
+	Reasoning    int64 `json:"reasoning"`
+	TotalTokens  int64 `json:"totalTokens"`
+	Cost         cost  `json:"cost"`
 }
 
 // cost is the USD breakdown pi stamps beside the token counts.
@@ -121,6 +128,7 @@ type auditPayload struct {
 	Output        int64   `json:"output"`
 	CacheRead     int64   `json:"cacheRead"`
 	CacheWrite    int64   `json:"cacheWrite"`
+	CacheWrite1h  int64   `json:"cacheWrite1h,omitempty"`
 	Reasoning     int64   `json:"reasoning"`
 	TotalTokens   int64   `json:"totalTokens"`
 	CostUSD       float64 `json:"costUSD"`

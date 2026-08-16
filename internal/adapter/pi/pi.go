@@ -71,6 +71,14 @@ const (
 // was relocated by the environment: a unit does not inherit the installing
 // shell, so an install made under one of these would collect somewhere else
 // than the shell that installed it (see cmd.discoveryEnv).
+//
+// Every lookup spells its variable with one of these constants AT the os.Getenv
+// call, never through a helper's parameter: cmd.TestDiscoveryEnvCoversEveryAdapterVariable
+// parses this file and resolves the ARGUMENT of each lookup through the
+// package's own constants, so a name it cannot resolve is a variable the
+// automatic install cannot suppress — and a unit installed under one of those
+// would collect from the default location while the shell that installed it
+// read somewhere else.
 const (
 	// AgentDirEnv moves Pi's agent directory, and with it the sessions tree
 	// beneath it. It is `<APP_NAME>_CODING_AGENT_DIR` in pi's config.js, where
@@ -173,10 +181,10 @@ func (a Adapter) sessionRoots(cfg adapter.DiscoverConfig) []string {
 // <agent dir>/sessions, with the agent dir from PI_CODING_AGENT_DIR, the
 // per-tool override, or ~/.pi/agent.
 func (a Adapter) piRoots(cfg adapter.DiscoverConfig) []string {
-	if dir := env(SessionDirEnv); dir != "" {
+	if dir := strings.TrimSpace(os.Getenv(SessionDirEnv)); dir != "" {
 		return []string{dir}
 	}
-	agentDir := env(AgentDirEnv)
+	agentDir := strings.TrimSpace(os.Getenv(AgentDirEnv))
 	if agentDir == "" {
 		def := ""
 		if cfg.Home != "" {
@@ -208,10 +216,10 @@ func (a Adapter) openClawRoots(cfg adapter.DiscoverConfig) []string {
 		}
 	}
 
-	if state := env(OpenClawStateDirEnv); state != "" {
+	if state := strings.TrimSpace(os.Getenv(OpenClawStateDirEnv)); state != "" {
 		add(state)
 	} else {
-		home := env(OpenClawHomeEnv)
+		home := strings.TrimSpace(os.Getenv(OpenClawHomeEnv))
 		if home == "" {
 			home = cfg.Home
 		}
@@ -244,9 +252,9 @@ func (a Adapter) openClawRoots(cfg adapter.DiscoverConfig) []string {
 	// An agent-dir override moves <root>/agents/<id>/agent; its sessions sibling
 	// hangs off the same parent, so the parent is what gets scanned. OpenClaw
 	// falls back to Pi's variable for this override, and so does this.
-	agentDir := env(OpenClawAgentDirEnv)
+	agentDir := strings.TrimSpace(os.Getenv(OpenClawAgentDirEnv))
 	if agentDir == "" {
-		agentDir = env(AgentDirEnv)
+		agentDir = strings.TrimSpace(os.Getenv(AgentDirEnv))
 	}
 	if agentDir != "" {
 		out = append(out, filepath.Dir(agentDir), agentDir)
@@ -319,9 +327,6 @@ func (a Adapter) scan(ctx context.Context, root string, seen map[string]struct{}
 func excluded(lowerName string) bool {
 	return strings.HasSuffix(lowerName, trajectorySuffix)
 }
-
-// env reads a trimmed environment variable.
-func env(k string) string { return strings.TrimSpace(os.Getenv(k)) }
 
 // ckptState is the per-file parse state persisted in the checkpoint. A tail read
 // resumes past the session header and past every model_change, so the facts
@@ -531,6 +536,18 @@ func (a Adapter) event(e entry, u usage, mdl, provider, api, responseModel, resp
 	if reasoning > out {
 		reasoning = out
 	}
+	// cacheWrite1h is a SUBSET of cacheWrite, so it is a SPLIT of a number
+	// already counted, never an addition to it. It is transient pricing
+	// enrichment (model.CacheWriteTTL): Anthropic charges a 1h write at 2x the
+	// base input rate where a 5m write goes at the cacheWrite rate, and the
+	// ledger stores only the combined count. A split that does not add up is
+	// discarded by pricing.ChargeFor in favour of "all 5m", so a source
+	// reporting more 1h than it wrote is clamped here rather than silently
+	// throwing the whole split away.
+	cw1h := adapter.NonNeg(u.CacheWrite1h)
+	if cw1h > cw {
+		cw1h = cw
+	}
 	total := adapter.NonNeg(u.TotalTokens)
 	if total == 0 {
 		total = in + out + cr + cw
@@ -555,6 +572,7 @@ func (a Adapter) event(e entry, u usage, mdl, provider, api, responseModel, resp
 		CacheReadTokens:     cr,
 		ReasoningTokens:     reasoning,
 		TotalTokens:         total,
+		CacheTTL:            model.CacheWriteTTL{Ephemeral5m: cw - cw1h, Ephemeral1h: cw1h},
 		MessageID:           responseID,
 		SourcePath:          path,
 		Kind:                model.KindUsage,
@@ -571,7 +589,7 @@ func (a Adapter) event(e entry, u usage, mdl, provider, api, responseModel, resp
 		Entry: e.ID, Type: e.Type, Timestamp: e.Timestamp,
 		Session: state.SessionID, Provider: provider, Model: mdl, API: api,
 		ResponseModel: responseModel, ResponseID: responseID, StopReason: stopReason,
-		Input: in, Output: out, CacheRead: cr, CacheWrite: cw,
+		Input: in, Output: out, CacheRead: cr, CacheWrite: cw, CacheWrite1h: cw1h,
 		Reasoning: reasoning, TotalTokens: total, CostUSD: u.Cost.Total,
 	})
 	return ev, true

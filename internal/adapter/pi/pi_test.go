@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -534,6 +535,166 @@ func TestActivityDivisorIsCountedFromTheRecord(t *testing.T) {
 	}
 }
 
+// TestCacheWrite1hIsSplitOutForPricing. `cacheWrite1h` is a SUBSET of
+// `cacheWrite` that Anthropic alone reports, and it is the one counter whose
+// price differs from its own siblings: pi-ai bills it at 2x the base input rate
+// where a 5m write goes at the cacheWrite rate. The ledger stores only the
+// combined count, so the split rides on the transient CacheTTL enrichment —
+// dropping it charges every write at the 5m rate, an under-price that is silent
+// because the totals still add up. It is a split, never an addition: the token
+// columns must not move.
+func TestCacheWrite1hIsSplitOutForPricing(t *testing.T) {
+	dir := t.TempDir()
+	writeSession(t, dir, "s.jsonl", []string{
+		`{"type":"session","id":"S","timestamp":"2026-08-16T00:00:00.000Z","cwd":"/p"}`,
+		`{"type":"message","id":"e1","timestamp":"2026-08-16T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-x",` +
+			`"usage":{"input":10,"output":5,"cacheRead":7,"cacheWrite":100,"cacheWrite1h":40,"totalTokens":122,"cost":{"total":0}}}}`,
+		// A source claiming more 1h than it wrote is clamped, not discarded:
+		// pricing.ChargeFor throws away a split that does not add up.
+		`{"type":"message","id":"e2","timestamp":"2026-08-16T00:00:02.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-x",` +
+			`"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":8,"cacheWrite1h":99,"totalTokens":10,"cost":{"total":0}}}}`,
+	})
+	obs := collectFile(t, NewPi(), filepath.Join(dir, "s.jsonl"))
+	if len(obs.Events) != 2 {
+		t.Fatalf("events = %d, want 2", len(obs.Events))
+	}
+	e := obs.Events[0]
+	if e.CacheCreationTokens != 100 || e.TotalTokens != 122 {
+		t.Errorf("the split moved a token column: cacheWrite %d total %d", e.CacheCreationTokens, e.TotalTokens)
+	}
+	if e.CacheTTL.Ephemeral1h != 40 || e.CacheTTL.Ephemeral5m != 60 {
+		t.Errorf("cache TTL split = %+v, want 60/40", e.CacheTTL)
+	}
+	if sum := e.CacheTTL.Ephemeral5m + e.CacheTTL.Ephemeral1h; sum != e.CacheCreationTokens {
+		t.Errorf("split sums to %d, not the recorded %d — pricing would discard it", sum, e.CacheCreationTokens)
+	}
+	c := obs.Events[1]
+	if c.CacheTTL.Ephemeral1h != 8 || c.CacheTTL.Ephemeral5m != 0 {
+		t.Errorf("over-large 1h split = %+v, want it clamped to 0/8", c.CacheTTL)
+	}
+}
+
+// TestToolResultUsageIsNeverAnEvent. pi's ToolResultMessage carries its OWN
+// optional `usage` object ("usage from the tool execution itself ... not part of
+// main LLM context accounting"). It sits in a `message` entry, in the same
+// `.message.usage` position an assistant turn's usage sits in, so a parser that
+// keyed on the field rather than the ROLE would bill a tool result as an API
+// call.
+func TestToolResultUsageIsNeverAnEvent(t *testing.T) {
+	dir := t.TempDir()
+	writeSession(t, dir, "s.jsonl", []string{
+		`{"type":"session","id":"S","timestamp":"2026-08-16T00:00:00.000Z","cwd":"/p"}`,
+		`{"type":"message","id":"t1","timestamp":"2026-08-16T00:00:01.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"exec",` +
+			`"content":[{"type":"text","text":"x"}],"isError":false,` +
+			`"usage":{"input":9999,"output":9999,"cacheRead":0,"cacheWrite":0,"totalTokens":19998,"cost":{"total":1.5}}}}`,
+		`{"type":"message","id":"u1","timestamp":"2026-08-16T00:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"x"}],` +
+			`"usage":{"input":5,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":10,"cost":{"total":0}}}}`,
+	})
+	obs := collectFile(t, NewPi(), filepath.Join(dir, "s.jsonl"))
+	if len(obs.Events) != 0 {
+		t.Fatalf("non-assistant usage produced %d events: %+v", len(obs.Events), obs.Events)
+	}
+}
+
+// TestActivityKeyIsScopedToItsRecord. An id-less toolCall block falls back to a
+// hash, and that hash must identify the CALL: the usage row it rode in on plus
+// its position among that record's blocks. A hash of the name alone would give
+// every `edit` in the corpus one key and collapse thousands of calls into one
+// row; a hash of a file offset or line number would mint a new key on every
+// re-read, and the transcript is re-read in full whenever it changes.
+func TestActivityKeyIsScopedToItsRecord(t *testing.T) {
+	dir := t.TempDir()
+	// Two id-less blocks with the SAME name in one record, and the same pair
+	// again in a later record.
+	block := `{"type":"toolCall","name":"edit","arguments":{}}`
+	rec := func(id, ts string, in int64) string {
+		return `{"type":"message","id":"` + id + `","timestamp":"` + ts + `","message":{"role":"assistant","provider":"p","model":"m",` +
+			`"content":[` + block + `,` + block + `],` +
+			`"usage":{"input":` + fmt.Sprint(in) + `,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":` + fmt.Sprint(in+1) + `,"cost":{"total":0}}}}`
+	}
+	writeSession(t, dir, "s.jsonl", []string{
+		`{"type":"session","id":"S","timestamp":"2026-08-16T00:00:00.000Z","cwd":"/p"}`,
+		rec("e1", "2026-08-16T00:00:01.000Z", 10),
+		rec("e2", "2026-08-16T00:00:02.000Z", 20),
+	})
+	obs := collectFile(t, NewPi(), filepath.Join(dir, "s.jsonl"))
+	if len(obs.Activity) != 4 {
+		t.Fatalf("activity = %d, want 4", len(obs.Activity))
+	}
+	seen := map[string]bool{}
+	for i, c := range obs.Activity {
+		if seen[c.DedupKey] {
+			t.Errorf("call %d reuses key %q: an id-less block must be keyed by its record and its "+
+				"position in it, not by its name", i, c.DedupKey)
+		}
+		seen[c.DedupKey] = true
+	}
+
+	// The same record at a different byte offset keeps its keys: prepending
+	// entries moves every later line, and a key minted from a read position
+	// would recount every call on the next pass.
+	moved := t.TempDir()
+	writeSession(t, moved, "s.jsonl", []string{
+		`{"type":"session","id":"S","timestamp":"2026-08-16T00:00:00.000Z","cwd":"/p"}`,
+		`{"type":"model_change","id":"m1","timestamp":"2026-08-16T00:00:00.500Z","provider":"p","modelId":"m"}`,
+		`{"type":"message","id":"pad","timestamp":"2026-08-16T00:00:00.700Z","message":{"role":"user","content":[{"type":"text","text":"padding"}]}}`,
+		rec("e1", "2026-08-16T00:00:01.000Z", 10),
+		rec("e2", "2026-08-16T00:00:02.000Z", 20),
+	})
+	shifted := collectFile(t, NewPi(), filepath.Join(moved, "s.jsonl"))
+	if len(shifted.Activity) != len(obs.Activity) {
+		t.Fatalf("shifted activity = %d, want %d", len(shifted.Activity), len(obs.Activity))
+	}
+	for i := range obs.Activity {
+		if shifted.Activity[i].DedupKey != obs.Activity[i].DedupKey {
+			t.Errorf("call %d key moved with the byte offset: %q != %q — every pass would recount it",
+				i, shifted.Activity[i].DedupKey, obs.Activity[i].DedupKey)
+		}
+	}
+}
+
+// TestCompleteButUnterminatedLineIsNotConsumed. A final line that is valid JSON
+// but carries no newline is an append caught mid-flight: its records are emitted
+// (they are complete), but the offset must stay BEFORE it. Advancing past it
+// leaves the next tail read starting inside whatever the writer finishes, and
+// the offset never rewinds while the file only grows — every record after it is
+// lost for good.
+func TestCompleteButUnterminatedLineIsNotConsumed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	header := `{"type":"session","id":"S","timestamp":"2026-08-16T00:00:00.000Z","cwd":"/p"}` + "\n"
+	whole := `{"type":"message","id":"e1","timestamp":"2026-08-16T00:00:01.000Z","message":{"role":"assistant","provider":"p","model":"m","usage":{"input":4,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":5,"cost":{"total":0}}}}`
+	if err := os.WriteFile(path, []byte(header+whole), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	obs := collectFile(t, NewPi(), path)
+	if len(obs.Events) != 1 {
+		t.Fatalf("events = %d, want 1 (the line is complete)", len(obs.Events))
+	}
+	if obs.Checkpoint.Offset != int64(len(header)) {
+		t.Fatalf("offset = %d, want %d (before the unterminated line)", obs.Checkpoint.Offset, len(header))
+	}
+
+	// The writer finishes the line and appends another. A tail read from the
+	// stored offset must see BOTH, and re-derive the first one's key unchanged.
+	appendLines(t, path, []string{
+		"",
+		`{"type":"message","id":"e2","timestamp":"2026-08-16T00:00:02.000Z","message":{"role":"assistant","provider":"p","model":"m","usage":{"input":6,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":7,"cost":{"total":0}}}}`,
+	})
+	touch(t, path)
+	tail, err := NewPi().(adapter.Incremental).CollectIncremental(context.Background(),
+		adapter.Source{Tool: ToolPi, Class: model.EventLevel, Path: path}, obs.Checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail.Events) != 2 {
+		t.Fatalf("tail read = %d events, want 2 (the finished line and the new one)", len(tail.Events))
+	}
+	if tail.Events[0].DedupKey != obs.Events[0].DedupKey {
+		t.Errorf("the re-read line minted a new key: %q != %q", tail.Events[0].DedupKey, obs.Events[0].DedupKey)
+	}
+}
+
 // TestIncrementalSkipsTailsAndRestarts covers the checkpoint contract: an
 // unchanged file is skipped, pure growth is tail-read with the header and model
 // facts carried across the gap, and any other change re-reads from zero.
@@ -746,16 +907,57 @@ func TestDiscoveryEnvNamesAreExact(t *testing.T) {
 	if strings.Contains(string(src), `"PI_AGENT_DIR"`) {
 		t.Errorf("pi.go reads PI_AGENT_DIR, which pi does not write")
 	}
-	// Every environment variable the package reads must be one of the declared
-	// constants, or the supervision guard cannot see it.
+	// Every lookup must name its variable with one of these constants AT the
+	// os.Getenv call. cmd.TestDiscoveryEnvCoversEveryAdapterVariable parses this
+	// file and resolves the argument through the package's constants, so a read
+	// routed through a helper's parameter — env(k) with k a string — is a
+	// variable that guard cannot see, and a variable it cannot see is one the
+	// automatic install cannot suppress.
+	declared := map[string]bool{}
+	for name := range want {
+		declared[name] = true
+	}
+	lookups := 0
 	for _, line := range strings.Split(string(src), "\n") {
-		if !strings.Contains(line, "os.Getenv") {
+		_, after, found := strings.Cut(line, "os.Getenv(")
+		if !found {
 			continue
 		}
-		if !strings.Contains(line, "func env(") {
-			t.Errorf("os.Getenv outside the single env() helper: %s", strings.TrimSpace(line))
+		arg, _, ok := strings.Cut(after, ")")
+		if !ok {
+			t.Errorf("unparseable os.Getenv call: %s", strings.TrimSpace(line))
+			continue
+		}
+		lookups++
+		if !declared[constValue(arg)] {
+			t.Errorf("os.Getenv(%s) does not name a declared constant: %s", arg, strings.TrimSpace(line))
 		}
 	}
+	if lookups == 0 {
+		t.Error("found no os.Getenv calls at all; the scan is broken, not the source")
+	}
+}
+
+// constValue resolves one of this package's env-name constants by identifier.
+// An unknown identifier resolves to "", which no declared name equals.
+func constValue(ident string) string {
+	switch strings.TrimSpace(ident) {
+	case "AgentDirEnv":
+		return AgentDirEnv
+	case "SessionDirEnv":
+		return SessionDirEnv
+	case "OpenClawStateDirEnv":
+		return OpenClawStateDirEnv
+	case "OpenClawHomeEnv":
+		return OpenClawHomeEnv
+	case "OpenClawAgentDirEnv":
+		return OpenClawAgentDirEnv
+	case "OpenClawConfigPathEnv":
+		return OpenClawConfigPathEnv
+	case "OpenClawProfileEnv":
+		return OpenClawProfileEnv
+	}
+	return ""
 }
 
 // TestOpenClawAgentDirEnvFallsBackToPiVariable: OpenClaw resolves its agent-dir

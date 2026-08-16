@@ -17,10 +17,18 @@ import (
 // A single occurrence anywhere in the adapter's output is a leak.
 const secret = "CANARY-9c1f2d7e-do-not-emit"
 
-// contentFixture is the real record layout with the secret in every place a
-// prompt, a response, a thought, a tool argument, a tool result, a summary, a
-// label or an error message can land. The counters and the identity fields are
-// the only things the adapter is allowed to keep.
+// contentFixture is the real record layout with the secret in EVERY place the
+// harness can put content, enumerated from pi-ai's own types rather than from
+// what the fixtures on disk happen to contain: prompts and responses in both
+// content shapes (array and bare string), thinking blocks and their signatures,
+// image blocks (base64 `data`), tool arguments and thought signatures, tool
+// results with their details and added tool names, a `bashExecution` message's
+// command and whole output, an assistant message's `diagnostics` (whose
+// `error.stack` carries file paths and argument values), `errorMessage`,
+// `rawStopReason`, compaction and branch summaries, extension custom entries and
+// custom messages, a label, a session name, and the header's `parentSession`
+// path. The counters and the identity fields are the only things the adapter is
+// allowed to keep.
 func contentFixture() []string {
 	s := secret
 	return []string{
@@ -30,20 +38,39 @@ func contentFixture() []string {
 		`{"type":"message","id":"u1","parentId":"m2","timestamp":"2026-08-16T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"` + s + `"}],"timestamp":1}}`,
 		// OpenClaw writes a user message's content as a plain string.
 		`{"type":"message","id":"u2","parentId":"u1","timestamp":"2026-08-16T00:00:01.500Z","message":{"role":"user","content":"` + s + `","timestamp":1}}`,
-		`{"type":"message","id":"a1","parentId":"u2","timestamp":"2026-08-16T00:00:02.000Z","message":{"role":"assistant",` +
-			`"content":[{"type":"thinking","thinking":"` + s + `","thinkingSignature":"` + s + `"},` +
+		// The `!` command records a shell run as its own message role, with the
+		// command line and its whole output as plain top-level strings.
+		`{"type":"message","id":"sh1","parentId":"u2","timestamp":"2026-08-16T00:00:01.700Z","message":{"role":"bashExecution","command":"` + s + `",` +
+			`"output":"` + s + `","exitCode":0,"cancelled":false,"truncated":false,"fullOutputPath":"/x/` + s + `","timestamp":1}}`,
+		`{"type":"message","id":"a1","parentId":"sh1","timestamp":"2026-08-16T00:00:02.000Z","message":{"role":"assistant",` +
+			`"content":[{"type":"thinking","thinking":"` + s + `","thinkingSignature":"` + s + `","redacted":true},` +
 			`{"type":"text","text":"` + s + `","textSignature":"` + s + `"},` +
-			`{"type":"toolCall","id":"call_1","name":"exec","arguments":{"command":"` + s + `","cwd":"/x/` + s + `","body":{"nested":["` + s + `"]}}}],` +
+			`{"type":"image","data":"` + s + `","mimeType":"image/png"},` +
+			`{"type":"toolCall","id":"call_1","name":"exec","namespace":null,"thoughtSignature":"` + s + `",` +
+			`"arguments":{"command":"` + s + `","cwd":"/x/` + s + `","body":{"nested":["` + s + `"]}}}],` +
 			`"api":"anthropic-messages","provider":"anthropic","model":"claude-x","responseModel":"claude-x-2","responseId":"req_1","stopReason":"toolUse",` +
+			`"diagnostics":[{"type":"stream-error","timestamp":1,"error":{"name":"Error","message":"` + s + `","stack":"` + s + `","code":"` + s + `"},` +
+			`"details":{"request":"` + s + `"}}],` +
 			`"usage":{"input":100,"output":20,"cacheRead":5,"cacheWrite":3,"reasoning":4,"totalTokens":128,"cost":{"input":0.001,"output":0.002,"cacheRead":0,"cacheWrite":0,"total":0.003}},` +
-			`"errorMessage":"` + s + `"}}`,
+			`"errorMessage":"` + s + `","rawStopReason":"` + s + `"}}`,
+		// A toolResult carries its own optional usage object in the same
+		// `.message.usage` position an assistant turn's does. It is content AND a
+		// counting trap: it must reach neither the output nor the ledger.
 		`{"type":"message","id":"t1","parentId":"a1","timestamp":"2026-08-16T00:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_1","toolName":"exec",` +
-			`"content":[{"type":"text","text":"` + s + `"}],"details":{"aggregated":"` + s + `","cwd":"/x/` + s + `"},"isError":false,"timestamp":1}}`,
+			`"content":[{"type":"text","text":"` + s + `"},{"type":"image","data":"` + s + `","mimeType":"image/png"}],` +
+			`"details":{"aggregated":"` + s + `","cwd":"/x/` + s + `"},"addedToolNames":["` + s + `"],` +
+			`"usage":{"input":7777,"output":7777,"cacheRead":0,"cacheWrite":0,"totalTokens":15554,"cost":{"total":9.5}},` +
+			`"isError":false,"timestamp":1}}`,
 		`{"type":"compaction","id":"c1","parentId":"t1","timestamp":"2026-08-16T00:00:04.000Z","summary":"` + s + `","firstKeptEntryId":"u1","tokensBefore":9999,` +
 			`"details":{"notes":"` + s + `"},"usage":{"input":9,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":10,"cost":{"total":0}}}`,
 		`{"type":"branch_summary","id":"b1","parentId":"c1","timestamp":"2026-08-16T00:00:05.000Z","fromId":"u1","summary":"` + s + `",` +
 			`"usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"total":0}}}`,
 		`{"type":"custom_message","id":"x1","parentId":"b1","timestamp":"2026-08-16T00:00:06.000Z","customType":"ext","content":"` + s + `","display":true}`,
+		// The same entry with content as an ARRAY of blocks: both shapes are legal
+		// (`string | (TextContent | ImageContent)[]`).
+		`{"type":"custom_message","id":"x1b","parentId":"x1","timestamp":"2026-08-16T00:00:06.500Z","customType":"ext",` +
+			`"content":[{"type":"text","text":"` + s + `"},{"type":"image","data":"` + s + `","mimeType":"image/png"}],` +
+			`"details":{"note":"` + s + `"},"display":true}`,
 		`{"type":"custom","id":"x2","parentId":"x1","timestamp":"2026-08-16T00:00:07.000Z","customType":"ext","data":{"blob":"` + s + `"}}`,
 		`{"type":"label","id":"l1","parentId":"x2","timestamp":"2026-08-16T00:00:08.000Z","targetId":"a1","label":"` + s + `"}`,
 		`{"type":"session_info","id":"n1","parentId":"l1","timestamp":"2026-08-16T00:00:09.000Z","name":"` + s + `"}`,
@@ -70,7 +97,11 @@ func TestNoContentReachesAnyEmittedField(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if n := strings.Count(string(raw), secret); n < 15 {
+			// One count per content-bearing field of the real surface. The
+			// number is a floor, not a target: it fails when a field is dropped
+			// from the fixture, which is how the sweep stays a proof rather than
+			// a sample.
+			if n := strings.Count(string(raw), secret); n < 34 {
 				t.Fatalf("fixture holds the canary %d times, want the full content surface", n)
 			}
 
