@@ -27,6 +27,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/crush"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
@@ -294,6 +295,7 @@ func defaultRegistry() *adapter.Registry {
 		opencode.New(),
 		hermes.New(),
 		agy.New(),
+		crush.New(),
 	)
 }
 
@@ -317,15 +319,34 @@ func discoveryEnv() []string {
 		copilot.ExporterEnv,
 		hermes.HomeEnv,
 		opencode.DataDirEnv,
+		crush.GlobalDataEnv,
+		// XDG_DATA_HOME is also one of config's own path variables, and it
+		// belongs here as well: it moves where CRUSH keeps projects.json, which
+		// is a different consequence from where aiusage keeps its database.
+		crush.XDGDataHomeEnv,
 	}
 }
 
 // discoveryEnvOverrides returns the discoveryEnv variables currently set to a
 // value an adapter would act on, in the same fixed order. Adapters trim before
 // testing, so a blank value moves nothing and is not reported.
+//
+// A name internal/config already owns is left to config's own rule rather than
+// answered twice with a weaker test. XDG_DATA_HOME is both: it moves where
+// aiusage keeps its database AND where Crush keeps projects.json, and the spec
+// says a relative value is ignored — which config implements and the adapters
+// follow. Reporting it here on presence alone would call a relative value an
+// override that nothing acts on, and suppress an install over nothing.
 func discoveryEnvOverrides() []string {
+	owned := make(map[string]bool)
+	for _, name := range config.PathEnvNames() {
+		owned[name] = true
+	}
 	var out []string
 	for _, name := range discoveryEnv() {
+		if owned[name] {
+			continue
+		}
 		if strings.TrimSpace(os.Getenv(name)) != "" {
 			out = append(out, name)
 		}

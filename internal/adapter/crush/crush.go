@@ -191,7 +191,11 @@ func (a Adapter) globalDir(cfg adapter.DiscoverConfig) string {
 		return env
 	}
 	def := ""
-	if xdg := strings.TrimSpace(os.Getenv(XDGDataHomeEnv)); xdg != "" {
+	// A relative XDG base directory is invalid per the spec and is ignored by
+	// internal/config for the same reason; honouring one here would resolve
+	// projects.json against the collecting process's working directory, which
+	// is the daemon's and not the shell's.
+	if xdg := strings.TrimSpace(os.Getenv(XDGDataHomeEnv)); filepath.IsAbs(xdg) {
 		def = filepath.Join(xdg, appName)
 	} else if cfg.Home != "" {
 		def = filepath.Join(cfg.Home, ".local", "share", appName)
@@ -328,12 +332,18 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 // CollectIncremental applies the file-stamp gate and appends each session's
 // cost growth since the stored watermark.
 //
-// Every failure path returns NO events and NO checkpoint. That is safe in a way
-// it would not be for an append-only source: Crush's cost lives in a current
-// value that stays in the database until it is read, so a deferred pass loses
-// nothing and the next one re-reads the same accumulator. Emitting a partially
-// enriched row instead would put a permanent claim in an append-only ledger to
-// avoid a delay that costs nothing.
+// Every failure that stops the read returns NO events and NO checkpoint. That
+// is safe in a way it would not be for an append-only source: Crush's cost
+// lives in a current value that stays in the database until it is read, so a
+// deferred pass loses nothing and the next one re-reads the same accumulator.
+// Emitting a partially enriched row instead would put a permanent claim in an
+// append-only ledger to avoid a delay that costs nothing.
+//
+// An individual malformed ROW is the exception: the rows around it are charged
+// and the checkpoint lands, with the error reported alongside. The watermark of
+// a row that could not be read is carried forward rather than dropped — see
+// carryUnreadable, which is what stops a later readable pass from charging that
+// session's whole accumulator a second time.
 func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
 	gate := ckptState{}
 	gate.DBSize, gate.DBMTime = fileStamp(src.Path)
@@ -355,10 +365,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	}
 	defer db.Close()
 
-	sessions, skipped, err := readSessions(ctx, db)
+	sessions, unreadable, err := readSessions(ctx, db)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("crush: sessions %s: %w", src.Path, err)
 	}
+	skipped := unreadable
 	// The model map is required, not best-effort: a row appended without its
 	// provider keeps that gap forever, while a skipped pass keeps nothing.
 	models, err := readModels(ctx, db, sessions)
@@ -388,6 +399,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		if mark > 0 {
 			gate.Cost[s.id] = mark
 		}
+	}
+	// The loop above garbage collects the watermark of every session that is no
+	// longer in the table, which is only sound when the table was read in full.
+	if unreadable > 0 {
+		carryUnreadable(gate.Cost, prev.Cost, sessions)
 	}
 
 	obs := adapter.Observation{Events: events}
@@ -433,6 +449,38 @@ func (a Adapter) event(src adapter.Source, project string, s sessionRow, attr at
 	}
 	ev.SetCost(cur-prev, PriceSourceReported)
 	return ev
+}
+
+// carryUnreadable copies forward the watermark of every session this pass did
+// not manage to read.
+//
+// A row that failed to scan is not a row that ceased to exist, and the two are
+// indistinguishable from the result set: both are simply absent. The watermark
+// map is otherwise rebuilt from the rows actually read, so an unreadable row
+// silently loses the record of what has already been charged for it — and the
+// next pass that CAN read it charges the whole accumulator again, under a dedup
+// key naming a total the ledger has never seen and therefore cannot collapse.
+// Measured before this existed: one unreadable pass over the costly fixture,
+// followed by growth from 2.5 to 3.0, charged sess-parent 2500000 and then
+// 3000000 micro-USD for 3000000 of real spend.
+//
+// Garbage collection still happens on every pass that read the table in full,
+// which is the only situation where a missing id really does mean a session
+// Crush deleted.
+func carryUnreadable(dst, prev map[string]int64, sessions []sessionRow) {
+	if len(prev) == 0 {
+		return
+	}
+	read := make(map[string]struct{}, len(sessions))
+	for _, s := range sessions {
+		read[s.id] = struct{}{}
+	}
+	for id, mark := range prev {
+		if _, ok := read[id]; ok || mark <= 0 {
+			continue
+		}
+		dst[id] = mark
+	}
 }
 
 // readSessions loads every session row, returning the rows and the number of

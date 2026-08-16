@@ -171,6 +171,20 @@ func TestDiscoverEnvPrecedence(t *testing.T) {
 		}
 	})
 
+	// A relative XDG base directory is invalid per the spec, is ignored by
+	// internal/config, and must be ignored here too: honouring it would resolve
+	// projects.json against the daemon's working directory.
+	t.Run("a relative XDG_DATA_HOME is ignored", func(t *testing.T) {
+		clearEnv(t)
+		home := filepath.Join(base, "home-rel")
+		writeIndex(t, filepath.Join(home, ".local", "share", appName), proj)
+		t.Setenv(XDGDataHomeEnv, "relative/share")
+		srcs, err := Adapter{}.Discover(context.Background(), adapter.DiscoverConfig{Home: home})
+		if err != nil || len(srcs) != 1 {
+			t.Fatalf("want the home fallback to win over a relative XDG base, got %d (%v)", len(srcs), err)
+		}
+	})
+
 	t.Run("CRUSH_GLOBAL_DATA beats both", func(t *testing.T) {
 		clearEnv(t)
 		xdg := filepath.Join(base, "xdg2")
@@ -553,6 +567,73 @@ func TestCostDropNeverLowersTheWatermark(t *testing.T) {
 	}
 	if got := state(t, second).Cost["sess-paid-single"]; got != 12346 {
 		t.Fatalf("watermark %d after a drop, want it held at 12346", got)
+	}
+}
+
+// A row this pass could not READ is not a row that ceased to exist. Both are
+// simply absent from the result set, and rebuilding the watermark map from the
+// rows that did read therefore forgets what has already been charged for the
+// unreadable one — after which the next readable pass charges its whole
+// accumulator again, under a key naming a total the ledger has never seen and
+// cannot conflict-skip.
+//
+// Measured before carryUnreadable existed: sess-parent was charged 2500000 and
+// then, after one unreadable pass and growth to 3.0, another 3000000 — 5500000
+// micro-USD for 3000000 of real spend.
+func TestUnreadableRowKeepsItsWatermark(t *testing.T) {
+	dbPath := buildDB(t, t.TempDir(), "costly.sql")
+	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+		Meta: map[string]string{"project": "/proj"}}
+
+	first, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state(t, first).Cost["sess-parent"]; got != 2500000 {
+		t.Fatalf("watermark %d after the first charge, want 2500000", got)
+	}
+
+	// Corruption a scan cannot survive: SQLite stores what it is given, and the
+	// column's CHECK (cost >= 0.0) passes for text, which sorts above numbers.
+	corrupt(t, dbPath, `UPDATE sessions SET cost = 'corrupt' WHERE id = 'sess-parent'`)
+
+	second, err := Adapter{}.CollectIncremental(context.Background(), src, first.Checkpoint)
+	if err == nil {
+		t.Fatal("an unreadable row must be reported, not swallowed")
+	}
+	if got := state(t, second).Cost["sess-parent"]; got != 2500000 {
+		t.Fatalf("watermark %d while the row was unreadable, want it held at 2500000", got)
+	}
+
+	// The session spends more, then the row becomes readable again.
+	corrupt(t, dbPath, `UPDATE sessions SET cost = 3.0 WHERE id = 'sess-parent'`)
+	third, err := Adapter{}.CollectIncremental(context.Background(), src, second.Checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var charged int64
+	for _, e := range third.Events {
+		if e.SessionID != "sess-parent" {
+			continue
+		}
+		c, _ := e.Cost()
+		charged += c
+	}
+	if charged != 500000 {
+		t.Fatalf("charged %d micro-USD for growth from 2.5 to 3.0, want the delta 500000", charged)
+	}
+}
+
+// corrupt runs one statement against the fixture with a writable connection.
+func corrupt(t *testing.T, dbPath, stmt string) {
+	t.Helper()
+	db, err := sql.Open(driverName, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(stmt); err != nil {
+		t.Fatal(err)
 	}
 }
 
