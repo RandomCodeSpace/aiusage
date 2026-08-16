@@ -39,6 +39,14 @@
 // again. So the components map straight onto the Anthropic-style ledger columns
 // and the total is their sum; the source reports no total of its own.
 //
+// FORK SEEDS. A forked session's log opens with its parent's leading events
+// copied VERBATIM under a new session id, and `seedLength` counts them. Usage
+// and activity keys are minted from the message identity, so those copies
+// COLLAPSE onto the originals. Turn context cannot ride that: its value comes
+// from the session HEADER, and the two headers can disagree about the very
+// records they share, so the seeded prefix records no context here and leaves
+// those turns to the log that owns them. See header.seeded.
+//
 // COST ATTRIBUTION. A DSH step is, by the harness's own definition, "one model
 // call plus the tool executions it requested", and every `tool/call` carries the
 // (turn, step) it belongs to. So a call joins its usage row EXACTLY, with no
@@ -288,6 +296,38 @@ type header struct {
 	CreatedAt   int64  `json:"createdAt"`
 	CWD         string `json:"cwd"`
 	AgentPreset string `json:"agentPreset"`
+	// SeedLength is how many LEADING EVENTS of this log were copied verbatim
+	// from the parent named by parentSession. It is what separates the replayed
+	// ancestor prefix from the session's own suffix; see header.seeded.
+	SeedLength int64 `json:"seedLength"`
+}
+
+// seeded reports whether a record at this seq is part of the fork seed — the
+// parent's leading events, copied verbatim into this log — rather than one of
+// this session's own.
+//
+// This matters for exactly one fact: agentPreset. It is a HEADER field, so
+// every record in the file would otherwise inherit it, and the seeded prefix's
+// records did not run under it. DSH sets the child's header from the parent's
+// LIVE scope chain rather than the parent's header, precisely because a parent
+// that recomposed while blank runs on a newer preset than its header names — so
+// the two headers CAN disagree about turns that appear in both files. Since a
+// replayed record keeps the parent's message id, both files derive the same
+// usage dedup key, and usage_turn_context is keyed (usage_dedup_key, dimension)
+// with ON CONFLICT DO NOTHING: whichever transcript the walk reaches first wins
+// silently, which is the ancestor's turns labelled with the fork's composition
+// about half the time. Withholding the seeded prefix's context leaves those
+// turns to the session that actually owns them.
+//
+// The predicate is DSH's own — `seq >= header.seedLength` is what its subagent
+// projection uses to prove a record "comes from the child's OWN log suffix ...
+// and not from a fork seed's replayed ancestor descriptor", and seedLength is
+// an index into the event array (`events[i].seq === i`, seqs contiguous).
+// A record with NO seq in a seeded log cannot be shown to be its own, so it is
+// treated as replayed: a missing context is recoverable from the parent, a
+// wrong one is not.
+func (h header) seeded(seq *int64) bool {
+	return h.SeedLength > 0 && (seq == nil || *seq < h.SeedLength)
 }
 
 // envelope is the common part of every storage record. `data` is left raw so it
@@ -508,7 +548,14 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 		br = bufio.NewReaderSize(r, 64*1024)
 	)
 
-	for lineNo := 0; ; lineNo++ {
+	// header is the FIRST NON-EMPTY line, not physical line 0. A blank line
+	// ahead of it — one empty append frame, a re-encoded tail — would otherwise
+	// shift the header into the record path, where its type is unknown and it is
+	// discarded in silence: no session id, no cwd and no agentPreset for the
+	// whole transcript, with no skipped count and no error to show for it.
+	seenFirst := false
+
+	for {
 		if ctx.Err() != nil {
 			res.scanErr = ctx.Err()
 			break
@@ -522,7 +569,8 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 		}
 		trimmed := trimSpaceBytes(raw)
 		if len(trimmed) > 0 {
-			if lineNo == 0 {
+			if !seenFirst {
+				seenFirst = true
 				// The first logical line is the header. It is decoded as a
 				// header and NOT as an envelope: it carries no seq and no data.
 				if err := json.Unmarshal(trimmed, &hdr); err != nil || hdr.Type != typeSession {
@@ -632,7 +680,7 @@ func decodeRecord(raw []byte, mtime time.Time, hdr header, path string, res *res
 			// being 1:1, so the step attributes nothing rather than half of it.
 			a.usageKey = ""
 		}
-		if hdr.AgentPreset != "" {
+		if hdr.AgentPreset != "" && !hdr.seeded(env.Seq) {
 			res.contexts = append(res.contexts, model.TurnContext{
 				UsageDedupKey: ev.DedupKey,
 				Tool:          Tool,

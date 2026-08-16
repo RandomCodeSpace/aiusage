@@ -650,6 +650,63 @@ func TestAgentPresetBecomesTurnContext(t *testing.T) {
 	}
 }
 
+// TestForkSeedRecordsNoTurnContext is the fork trap applied to the THIRD fact
+// type. Usage and activity survive a replayed prefix because their keys are the
+// message's; turn context cannot, because its value is the session HEADER's.
+//
+// DSH writes a child's agentPreset from the parent's LIVE composition rather
+// than the parent's header — a parent that recomposed while blank runs on a
+// newer preset than its header names — so the two logs CAN disagree about the
+// records they share. A replayed record derives the same usage dedup key in
+// both, and usage_turn_context is keyed (usage_dedup_key, dimension) ON
+// CONFLICT DO NOTHING: whichever transcript the walk reaches first wins in
+// silence. Here the child sorts FIRST, so a header-blind adapter labels the
+// parent's own turn with the fork's preset.
+func TestForkSeedRecordsNoTurnContext(t *testing.T) {
+	// seq 0 is the parent's; seq 1 is the child's own work. seedLength=1.
+	parentTurn := `{"type":"assistant/message","seq":0,"time":1200,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[],"source":{"kind":"model","provider":"p","model":"m"},"id":"msg-parent"},"usage":{"inputTokens":100,"outputTokens":20}}}`
+
+	home := t.TempDir()
+	// "session-a..." sorts before "session-z...", so the CHILD is walked first.
+	plantSession(t, home, "--w--", "session-a-child", []string{
+		`{"type":"session","version":0,"id":"session-a-child","createdAt":2000,"cwd":"/w","parentSession":"session-z-parent","seedLength":1,"origin":"subagent","delegationDepth":1,"agentPreset":"reviewer"}`,
+		parentTurn,
+		`{"type":"assistant/message","seq":1,"time":1300,"data":{"turn":2,"step":1,"message":{"role":"assistant","content":[],"source":{"kind":"model","provider":"p","model":"m"},"id":"msg-child"},"usage":{"inputTokens":10,"outputTokens":2}}}`,
+	})
+	plantSession(t, home, "--w--", "session-z-parent", []string{
+		`{"type":"session","version":0,"id":"session-z-parent","createdAt":1000,"cwd":"/w","delegationDepth":0,"agentPreset":"planner"}`,
+		parentTurn,
+	})
+
+	obs := collectAll(t, adapter.DiscoverConfig{Home: home})
+	if len(obs.Events) != 3 {
+		t.Fatalf("events = %d, want 3 (the replay still yields its row): %+v", len(obs.Events), obs.Events)
+	}
+
+	// One context per usage key: the parent's turn from the parent's log, the
+	// child's own turn from the child's. The replay contributes none.
+	got := map[string]string{}
+	for _, c := range obs.TurnContexts {
+		if prev, dup := got[c.UsageDedupKey]; dup {
+			t.Errorf("two contexts for %s: %q and %q — the fork seed re-labelled a turn it does not own",
+				c.UsageDedupKey, prev, c.Value)
+		}
+		got[c.UsageDedupKey] = c.Value
+	}
+	want := map[string]string{
+		"dsh|msg|msg-parent": "planner",
+		"dsh|msg|msg-child":  "reviewer",
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("context[%s] = %q, want %q", k, got[k], w)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("contexts = %+v, want exactly %+v", got, want)
+	}
+}
+
 // TestNoAgentPresetEmitsNoContext: a session that composes no preset has no
 // context to record, and a subagent origin alone is not a name.
 func TestNoAgentPresetEmitsNoContext(t *testing.T) {
@@ -850,6 +907,43 @@ func TestHeaderlessTranscriptStillYieldsNoIdentityGuess(t *testing.T) {
 	}
 	if obs.Events[0].DedupKey != "dsh|msg|msg-1" {
 		t.Errorf("DedupKey = %q; the message identity must survive a missing header", obs.Events[0].DedupKey)
+	}
+}
+
+// TestBlankLineBeforeTheHeaderKeepsTheIdentity: the header is the first
+// NON-EMPTY line, not physical line 0. Keying it on a read position makes one
+// stray blank line — an empty append frame, a re-encoded tail — silently cost
+// the transcript its session id, its cwd and its agentPreset, with no skipped
+// record and no error to show for it.
+func TestBlankLineBeforeTheHeaderKeepsTheIdentity(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(dshHome(home), dirSessions, "--w--", "session-x")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := "\n" + strings.Join([]string{
+		`{"type":"session","version":0,"id":"session-x","createdAt":1000,"cwd":"/w","delegationDepth":0,"agentPreset":"reviewer"}`,
+		`{"type":"assistant/message","seq":1,"time":1100,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[],"source":{"kind":"model","provider":"p","model":"m"},"id":"msg-1"},"usage":{"inputTokens":10,"outputTokens":1}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, transcriptPlain), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	obs, err := collectAllErr(t, adapter.DiscoverConfig{Home: home})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(obs.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(obs.Events))
+	}
+	if got := obs.Events[0].SessionID; got != "session-x" {
+		t.Errorf("SessionID = %q, want session-x: the header was read as a record", got)
+	}
+	if got := obs.Events[0].Project; got != "/w" {
+		t.Errorf("Project = %q, want /w", got)
+	}
+	if len(obs.TurnContexts) != 1 || obs.TurnContexts[0].Value != "reviewer" {
+		t.Errorf("turn contexts = %+v, want the header's agent preset", obs.TurnContexts)
 	}
 }
 
