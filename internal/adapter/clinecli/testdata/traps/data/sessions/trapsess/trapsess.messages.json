@@ -19,6 +19,10 @@
         }
       ],
       "ts": 1786855599000,
+      "modelInfo": {
+        "id": "claude-sonnet-4",
+        "provider": "anthropic"
+      },
       "metrics": {
         "inputTokens": 111111,
         "outputTokens": 111111,

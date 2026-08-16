@@ -271,6 +271,13 @@ func TestCacheTokensNeverDoubleCount(t *testing.T) {
 // user message is never usage even when it carries a metrics block, a message
 // with no id has no honest key and is dropped whole, and a message with no
 // metrics contributes activity but no tokens.
+//
+// The trap fixture's user message carries a modelInfo as well as a metrics
+// block deliberately, and that is what makes this assertion bite: without one
+// the message is refused for naming no model and the role filter could be
+// deleted with every test still passing. Its 111111 counters are one of the
+// sentinels TestSessionAccumulatorIsNeverRead scans for, so a role filter that
+// stopped filtering fails there too.
 func TestOnlyAssistantMessagesWithMetricsBecomeEvents(t *testing.T) {
 	obs := collectAll(t, "testdata/traps")
 
@@ -629,6 +636,74 @@ func TestDiscoveryUsesTheIndexAndTheWalk(t *testing.T) {
 	}
 }
 
+// TestIndexReadsUncheckpointedWAL is the read-mode trap on the index database.
+//
+// Cline holds sessions.db open and writes it under journal_mode=wal, so its
+// rows sit in the -wal file until something checkpoints them. immutable=1 makes
+// SQLite ignore the WAL entirely and read the main file as of its last
+// checkpoint; mode=ro + query_only(1) reads the live database without taking a
+// write lock. Measured on this machine's install: the main sessions.db is 4096
+// bytes and does not contain the `sessions` table at all, while every row lives
+// in a 181KB WAL — an immutable reader there does not lose metadata, it loses
+// the whole index. The writer is left open on purpose: closing it checkpoints
+// the WAL, after which the assertion would hold either way and prove nothing.
+func TestIndexReadsUncheckpointedWAL(t *testing.T) {
+	root := t.TempDir()
+	sess := filepath.Join(root, "data", "sessions", "walsess")
+	if err := os.MkdirAll(sess, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"version":1,"updated_at":"2026-08-16T05:00:00.000Z","agent":"lead",` +
+		`"sessionId":"walsess","messages":[{"id":"w1","role":"assistant","ts":1786855600000,` +
+		`"modelInfo":{"id":"m","provider":"p"},` +
+		`"metrics":{"inputTokens":11,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}]}`
+	docPath := filepath.Join(sess, "walsess.messages.json")
+	if err := os.WriteFile(docPath, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbDir := filepath.Join(root, "data", "db")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dbDir, indexDBName)
+	writer, err := sql.Open(driverName, "file:"+dbPath+"?_pragma=journal_mode(wal)")
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	var mode string
+	if err := writer.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Fatalf("journal_mode = %q, want wal", mode)
+	}
+	if _, err := writer.Exec(`CREATE TABLE sessions (session_id TEXT PRIMARY KEY,
+		provider TEXT, model TEXT, cwd TEXT, workspace_root TEXT, messages_path TEXT)`); err != nil {
+		t.Fatalf("create sessions: %v", err)
+	}
+	if _, err := writer.Exec(`INSERT INTO sessions VALUES
+		('walsess','anthropic','claude-sonnet-4','/indexed/wal','/indexed/wal',?)`, docPath); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if fi, err := os.Stat(dbPath + "-wal"); err != nil || fi.Size() == 0 {
+		t.Fatalf("no un-checkpointed WAL content (stat err %v); this test cannot detect a stale read", err)
+	}
+
+	obs := collectAll(t, root)
+	if len(obs.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(obs.Events))
+	}
+	// Only the index knows this cwd: the document has no sidecar to fall back
+	// to, so an index the adapter could not read shows up here as the label.
+	if got := obs.Events[0].Project; got != "/indexed/wal" {
+		t.Errorf("project = %q, want /indexed/wal — the index's rows are in the WAL "+
+			"and an immutable=1 reader cannot see them", got)
+	}
+}
+
 // TestEnvResolutionFollowsClineOwnChain pins the path chain read out of the
 // shipped CLI bundle. The trap it guards is CLINE_SESSION_DATA_DIR: it IS the
 // sessions directory, so an adapter that appends "sessions" to it — as the
@@ -678,6 +753,26 @@ func TestEnvResolutionFollowsClineOwnChain(t *testing.T) {
 			env:  map[string]string{DBDataDirEnv: "/srv/idx"},
 			home: "/home/u",
 			want: layout{sessions: "/home/u/.cline/data/sessions", db: "/srv/idx"},
+		},
+		{
+			// os.UserHomeDir failing costs the DEFAULTS, never the variables:
+			// codex and claudecode honour theirs without a home and this one
+			// must too, or the machine that most needs the override is the one
+			// machine the override does not reach.
+			name: "the variables are honoured with no home at all",
+			env:  map[string]string{SessionDataDirEnv: "/srv/sess", DBDataDirEnv: "/srv/idx"},
+			want: layout{sessions: "/srv/sess", db: "/srv/idx"},
+		},
+		{
+			// A link nothing named stays empty rather than relative: joining ""
+			// with "sessions.db" would probe the daemon's working directory.
+			name: "an unnamed link stays empty, never relative",
+			env:  map[string]string{SessionDataDirEnv: "/srv/sess"},
+			want: layout{sessions: "/srv/sess"},
+		},
+		{
+			name: "no home and no variables resolves to nothing",
+			want: layout{},
 		},
 	}
 	for _, tc := range cases {

@@ -226,23 +226,29 @@ func (a Adapter) resolve(cfg adapter.DiscoverConfig) layout {
 	// site: internal/cmd's discovery-environment guard parses these sources and
 	// resolves the argument statically, so a shared getenv helper would leave it
 	// unable to tell which variable is being read.
+	//
+	// Each link is derived from the one above it only when it was not named
+	// outright. An unresolvable home therefore costs the DEFAULTS, never the
+	// variables: a machine where os.UserHomeDir fails still collects from the
+	// directory CLINE_SESSION_DATA_DIR points at, the same way codex honours
+	// CODEX_HOME and claudecode CLAUDE_CONFIG_DIR without one. A link nothing
+	// named stays EMPTY rather than becoming a relative path, so a blank
+	// database directory can never turn into a `sessions.db` in whatever
+	// directory the daemon happens to have been started from.
 	root := strings.TrimSpace(os.Getenv(DirEnv))
-	if root == "" {
-		if cfg.Home == "" {
-			return layout{}
-		}
+	if root == "" && cfg.Home != "" {
 		root = filepath.Join(cfg.Home, ".cline")
 	}
 	data := strings.TrimSpace(os.Getenv(DataDirEnv))
-	if data == "" {
+	if data == "" && root != "" {
 		data = filepath.Join(root, "data")
 	}
 	sessions := strings.TrimSpace(os.Getenv(SessionDataDirEnv))
-	if sessions == "" {
+	if sessions == "" && data != "" {
 		sessions = filepath.Join(data, "sessions")
 	}
 	db := strings.TrimSpace(os.Getenv(DBDataDirEnv))
-	if db == "" {
+	if db == "" && data != "" {
 		db = filepath.Join(data, "db")
 	}
 	return layout{sessions: sessions, db: db}
@@ -278,7 +284,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 	seen := make(map[string]struct{})
 	var srcs []adapter.Source
 
-	for _, row := range indexRows(ctx, filepath.Join(l.db, indexDBName)) {
+	for _, row := range l.indexRows(ctx) {
 		if ctx.Err() != nil {
 			return srcs, ctx.Err()
 		}
@@ -348,6 +354,16 @@ func (r indexRow) project() string {
 		return v
 	}
 	return strings.TrimSpace(r.workspaceRoot)
+}
+
+// indexRows reads this layout's discovery index, if it named a directory to
+// hold one. An unnamed database directory yields no rows rather than a relative
+// probe for a `sessions.db` in the process's working directory.
+func (l layout) indexRows(ctx context.Context) []indexRow {
+	if l.db == "" {
+		return nil
+	}
+	return indexRows(ctx, filepath.Join(l.db, indexDBName))
 }
 
 // indexRows reads the discovery index read-only. Every failure is swallowed and
