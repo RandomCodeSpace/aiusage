@@ -31,7 +31,7 @@ func discover(t *testing.T, root string) []adapter.Source {
 	t.Helper()
 	clearEnv(t)
 	srcs, err := New().Discover(context.Background(),
-		adapter.DiscoverConfig{Overrides: map[string]string{ToolID: root}})
+		adapter.DiscoverConfig{Overrides: map[string]string{model.ToolCline: root}})
 	if err != nil {
 		t.Fatalf("Discover(%s): %v", root, err)
 	}
@@ -86,7 +86,7 @@ func TestLiveFixtureExactEvents(t *testing.T) {
 
 	want := []model.UsageEvent{
 		{
-			Tool: ToolID, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
+			Tool: model.ToolCline, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
 			SessionID: "1786853448040_dhd6i", Project: "/workspace/demo",
 			EventTime:   time.UnixMilli(1786853448987).UTC(),
 			InputTokens: 4758, OutputTokens: 8, TotalTokens: 4766,
@@ -95,7 +95,7 @@ func TestLiveFixtureExactEvents(t *testing.T) {
 			Kind:      model.KindUsage,
 		},
 		{
-			Tool: ToolID, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
+			Tool: model.ToolCline, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
 			SessionID: "1786855504226_rafg6", Project: "/workspace/probe",
 			EventTime:   time.UnixMilli(1786855505886).UTC(),
 			InputTokens: 4770, OutputTokens: 20, TotalTokens: 4790,
@@ -104,7 +104,7 @@ func TestLiveFixtureExactEvents(t *testing.T) {
 			Kind:      model.KindUsage,
 		},
 		{
-			Tool: ToolID, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
+			Tool: model.ToolCline, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
 			SessionID: "1786855504226_rafg6", Project: "/workspace/probe",
 			EventTime:   time.UnixMilli(1786855506538).UTC(),
 			InputTokens: 4822, OutputTokens: 17, TotalTokens: 4839,
@@ -127,7 +127,7 @@ func TestLiveFixtureExactEvents(t *testing.T) {
 
 	// The tool call rode in the same message as the usage it is charged to.
 	want1 := model.ActivityEvent{
-		Tool: ToolID, Kind: model.ActivityTool, Name: "run_commands",
+		Tool: model.ToolCline, Kind: model.ActivityTool, Name: "run_commands",
 		SessionID: "1786855504226_rafg6", Project: "/workspace/probe",
 		Model:         "gemma4:31b-cloud",
 		EventTime:     time.UnixMilli(1786855505886).UTC(),
@@ -466,7 +466,7 @@ func TestCheckpointGatesOnSizeAndMtime(t *testing.T) {
 	if obs.Checkpoint.Size == 0 || obs.Checkpoint.MTimeNS == 0 {
 		t.Fatalf("checkpoint carries no file stamp: %+v", obs.Checkpoint)
 	}
-	if obs.Checkpoint.Tool != ToolID || obs.Checkpoint.SourcePath != src.Path {
+	if obs.Checkpoint.Tool != model.ToolCline || obs.Checkpoint.SourcePath != src.Path {
 		t.Errorf("checkpoint identity = %s/%s", obs.Checkpoint.Tool, obs.Checkpoint.SourcePath)
 	}
 	if len(obs.Events) == 0 {
@@ -806,9 +806,9 @@ func TestEnvResolutionFollowsClineOwnChain(t *testing.T) {
 	t.Run("override normalises root or data dir", func(t *testing.T) {
 		clearEnv(t)
 		fromRoot := Adapter{}.resolve(adapter.DiscoverConfig{
-			Overrides: map[string]string{ToolID: live}})
+			Overrides: map[string]string{model.ToolCline: live}})
 		fromData := Adapter{}.resolve(adapter.DiscoverConfig{
-			Overrides: map[string]string{ToolID: filepath.Join(live, "data")}})
+			Overrides: map[string]string{model.ToolCline: filepath.Join(live, "data")}})
 		if fromRoot != fromData {
 			t.Errorf("root override %+v != data override %+v", fromRoot, fromData)
 		}

@@ -160,6 +160,9 @@ var toolAccents = map[string]compat.AdaptiveColor{
 	model.ToolKimiCode:   adaptive("#2E6F4E", "#68C08E"), // jade
 	model.ToolReasonix:   adaptive("#5B4BC4", "#9B8CF0"), // indigo
 	model.ToolDSH:        adaptive("#1F6F7A", "#5FBDC9"), // teal
+	model.ToolQwenCode:   adaptive("#5F7A0E", "#A3C93A"), // chartreuse
+	model.ToolGoose:      adaptive("#8B36A9", "#C77BE0"), // orchid
+	model.ToolCline:      adaptive("#0B7D6B", "#34D2B4"), // aqua
 }
 
 // toolGlyphs maps each known tool to a stable glyph so legends/bars survive
@@ -179,6 +182,9 @@ var toolGlyphs = map[string]string{
 	model.ToolKimiCode:   "◈",
 	model.ToolReasonix:   "✧",
 	model.ToolDSH:        "▣",
+	model.ToolQwenCode:   "◉",
+	model.ToolGoose:      "▽",
+	model.ToolCline:      "★",
 }
 
 // ToolAccent returns the accent color for a tool, falling back to the theme

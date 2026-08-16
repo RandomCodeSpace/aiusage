@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
 // The planted fixture is a pair of real-shaped ledger records with a marker
@@ -155,7 +157,7 @@ func TestDedupKeyIsIndependentOfRaw(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	for _, e := range obs.Events {
-		if want := Tool + "|" + e.MessageID; e.DedupKey != want {
+		if want := model.ToolQwenCode + "|" + e.MessageID; e.DedupKey != want {
 			t.Errorf("DedupKey = %q, want %q", e.DedupKey, want)
 		}
 		if e.Raw != "" && strings.Contains(e.DedupKey, e.Raw) {

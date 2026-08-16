@@ -182,7 +182,7 @@ func messageCalls(content []byte, rowID int64, messageID, sessionID string, crea
 	out := make([]model.ActivityEvent, 0, len(names))
 	for i, name := range names {
 		out = append(out, model.ActivityEvent{
-			Tool:      ToolID,
+			Tool:      model.ToolGoose,
 			Kind:      model.ActivityTool,
 			Name:      name,
 			SessionID: sessionID,
@@ -251,5 +251,5 @@ func callName(b contentBlock) (string, bool) {
 // across a whole install, which is the standard of evidence an id has to meet
 // before it becomes a dedup key.
 func callKey(sessionID string, rowID int64, idx int) string {
-	return ToolID + "|call|" + sessionID + "|" + strconv.FormatInt(rowID, 10) + "|" + strconv.Itoa(idx)
+	return model.ToolGoose + "|call|" + sessionID + "|" + strconv.FormatInt(rowID, 10) + "|" + strconv.Itoa(idx)
 }

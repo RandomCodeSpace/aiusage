@@ -167,7 +167,34 @@ keyed by a content hash rather than a byte offset; dsh emits usage, tool activit
 and agent turn context, and deliberately records NO context for a fork seed — a
 child log opens with the parent's leading events copied verbatim, both logs
 derive the same usage dedup key, and their headers can disagree about the records
-they share, so the first walked would otherwise re-label the ancestor's turns.
+they share, so the first walked would otherwise re-label the ancestor's turns;
+qwen-code reads the harness's OWN usage ledger rather than the transcripts every
+third-party parser reads (the ledger hands out a per-record randomUUID where a
+transcript forces a content tuple), buckets on `timestamp` because both
+`localMonth` and the FILE NAME are the writing machine's calendar, and emits
+usage plus agent turn context from `source` — the "main" sentinel producing none,
+since storing it would invent an agent and collide with a real subagent of that
+name — while its Gemini-shaped counters are filled by whichever wire answered, so
+`thoughtsTokens` is billed as a SUBSET (exact on openai, qwen-oauth and
+anthropic, under-billing only on the native Gemini wire) and is kept out of the
+total floor for the same reason cache read always has been; goose reads the
+purpose-built `usage_ledger` and NEVER a token column of `sessions`, whose
+`total_tokens` is assigned rather than accumulated, keeps `carried_forward` rows
+because they are the GAP between accumulator and ledger rather than a duplicate
+(and carry no model, so a model-is-required guard would delete exactly the
+reconciliation), subtracts cache out of goose's cache-INCLUSIVE input so a cached
+token is not billed at both rates, leaves a NULL cost unpriced rather than $0,
+and never attributes its tool calls — `usage_ledger` rows carry no message id and
+two of them commonly share one second, so a timestamp match would be a positional
+guess; cline is split identity INVERTED, since the message document is rewritten
+whole on every save (no byte offset survives, the gate is size+mtime) while the
+message ids inside it do not change, so re-reads collapse on a
+`cline|<session>|<agent>|<message id>` key scoped against locally-minted ids, it
+sums the per-message `metrics` and never the running `metadata_json`
+accumulator, joins activity exactly because the `tool_use` block sits in the SAME
+message as the metrics it was billed under, and opens the WAL-backed sessions.db
+index without immutable=1 — measured on this install the main file is 4096 bytes
+holding no sessions table at all while every row lives in a 181KB WAL.
 
 **Copilot activity comes from SPANS, never from metric dataPoints.** One OTEL
 file carries both shapes and only one of them counts anything. A span is written

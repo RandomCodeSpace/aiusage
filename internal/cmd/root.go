@@ -25,14 +25,17 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/agy"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/clinecli"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/crush"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/dsh"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/goose"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/kimicode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/pi"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/qwencode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/reasonix"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
@@ -299,14 +302,17 @@ func defaultRegistry() *adapter.Registry {
 		opencode.New(),
 		hermes.New(),
 		agy.New(),
+		clinecli.New(),
 		crush.New(),
 		dsh.New(),
+		goose.New(),
 		kimicode.New(),
 		// Pi and OpenClaw are two harnesses over one session format, so one
 		// package serves both. They are separate registry entries because they
 		// are separate tools: their rows must never be summed into one.
 		pi.NewPi(),
 		pi.NewOpenClaw(),
+		qwencode.New(),
 		reasonix.New(),
 	)
 }
@@ -327,14 +333,28 @@ func defaultRegistry() *adapter.Registry {
 func discoveryEnv() []string {
 	return []string{
 		claudecode.ConfigDirEnv,
+		// Cline resolves four nested rungs independently: CLINE_DIR moves the
+		// root, and each of the other three moves one directory below it
+		// whether or not the root moved. Any one of them alone puts the
+		// adapter's sessions tree or its discovery index somewhere a unit
+		// written under it would not look.
+		clinecli.DirEnv,
+		clinecli.DataDirEnv,
+		clinecli.SessionDataDirEnv,
+		clinecli.DBDataDirEnv,
 		codex.HomeEnv,
 		copilot.ExporterEnv,
 		crush.GlobalDataEnv,
 		// XDG_DATA_HOME is also one of config's own path variables, and it
-		// belongs here as well: it moves where CRUSH keeps projects.json, which
-		// is a different consequence from where aiusage keeps its database.
+		// belongs here as well: it moves where CRUSH keeps projects.json and
+		// where GOOSE keeps sessions.db (goose.DataHomeEnv is the same name,
+		// listed once), which is a different consequence from where aiusage
+		// keeps its database.
 		crush.XDGDataHomeEnv,
 		dsh.HomeEnv,
+		// GOOSE_PATH_ROOT relocates every goose directory at once and outranks
+		// the XDG root above it.
+		goose.PathRootEnv,
 		hermes.HomeEnv,
 		kimicode.HomeEnv,
 		kimicode.DataDirEnv,
@@ -355,6 +375,12 @@ func discoveryEnv() []string {
 		pi.OpenClawStateDirEnv,
 		pi.OpenClawHomeEnv,
 		pi.OpenClawAgentDirEnv,
+		// Qwen Code's own precedence: QWEN_RUNTIME_DIR wins, then QWEN_HOME,
+		// then ~/.qwen. The rung between them, settings' advanced.runtimeOutputDir,
+		// is not an environment variable and the adapter deliberately does not
+		// read it, so there is nothing to name here.
+		qwencode.RuntimeDirEnv,
+		qwencode.HomeEnv,
 		// Reasonix resolves its state root from the first of these two that is
 		// set, so either one moves every stats file the adapter reads.
 		reasonix.StateHomeEnv,

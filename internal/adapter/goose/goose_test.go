@@ -149,8 +149,8 @@ func TestLedgerMappingIsExact(t *testing.T) {
 	}
 	for i, w := range want {
 		got := obs.Events[i]
-		if got.Tool != ToolID {
-			t.Errorf("event %d Tool = %q, want %q", i, got.Tool, ToolID)
+		if got.Tool != model.ToolGoose {
+			t.Errorf("event %d Tool = %q, want %q", i, got.Tool, model.ToolGoose)
 		}
 		if got.Kind != model.KindUsage {
 			t.Errorf("event %d Kind = %q, want usage", i, got.Kind)
@@ -370,7 +370,7 @@ func TestMillisecondTimestampsAreNormalised(t *testing.T) {
 		input_tokens, output_tokens, total_tokens, cost, cost_source, is_compaction)
 		VALUES (50, '20260816_1', 1786853116000, 'gemma4:31b', 10, 2, 12, NULL, NULL, 0)`)
 
-	obs := collect(t, adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path})
+	obs := collect(t, adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path})
 	ev := eventByKey(t, obs.Events, "goose|20260816_1|50|1786853116")
 	if want := time.Unix(1786853116, 0).UTC(); !ev.EventTime.Equal(want) {
 		t.Errorf("EventTime = %v, want %v", ev.EventTime, want)
@@ -383,7 +383,7 @@ func TestMillisecondTimestampsAreNormalised(t *testing.T) {
 func TestIncrementalWatermarkAndGate(t *testing.T) {
 	dir := t.TempDir()
 	path := buildDB(t, dir)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path}
 	a := New().(adapter.Incremental)
 
 	first, err := a.CollectIncremental(context.Background(), src, nil)
@@ -454,7 +454,7 @@ func TestCollectDoesNotDisturbTheSource(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 
-	collect(t, adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path})
+	collect(t, adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path})
 
 	after, err := os.Stat(path)
 	if err != nil {
@@ -488,8 +488,8 @@ func TestDiscoverPathRootUsesDataSubdir(t *testing.T) {
 	if len(srcs) != 1 || srcs[0].Path != want {
 		t.Fatalf("discovered %v, want [%s]", srcs, want)
 	}
-	if srcs[0].Tool != ToolID || srcs[0].Class != model.EventLevel {
-		t.Errorf("source = (%q, %q), want (%q, event)", srcs[0].Tool, srcs[0].Class, ToolID)
+	if srcs[0].Tool != model.ToolGoose || srcs[0].Class != model.EventLevel {
+		t.Errorf("source = (%q, %q), want (%q, event)", srcs[0].Tool, srcs[0].Class, model.ToolGoose)
 	}
 }
 

@@ -38,6 +38,12 @@ const (
 	ToolKimiCode   = "kimi-code"
 	ToolReasonix   = "reasonix"
 	ToolDSH        = "dsh"
+	ToolQwenCode   = "qwen-code"
+	ToolGoose      = "goose"
+	// ToolCline names the HARNESS, not the CLI surface the clinecli adapter
+	// reads: a future adapter for the same product's editor extension shares
+	// this id and mints its own, non-colliding dedup keys.
+	ToolCline = "cline"
 )
 
 // Billing provider identities — the "provider" dimension of a priced event
@@ -90,10 +96,11 @@ const (
 //     conservative direction: it can only ever under-bill, never charge the same
 //     token twice. Revisit per backing provider once real telemetry exists.
 //
-// Two tools are deliberately ABSENT rather than entered as subset: crush reports
-// no tokens at all (its adapter emits cost only) and kimi-code's TokenUsage
-// carries no reasoning counter, so neither has a reasoning relationship to
-// state. Both fall back to the conservative default like any unknown id.
+// Four tools are deliberately ABSENT rather than entered as subset: crush
+// reports no tokens at all (its adapter emits cost only), and kimi-code's
+// TokenUsage, goose's usage_ledger and cline's per-message metrics each carry no
+// reasoning counter, so none of them has a reasoning relationship to state. They
+// fall back to the conservative default like any unknown id.
 var reasoningModes = map[string]ReasoningMode{
 	ToolClaudeCode: ReasoningSubset,
 	ToolCodex:      ReasoningSubset,
@@ -109,6 +116,13 @@ var reasoningModes = map[string]ReasoningMode{
 	ToolOpenClaw: ReasoningSubset,
 	ToolReasonix: ReasoningSubset,
 	ToolDSH:      ReasoningSubset,
+	// qwen-code's ledger has Gemini's SHAPE but is filled by whichever wire
+	// answered, and thoughtsTokens sits INSIDE the output count on the
+	// OpenAI-compatible ones (authType openai and qwen-oauth), while the
+	// anthropic converter writes no thoughts count at all. Only the native
+	// Gemini wire reports it beside output, so subset is exact on three wires
+	// and can only under-bill on the fourth. See qwencode.ReasoningMode.
+	ToolQwenCode: ReasoningSubset,
 }
 
 // ReasoningModeFor returns the reasoning billing mode for a tool id. An unknown

@@ -146,14 +146,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
-// Tool is the stable tool identifier for Qwen Code.
-//
-// It is declared here rather than in internal/model because this adapter ships
-// self-contained; promoting it to a model.ToolXxx constant is the integrator's
-// call, and MUST come with an entry in model's reasoningModes map — see
-// ReasoningMode below, which this package cannot register from the outside.
-const Tool = "qwen-code"
-
 // ReasoningMode is the reasoning-billing rule this surface reports, so the fact
 // travels with the adapter that measured it: SUBSET. thoughtsTokens is INSIDE
 // outputTokens on the OpenAI-compatible wires (authType openai and qwen-oauth —
@@ -212,7 +204,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return Tool }
+func (Adapter) ID() string { return model.ToolQwenCode }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Qwen Code" }
@@ -238,7 +230,7 @@ func (Adapter) DisplayName() string { return "Qwen Code" }
 // override is aiusage's own configuration and is taken as given.
 func (a Adapter) root(cfg adapter.DiscoverConfig) string {
 	if cfg.Overrides != nil {
-		if v := expandTilde(strings.TrimSpace(cfg.Overrides[Tool]), cfg.Home); v != "" {
+		if v := expandTilde(strings.TrimSpace(cfg.Overrides[model.ToolQwenCode]), cfg.Home); v != "" {
 			return filepath.Clean(v)
 		}
 	}
@@ -310,7 +302,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 			continue
 		}
 		srcs = append(srcs, adapter.Source{
-			Tool:  Tool,
+			Tool:  model.ToolQwenCode,
 			Class: model.EventLevel,
 			Path:  path,
 			Label: "qwen usage ledger " + name,
@@ -422,7 +414,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 
 	if complete {
 		obs.Checkpoint = &model.SourceCheckpoint{
-			Tool: Tool, SourcePath: src.Path,
+			Tool: model.ToolQwenCode, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed,
 		}
 	}
@@ -515,7 +507,7 @@ func (r record) event(path string, mtime time.Time) (model.UsageEvent, bool) {
 	}
 
 	return model.UsageEvent{
-		Tool:  Tool,
+		Tool:  model.ToolQwenCode,
 		Model: r.Model,
 		// Provider is deliberately empty: authType names the credential kind,
 		// not the biller. See the package comment.
@@ -534,7 +526,7 @@ func (r record) event(path string, mtime time.Time) (model.UsageEvent, bool) {
 		SourcePath:          path,
 		// The provider's own UUID, and nothing else: no path and no session, so
 		// a ledger copied to another machine or another directory counts once.
-		DedupKey: Tool + "|" + r.ID,
+		DedupKey: model.ToolQwenCode + "|" + r.ID,
 		Kind:     model.KindUsage,
 		Raw:      r.auditPayload(),
 	}, true
@@ -578,7 +570,7 @@ func (r record) turnContext(ev model.UsageEvent) (model.TurnContext, bool) {
 	}
 	return model.TurnContext{
 		UsageDedupKey: ev.DedupKey,
-		Tool:          Tool,
+		Tool:          model.ToolQwenCode,
 		Dimension:     model.DimensionAgent,
 		Value:         name,
 		SessionID:     ev.SessionID,

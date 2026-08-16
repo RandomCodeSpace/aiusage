@@ -93,13 +93,6 @@ const (
 	// unset: <XDG_DATA_HOME>/goose, defaulting to ~/.local/share/goose.
 	DataHomeEnv = "XDG_DATA_HOME"
 
-	// ToolID is the stable tool identifier stamped on every row this adapter
-	// produces. It lives here only because the adapter was built without
-	// touching internal/model; the VALUE is what the ledger stores, and it must
-	// become model.ToolGoose verbatim when the adapter is wired into the
-	// registry.
-	ToolID = "goose"
-
 	sessionsDirName = "sessions"
 	dbName          = "sessions.db"
 	dataSubdir      = "data"
@@ -140,7 +133,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return ToolID }
+func (Adapter) ID() string { return model.ToolGoose }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Goose" }
@@ -159,7 +152,7 @@ func (a Adapter) dataDirs(cfg adapter.DiscoverConfig) []string {
 	} else if cfg.Home != "" {
 		def = filepath.Join(cfg.Home, ".local", "share", "goose")
 	}
-	return []string{cfg.Root(ToolID, def)}
+	return []string{cfg.Root(model.ToolGoose, def)}
 }
 
 // Discover locates each <data-dir>/sessions/sessions.db that exists as a
@@ -183,7 +176,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		}
 		seen[db] = struct{}{}
 		srcs = append(srcs, adapter.Source{
-			Tool:  ToolID,
+			Tool:  model.ToolGoose,
 			Class: model.EventLevel,
 			Path:  db,
 			Label: "Goose sessions: " + db,
@@ -283,7 +276,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		state, merr := json.Marshal(gate)
 		if merr == nil {
 			obs.Checkpoint = &model.SourceCheckpoint{
-				Tool:       ToolID,
+				Tool:       model.ToolGoose,
 				SourcePath: src.Path,
 				Watermark:  usageConsumed,
 				State:      string(state),
@@ -395,7 +388,7 @@ func buildEvent(r ledgerRow, path string) (model.UsageEvent, bool, bool) {
 	}
 
 	ev := model.UsageEvent{
-		Tool: ToolID,
+		Tool: model.ToolGoose,
 		// Model is EMPTY on a carried-forward row, and that is correct: the row
 		// reconciles whatever ran, and naming the session's current model would
 		// attribute one model's gap to another.
@@ -433,7 +426,7 @@ func buildEvent(r ledgerRow, path string) (model.UsageEvent, bool, bool) {
 // ones would be silent data loss. created_timestamp is written once at INSERT
 // and never touched again, so the key is stable across polls.
 func dedupKey(sessionID string, rowID, ts int64) string {
-	return ToolID + "|" + sessionID + "|" + strconv.FormatInt(rowID, 10) + "|" + strconv.FormatInt(ts, 10)
+	return model.ToolGoose + "|" + sessionID + "|" + strconv.FormatInt(rowID, 10) + "|" + strconv.FormatInt(ts, 10)
 }
 
 // priceSource labels a cost with the provenance goose recorded for it
@@ -442,9 +435,9 @@ func dedupKey(sessionID string, rowID, ts int64) string {
 // distinguishable from the ladder's own rungs.
 func priceSource(costSource string) string {
 	if s := strings.TrimSpace(costSource); s != "" {
-		return ToolID + "-" + s
+		return model.ToolGoose + "-" + s
 	}
-	return ToolID
+	return model.ToolGoose
 }
 
 // rawUsage is the audit payload's shape: an explicit ALLOW-LIST of the usage,

@@ -132,15 +132,6 @@ import (
 )
 
 const (
-	// ToolID is the stable tool identifier stamped on every record. It names the
-	// HARNESS, not this surface: a future VS Code adapter for the same product
-	// shares it and mints its own, non-colliding dedup keys.
-	//
-	// NOTE FOR THE INTEGRATOR: this belongs in model.ToolXxx beside the other
-	// tool ids. It is declared here only because this adapter was built in
-	// isolation from internal/model.
-	ToolID = "cline"
-
 	// DirEnv moves the Cline root directory (default <home>/.cline), and with it
 	// every path below.
 	DirEnv = "CLINE_DIR"
@@ -194,7 +185,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return ToolID }
+func (Adapter) ID() string { return model.ToolCline }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Cline" }
@@ -213,7 +204,7 @@ type layout struct {
 // as the CLI defines them, with no such guessing.
 func (a Adapter) resolve(cfg adapter.DiscoverConfig) layout {
 	if cfg.Overrides != nil {
-		if v := strings.TrimSpace(cfg.Overrides[ToolID]); v != "" {
+		if v := strings.TrimSpace(cfg.Overrides[model.ToolCline]); v != "" {
 			data := normaliseDataDir(v)
 			return layout{
 				sessions: filepath.Join(data, "sessions"),
@@ -329,7 +320,7 @@ func newSource(path, sessionID, project, mdl, provider string) adapter.Source {
 		label = "cline session " + filepath.Base(path)
 	}
 	return adapter.Source{
-		Tool:  ToolID,
+		Tool:  model.ToolCline,
 		Class: model.EventLevel,
 		Path:  path,
 		Label: label,
@@ -505,7 +496,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 
 	obs := a.build(d, src)
 	obs.Checkpoint = &model.SourceCheckpoint{
-		Tool: ToolID, SourcePath: src.Path, Size: size, MTimeNS: mtime,
+		Tool: model.ToolCline, SourcePath: src.Path, Size: size, MTimeNS: mtime,
 	}
 	return obs, nil
 }
@@ -615,7 +606,7 @@ func buildEvent(m message, key, sessionID, project, mdl, provider string, when t
 		return model.UsageEvent{}, false
 	}
 	return model.UsageEvent{
-		Tool:                ToolID,
+		Tool:                model.ToolCline,
 		Model:               mdl,
 		Provider:            provider,
 		SessionID:           sessionID,
@@ -681,7 +672,7 @@ func buildActivity(m message, msgKey, usageKey, sessionID, project, mdl string, 
 			id = fmt.Sprintf("idx%d", i)
 		}
 		out = append(out, model.ActivityEvent{
-			Tool:          ToolID,
+			Tool:          model.ToolCline,
 			Kind:          model.ActivityTool,
 			Name:          strings.TrimSpace(c.Name),
 			SessionID:     sessionID,

@@ -54,8 +54,8 @@ func TestActivityFromToolRequests(t *testing.T) {
 	}
 	for i, w := range want {
 		got := obs.Activity[i]
-		if got.Tool != ToolID || got.Kind != model.ActivityTool {
-			t.Errorf("row %d = (%q, %q), want (%q, tool)", i, got.Tool, got.Kind, ToolID)
+		if got.Tool != model.ToolGoose || got.Kind != model.ActivityTool {
+			t.Errorf("row %d = (%q, %q), want (%q, tool)", i, got.Tool, got.Kind, model.ToolGoose)
 		}
 		if got.Name != w.Name || got.DedupKey != w.DedupKey {
 			t.Errorf("row %d = (%q, %q), want (%q, %q)", i, got.Name, got.DedupKey, w.Name, w.DedupKey)
@@ -174,7 +174,7 @@ func TestUsageComesOnlyFromTheLedger(t *testing.T) {
 	path := buildDB(t, dir)
 	writeRows(t, path, `DELETE FROM usage_ledger`)
 
-	obs := collect(t, adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path})
+	obs := collect(t, adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path})
 	if len(obs.Events) != 0 {
 		t.Errorf("empty ledger produced %d events: metadata_json was read as a usage surface", len(obs.Events))
 	}
@@ -189,7 +189,7 @@ func TestUsageComesOnlyFromTheLedger(t *testing.T) {
 func TestActivityWatermarkIsSeparate(t *testing.T) {
 	dir := t.TempDir()
 	path := buildDB(t, dir)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path}
 	a := New().(adapter.Incremental)
 
 	first, err := a.CollectIncremental(context.Background(), src, nil)
@@ -239,7 +239,7 @@ func TestUndatedMessagesProduceNoCalls(t *testing.T) {
 		VALUES (60, 'chatcmpl-undated', '20260816_3', 'assistant',
 		'[{"type":"toolRequest","id":"call_u","toolCall":{"status":"success","value":{"name":"shell"}}}]', 0)`)
 
-	obs := collect(t, adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path})
+	obs := collect(t, adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path})
 	for _, a := range obs.Activity {
 		if a.EventTime.IsZero() || a.EventTime.Year() < 2000 {
 			t.Errorf("undated call emitted with EventTime %v (key %s)", a.EventTime, a.DedupKey)
@@ -300,7 +300,7 @@ func TestMalformedContentNeverFailsTheSource(t *testing.T) {
 	writeRows(t, path, `INSERT INTO messages (id, message_id, session_id, role, content_json, created_timestamp)
 		VALUES (40, 'chatcmpl-bad', '20260816_3', 'assistant', 'not json at all', 1786860700)`)
 
-	obs, err := New().Collect(context.Background(), adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path})
+	obs, err := New().Collect(context.Background(), adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path})
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}

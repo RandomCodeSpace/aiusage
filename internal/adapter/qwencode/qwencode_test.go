@@ -31,7 +31,7 @@ func discover(t *testing.T, root string) []adapter.Source {
 	t.Helper()
 	srcs, err := Adapter{}.Discover(context.Background(), adapter.DiscoverConfig{
 		Home:      t.TempDir(),
-		Overrides: map[string]string{Tool: root},
+		Overrides: map[string]string{model.ToolQwenCode: root},
 	})
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -81,7 +81,7 @@ func TestCollectLiveFixtureEmitsExactEvents(t *testing.T) {
 
 	want := []model.UsageEvent{
 		{
-			Tool:         Tool,
+			Tool:         model.ToolQwenCode,
 			Model:        "gemma4:31b",
 			SessionID:    liveSession,
 			EventTime:    mustTime(t, "2026-08-16T04:04:34.251Z"),
@@ -98,7 +98,7 @@ func TestCollectLiveFixtureEmitsExactEvents(t *testing.T) {
 				`"outputTokens":8,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":33558,"apiDurationMs":2503}`,
 		},
 		{
-			Tool:         Tool,
+			Tool:         model.ToolQwenCode,
 			Model:        "gemma4:31b",
 			SessionID:    liveSession,
 			EventTime:    mustTime(t, "2026-08-16T04:04:34.965Z"),
@@ -151,7 +151,7 @@ func TestSubagentSourceBecomesAgentTurnContext(t *testing.T) {
 	}
 	want := []model.TurnContext{{
 		UsageDedupKey: "qwen-code|" + liveID2,
-		Tool:          Tool,
+		Tool:          model.ToolQwenCode,
 		Dimension:     model.DimensionAgent,
 		Value:         "managed-auto-memory-extractor",
 		SessionID:     liveSession,
@@ -333,7 +333,7 @@ func TestRecordWithoutProviderUUIDIsSkipped(t *testing.T) {
 		t.Errorf("error = %v, want it to name the 2 skipped records", err)
 	}
 	for _, e := range obs.Events {
-		if e.DedupKey == "" || e.DedupKey == Tool+"|" {
+		if e.DedupKey == "" || e.DedupKey == model.ToolQwenCode+"|" {
 			t.Errorf("event with an empty provider id got key %q", e.DedupKey)
 		}
 		if e.MessageID == "" {
@@ -499,7 +499,7 @@ func TestDiscoverIsSilentWithoutAUsageDir(t *testing.T) {
 	empty := t.TempDir() // exists, no usage/ inside
 	srcs, err := Adapter{}.Discover(context.Background(), adapter.DiscoverConfig{
 		Home:      t.TempDir(),
-		Overrides: map[string]string{Tool: empty},
+		Overrides: map[string]string{model.ToolQwenCode: empty},
 	})
 	if err != nil {
 		t.Fatalf("Discover on an opted-out root returned %v, want no error", err)
@@ -510,7 +510,7 @@ func TestDiscoverIsSilentWithoutAUsageDir(t *testing.T) {
 
 	missing, err := Adapter{}.Discover(context.Background(), adapter.DiscoverConfig{
 		Home:      t.TempDir(),
-		Overrides: map[string]string{Tool: filepath.Join(empty, "nope")},
+		Overrides: map[string]string{model.ToolQwenCode: filepath.Join(empty, "nope")},
 	})
 	if err != nil || len(missing) != 0 {
 		t.Fatalf("Discover on a missing root = %v, %v", missing, err)
@@ -540,7 +540,7 @@ func TestDiscoverMatchesOnlyLedgerFiles(t *testing.T) {
 	var got []string
 	for _, s := range discover(t, dir) {
 		got = append(got, filepath.Base(s.Path))
-		if s.Tool != Tool || s.Class != model.EventLevel {
+		if s.Tool != model.ToolQwenCode || s.Class != model.EventLevel {
 			t.Errorf("source %s: tool/class = %s/%s", s.Path, s.Tool, s.Class)
 		}
 		if s.Label == "" {
@@ -613,7 +613,7 @@ func TestRootPrecedence(t *testing.T) {
 	t.Run("an explicit override beats both", func(t *testing.T) {
 		t.Setenv(RuntimeDirEnv, runtime)
 		t.Setenv(HomeEnv, qwenHome)
-		cfg := adapter.DiscoverConfig{Home: home, Overrides: map[string]string{Tool: override}}
+		cfg := adapter.DiscoverConfig{Home: home, Overrides: map[string]string{model.ToolQwenCode: override}}
 		if got := rootOf(t, cfg); got != override {
 			t.Errorf("root = %s, want %s", got, override)
 		}

@@ -19,13 +19,16 @@ func TestReasoningModeForCoversEveryTool(t *testing.T) {
 		ToolOpenCode: ReasoningAdditive,
 		ToolGemini:   ReasoningAdditive,
 		ToolAgy:      ReasoningAdditive,
-		// pi/openclaw, reasonix and dsh all report reasoning inside output.
-		// crush (no tokens) and kimi-code (no reasoning counter) are absent on
+		// pi/openclaw, reasonix and dsh all report reasoning inside output, and
+		// so does qwen-code on the OpenAI-compatible wires its ledger mixes in
+		// under Gemini's field names. crush (no tokens), kimi-code, goose and
+		// cline (no reasoning counter on any of their surfaces) are absent on
 		// purpose and must keep falling back to the conservative default.
 		ToolPi:       ReasoningSubset,
 		ToolOpenClaw: ReasoningSubset,
 		ToolReasonix: ReasoningSubset,
 		ToolDSH:      ReasoningSubset,
+		ToolQwenCode: ReasoningSubset,
 	}
 	for tool, mode := range want {
 		if got := ReasoningModeFor(tool); got != mode {
