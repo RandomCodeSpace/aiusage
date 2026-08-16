@@ -45,7 +45,7 @@ func collectAll(t *testing.T, root string) []model.UsageEvent {
 	t.Helper()
 	a := New()
 	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{
-		Overrides: map[string]string{ToolID: root},
+		Overrides: map[string]string{model.ToolReasonix: root},
 	})
 	if err != nil {
 		t.Fatalf("discover: %v", err)
@@ -71,7 +71,7 @@ func TestCollectLiveLedgerExactEvents(t *testing.T) {
 	got := collectAll(t, root)
 
 	want := []model.UsageEvent{{
-		Tool:            ToolID,
+		Tool:            model.ToolReasonix,
 		Model:           "ollama/gemma4:31b-cloud",
 		Provider:        "ollama",
 		EventTime:       time.Date(2026, 8, 16, 4, 12, 0, 816750414, time.UTC),
@@ -83,7 +83,7 @@ func TestCollectLiveLedgerExactEvents(t *testing.T) {
 		DedupKey:        "reasonix|4f396ae6bb6b0b909f2bf2ff64d38d2c",
 		Kind:            model.KindUsage,
 	}, {
-		Tool:            ToolID,
+		Tool:            model.ToolReasonix,
 		Model:           "ollama/gemma4:31b-cloud",
 		Provider:        "ollama",
 		EventTime:       time.Date(2026, 8, 16, 4, 48, 16, 522162102, time.UTC),
@@ -98,7 +98,7 @@ func TestCollectLiveLedgerExactEvents(t *testing.T) {
 		// Counter for counter identical to the record above — same model, same
 		// 5718/2/5720 — and a different key, because the nanosecond ts is part
 		// of the bytes being hashed. See TestIdenticalCountersKeepDistinctKeys.
-		Tool:            ToolID,
+		Tool:            model.ToolReasonix,
 		Model:           "ollama/gemma4:31b-cloud",
 		Provider:        "ollama",
 		EventTime:       time.Date(2026, 8, 16, 5, 0, 8, 931387150, time.UTC),
@@ -224,7 +224,7 @@ func TestCollectShapes(t *testing.T) {
 	root, _ := newRoot(t, "shapes-2026-08-16.jsonl")
 	a := New()
 	srcs, err := a.Discover(context.Background(), adapter.DiscoverConfig{
-		Overrides: map[string]string{ToolID: root},
+		Overrides: map[string]string{model.ToolReasonix: root},
 	})
 	if err != nil {
 		t.Fatalf("discover: %v", err)
@@ -324,7 +324,7 @@ func TestBucketComesFromTheRecordNotTheFileName(t *testing.T) {
 func TestIncrementalSkipsUnchangedLedger(t *testing.T) {
 	root, path := newRoot(t, "live-2026-08-16.jsonl")
 	a := New().(Adapter)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolReasonix, Class: model.EventLevel, Path: path}
 	_ = root
 
 	first, err := a.CollectIncremental(context.Background(), src, nil)
@@ -352,7 +352,7 @@ func TestIncrementalSkipsUnchangedLedger(t *testing.T) {
 func TestIncrementalTailReadsOnlyTheAppendedRecord(t *testing.T) {
 	_, path := newRoot(t, "live-2026-08-16.jsonl")
 	a := New().(Adapter)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolReasonix, Class: model.EventLevel, Path: path}
 
 	first, err := a.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -389,7 +389,7 @@ func TestIncrementalTailReadsOnlyTheAppendedRecord(t *testing.T) {
 func TestIncrementalReReadsFromZeroOnShrink(t *testing.T) {
 	_, path := newRoot(t, "live-2026-08-16.jsonl")
 	a := New().(Adapter)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolReasonix, Class: model.EventLevel, Path: path}
 
 	first, err := a.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -427,7 +427,7 @@ func TestIncrementalReReadsFromZeroOnShrink(t *testing.T) {
 func TestIncrementalReReadsFromZeroOnSameSizeRewrite(t *testing.T) {
 	_, path := newRoot(t, "live-2026-08-16.jsonl")
 	a := New().(Adapter)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolReasonix, Class: model.EventLevel, Path: path}
 
 	first, err := a.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -480,7 +480,7 @@ func TestIncrementalReReadsFromZeroOnSameSizeRewrite(t *testing.T) {
 func TestDedupKeyIsContentNotPosition(t *testing.T) {
 	_, path := newRoot(t, "live-2026-08-16.jsonl")
 	a := New().(Adapter)
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolReasonix, Class: model.EventLevel, Path: path}
 
 	before, err := a.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -528,7 +528,7 @@ func TestUnterminatedTailIsNotConsumed(t *testing.T) {
 	}
 
 	a := New().(Adapter)
-	obs, err := a.CollectIncremental(context.Background(), adapter.Source{Tool: ToolID, Path: path}, nil)
+	obs, err := a.CollectIncremental(context.Background(), adapter.Source{Tool: model.ToolReasonix, Path: path}, nil)
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestDiscoverIgnoresNonLedgerEntries(t *testing.T) {
 	}
 
 	srcs, err := New().Discover(context.Background(), adapter.DiscoverConfig{
-		Overrides: map[string]string{ToolID: root},
+		Overrides: map[string]string{model.ToolReasonix: root},
 	})
 	if err != nil {
 		t.Fatalf("discover: %v", err)
@@ -584,8 +584,8 @@ func TestDiscoverIgnoresNonLedgerEntries(t *testing.T) {
 	if len(srcs) != 1 || filepath.Base(srcs[0].Path) != dayFile {
 		t.Fatalf("sources = %+v, want only %s", srcs, dayFile)
 	}
-	if srcs[0].Class != model.EventLevel || srcs[0].Tool != ToolID {
-		t.Errorf("source = %+v, want an event-level %s source", srcs[0], ToolID)
+	if srcs[0].Class != model.EventLevel || srcs[0].Tool != model.ToolReasonix {
+		t.Errorf("source = %+v, want an event-level %s source", srcs[0], model.ToolReasonix)
 	}
 	if srcs[0].Meta["day"] != "2026-08-16" {
 		t.Errorf("meta day = %q, want 2026-08-16", srcs[0].Meta["day"])
@@ -729,7 +729,7 @@ func TestOverrideBeatsTheEnvironment(t *testing.T) {
 	want := filepath.Join(override, "stats")
 	got := StatsDir(adapter.DiscoverConfig{
 		Home:      t.TempDir(),
-		Overrides: map[string]string{ToolID: override},
+		Overrides: map[string]string{model.ToolReasonix: override},
 	})
 	if got != want {
 		t.Errorf("stats dir = %q, want %q", got, want)

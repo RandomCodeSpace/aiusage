@@ -54,18 +54,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
-// Tool identifiers for the two harnesses this package serves.
-//
-// They live here rather than in internal/model only because this package was
-// built in isolation; they belong beside model.ToolClaudeCode and should move
-// there when the adapter is wired into the registry. Both are ReasoningSubset
-// tools — pi reports `reasoning` as a slice of `output` — which is already what
-// model.ReasoningModeFor returns for an unknown id, so the move is additive.
-const (
-	ToolPi       = "pi"
-	ToolOpenClaw = "openclaw"
-)
-
 // Environment variables that move what these adapters READ. Every one of them
 // is exported because a supervised install must know that the collected surface
 // was relocated by the environment: a unit does not inherit the installing
@@ -139,10 +127,10 @@ type Adapter struct {
 }
 
 // NewPi returns the adapter for Pi.
-func NewPi() adapter.Adapter { return Adapter{tool: ToolPi, label: "Pi"} }
+func NewPi() adapter.Adapter { return Adapter{tool: model.ToolPi, label: "Pi"} }
 
 // NewOpenClaw returns the adapter for OpenClaw.
-func NewOpenClaw() adapter.Adapter { return Adapter{tool: ToolOpenClaw, label: "OpenClaw"} }
+func NewOpenClaw() adapter.Adapter { return Adapter{tool: model.ToolOpenClaw, label: "OpenClaw"} }
 
 // ID returns the stable tool identifier.
 func (a Adapter) ID() string { return a.tool }
@@ -169,7 +157,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 
 // sessionRoots resolves the directories to scan for session files.
 func (a Adapter) sessionRoots(cfg adapter.DiscoverConfig) []string {
-	if a.tool == ToolPi {
+	if a.tool == model.ToolPi {
 		return a.piRoots(cfg)
 	}
 	return a.openClawRoots(cfg)
@@ -190,7 +178,7 @@ func (a Adapter) piRoots(cfg adapter.DiscoverConfig) []string {
 		if cfg.Home != "" {
 			def = filepath.Join(cfg.Home, ".pi", "agent")
 		}
-		agentDir = cfg.Root(ToolPi, def)
+		agentDir = cfg.Root(model.ToolPi, def)
 	}
 	if agentDir == "" {
 		return nil
@@ -223,7 +211,7 @@ func (a Adapter) openClawRoots(cfg adapter.DiscoverConfig) []string {
 		if home == "" {
 			home = cfg.Home
 		}
-		base := cfg.Root(ToolOpenClaw, "")
+		base := cfg.Root(model.ToolOpenClaw, "")
 		if base != "" && base != cfg.Home {
 			// An explicit per-tool override names the state root itself.
 			add(base)

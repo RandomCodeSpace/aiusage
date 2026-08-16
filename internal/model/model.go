@@ -32,6 +32,12 @@ const (
 	ToolHermes     = "hermes"
 	ToolGemini     = "gemini"
 	ToolAgy        = "agy"
+	ToolPi         = "pi"
+	ToolOpenClaw   = "openclaw"
+	ToolCrush      = "crush"
+	ToolKimiCode   = "kimi-code"
+	ToolReasonix   = "reasonix"
+	ToolDSH        = "dsh"
 )
 
 // Billing provider identities — the "provider" dimension of a priced event
@@ -83,6 +89,11 @@ const (
 //     for Anthropic-backed models. Subset resolves that contradiction in the
 //     conservative direction: it can only ever under-bill, never charge the same
 //     token twice. Revisit per backing provider once real telemetry exists.
+//
+// Two tools are deliberately ABSENT rather than entered as subset: crush reports
+// no tokens at all (its adapter emits cost only) and kimi-code's TokenUsage
+// carries no reasoning counter, so neither has a reasoning relationship to
+// state. Both fall back to the conservative default like any unknown id.
 var reasoningModes = map[string]ReasoningMode{
 	ToolClaudeCode: ReasoningSubset,
 	ToolCodex:      ReasoningSubset,
@@ -91,6 +102,13 @@ var reasoningModes = map[string]ReasoningMode{
 	ToolAgy:        ReasoningAdditive,
 	ToolHermes:     ReasoningSubset, // unverified
 	ToolCopilot:    ReasoningSubset, // unverified
+	// pi/openclaw share one session format, whose types state that output
+	// already includes reasoning; reasonix labels the field a subset of
+	// completion; dsh reports reasoning as a subdivision of output.
+	ToolPi:       ReasoningSubset,
+	ToolOpenClaw: ReasoningSubset,
+	ToolReasonix: ReasoningSubset,
+	ToolDSH:      ReasoningSubset,
 }
 
 // ReasoningModeFor returns the reasoning billing mode for a tool id. An unknown

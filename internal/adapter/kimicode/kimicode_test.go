@@ -102,8 +102,8 @@ func TestDiscoverFindsEveryAgentWireLog(t *testing.T) {
 		t.Fatalf("want 4 wire logs, got %d: %v", len(srcs), got)
 	}
 	for _, s := range srcs {
-		if s.Tool != ToolID {
-			t.Errorf("tool = %q, want %q", s.Tool, ToolID)
+		if s.Tool != model.ToolKimiCode {
+			t.Errorf("tool = %q, want %q", s.Tool, model.ToolKimiCode)
 		}
 		if s.Class != model.EventLevel {
 			t.Errorf("class = %q, want event-level", s.Class)
@@ -183,7 +183,7 @@ func TestRealSessionEmitsExactlyOneEvent(t *testing.T) {
 	got := evs[0]
 
 	want := model.UsageEvent{
-		Tool:                ToolID,
+		Tool:                model.ToolKimiCode,
 		Model:               realModel,
 		Provider:            "",
 		SessionID:           realSession,
@@ -383,7 +383,7 @@ func TestDedupKeysAreStableAcrossReads(t *testing.T) {
 func TestDedupKeysAreDistinctPerRecord(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, e := range collect(t, sourceFor(t, synthSession, "main")) {
-		if !strings.HasPrefix(e.DedupKey, ToolID+"|") {
+		if !strings.HasPrefix(e.DedupKey, model.ToolKimiCode+"|") {
 			t.Errorf("key %q is not namespaced by the tool", e.DedupKey)
 		}
 		if seen[e.DedupKey] {
@@ -469,7 +469,7 @@ func TestIncrementalTailReadMatchesFullRead(t *testing.T) {
 	writeLines(t, path, lines[:split])
 
 	src := adapter.Source{
-		Tool: ToolID, Class: model.EventLevel, Path: path,
+		Tool: model.ToolKimiCode, Class: model.EventLevel, Path: path,
 		Meta: map[string]string{"session": synthSession, "agent": "main", "project": "/tmp/kimi-fixture-project"},
 	}
 	a := Adapter{}
@@ -518,7 +518,7 @@ func TestShrunkFileIsReReadFromZero(t *testing.T) {
 	path := filepath.Join(dir, fileWire)
 	writeLines(t, path, lines)
 
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path,
+	src := adapter.Source{Tool: model.ToolKimiCode, Class: model.EventLevel, Path: path,
 		Meta: map[string]string{"session": synthSession, "agent": "main"}}
 	a := Adapter{}
 	obs, err := a.CollectIncremental(context.Background(), src, nil)
@@ -552,7 +552,7 @@ func TestMalformedLineDoesNotDropTheRest(t *testing.T) {
 	path := filepath.Join(dir, fileWire)
 	writeLines(t, path, broken)
 
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path,
+	src := adapter.Source{Tool: model.ToolKimiCode, Class: model.EventLevel, Path: path,
 		Meta: map[string]string{"session": synthSession, "agent": "main"}}
 	evs := collect(t, src)
 	if len(evs) != 3 {

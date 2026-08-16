@@ -77,7 +77,7 @@ func writeIndex(t *testing.T, globalDir string, roots ...string) {
 func collect(t *testing.T, dbPath, project string) adapter.Observation {
 	t.Helper()
 	src := adapter.Source{
-		Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+		Tool: model.ToolCrush, Class: model.EventLevel, Path: dbPath,
 		Meta: map[string]string{"project": project},
 	}
 	obs, err := Adapter{}.Collect(context.Background(), src)
@@ -131,7 +131,7 @@ func TestDiscoverReadsProjectsIndex(t *testing.T) {
 	}
 	got := srcs[0]
 	want := adapter.Source{
-		Tool:  ToolID,
+		Tool:  model.ToolCrush,
 		Class: model.EventLevel,
 		Path:  dbPath,
 		Label: "Crush sessions: " + dbPath,
@@ -377,7 +377,7 @@ func TestCollectEmitsExactlyTheExpectedCharges(t *testing.T) {
 			t.Errorf("event %d: dedup key %q, want %q", i, e.DedupKey, w.dedup)
 			continue
 		}
-		if e.Tool != ToolID || e.Kind != model.KindUsage {
+		if e.Tool != model.ToolCrush || e.Kind != model.KindUsage {
 			t.Errorf("%s: tool/kind %q/%q", w.dedup, e.Tool, e.Kind)
 		}
 		if e.SessionID != w.session {
@@ -474,7 +474,7 @@ func TestNestedSubAgentModelsReachTheRoot(t *testing.T) {
 // mean weakening a correctness gate to save a single read.
 func TestGateClosesOnAnUntouchedDatabase(t *testing.T) {
 	dbPath := buildDB(t, t.TempDir(), "costly.sql")
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+	src := adapter.Source{Tool: model.ToolCrush, Class: model.EventLevel, Path: dbPath,
 		Meta: map[string]string{"project": "/proj"}}
 
 	first, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
@@ -510,7 +510,7 @@ func TestGateClosesOnAnUntouchedDatabase(t *testing.T) {
 
 func TestCostGrowthChargesOnlyTheDelta(t *testing.T) {
 	dbPath := buildDB(t, t.TempDir(), "costly.sql")
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+	src := adapter.Source{Tool: model.ToolCrush, Class: model.EventLevel, Path: dbPath,
 		Meta: map[string]string{"project": "/proj"}}
 	first, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -547,7 +547,7 @@ func TestCostGrowthChargesOnlyTheDelta(t *testing.T) {
 // twice; the watermark therefore only ever rises.
 func TestCostDropNeverLowersTheWatermark(t *testing.T) {
 	dbPath := buildDB(t, t.TempDir(), "costly.sql")
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+	src := adapter.Source{Tool: model.ToolCrush, Class: model.EventLevel, Path: dbPath,
 		Meta: map[string]string{"project": "/proj"}}
 	first, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -582,7 +582,7 @@ func TestCostDropNeverLowersTheWatermark(t *testing.T) {
 // micro-USD for 3000000 of real spend.
 func TestUnreadableRowKeepsItsWatermark(t *testing.T) {
 	dbPath := buildDB(t, t.TempDir(), "costly.sql")
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+	src := adapter.Source{Tool: model.ToolCrush, Class: model.EventLevel, Path: dbPath,
 		Meta: map[string]string{"project": "/proj"}}
 
 	first, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
@@ -642,7 +642,7 @@ func corrupt(t *testing.T, dbPath, stmt string) {
 // conflict-skip absorbs the repeat.
 func TestLostCheckpointMintsTheSameKeys(t *testing.T) {
 	dbPath := buildDB(t, t.TempDir(), "costly.sql")
-	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: dbPath,
+	src := adapter.Source{Tool: model.ToolCrush, Class: model.EventLevel, Path: dbPath,
 		Meta: map[string]string{"project": "/proj"}}
 	first, err := Adapter{}.CollectIncremental(context.Background(), src, nil)
 	if err != nil {
@@ -796,7 +796,7 @@ func TestReadingIsObservationalOnAWalDatabase(t *testing.T) {
 	}
 
 	if _, err := (Adapter{}).Collect(context.Background(), adapter.Source{
-		Tool: ToolID, Path: dbPath, Meta: map[string]string{"project": "/proj"},
+		Tool: model.ToolCrush, Path: dbPath, Meta: map[string]string{"project": "/proj"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -917,7 +917,7 @@ func TestRootOfStopsOnCyclesAndMissingParents(t *testing.T) {
 
 func TestCollectOnAMissingDatabaseFailsWithoutEmitting(t *testing.T) {
 	obs, err := Adapter{}.Collect(context.Background(), adapter.Source{
-		Tool: ToolID, Path: filepath.Join(t.TempDir(), "absent.db"),
+		Tool: model.ToolCrush, Path: filepath.Join(t.TempDir(), "absent.db"),
 	})
 	if err == nil {
 		t.Fatal("want an error for an unreadable source")
@@ -942,7 +942,7 @@ func TestMissingMessagesTableDefersRatherThanDegrades(t *testing.T) {
 	db.Close()
 
 	obs, err := Adapter{}.Collect(context.Background(), adapter.Source{
-		Tool: ToolID, Path: dbPath, Meta: map[string]string{"project": "/proj"},
+		Tool: model.ToolCrush, Path: dbPath, Meta: map[string]string{"project": "/proj"},
 	})
 	if err == nil {
 		t.Fatal("want an error, not a pass of rows with attribution silently missing")
@@ -954,7 +954,7 @@ func TestMissingMessagesTableDefersRatherThanDegrades(t *testing.T) {
 
 func TestAdapterIdentity(t *testing.T) {
 	a := New()
-	if a.ID() != ToolID || a.DisplayName() != "Crush" {
+	if a.ID() != model.ToolCrush || a.DisplayName() != "Crush" {
 		t.Fatalf("identity %q / %q", a.ID(), a.DisplayName())
 	}
 	if _, ok := a.(adapter.Incremental); !ok {

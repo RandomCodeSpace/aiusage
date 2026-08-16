@@ -28,6 +28,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/crush"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/dsh"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/kimicode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
@@ -299,6 +300,13 @@ func defaultRegistry() *adapter.Registry {
 		hermes.New(),
 		agy.New(),
 		crush.New(),
+		dsh.New(),
+		kimicode.New(),
+		// Pi and OpenClaw are two harnesses over one session format, so one
+		// package serves both. They are separate registry entries because they
+		// are separate tools: their rows must never be summed into one.
+		pi.NewPi(),
+		pi.NewOpenClaw(),
 		reasonix.New(),
 	)
 }
@@ -326,11 +334,8 @@ func discoveryEnv() []string {
 		// belongs here as well: it moves where CRUSH keeps projects.json, which
 		// is a different consequence from where aiusage keeps its database.
 		crush.XDGDataHomeEnv,
+		dsh.HomeEnv,
 		hermes.HomeEnv,
-		// Both Kimi Code variables are named here even though the adapter is
-		// not in the registry yet: the guard reads the adapter SOURCES, and a
-		// variable that moves a discovery root has to suppress the install from
-		// the moment the code that reads it exists.
 		kimicode.HomeEnv,
 		kimicode.DataDirEnv,
 		opencode.DataDirEnv,

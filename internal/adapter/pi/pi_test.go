@@ -121,8 +121,8 @@ func TestPiFixtureEventsAreExact(t *testing.T) {
 		if !ok {
 			t.Fatalf("no event with dedup key %q", w.key)
 		}
-		if e.Tool != ToolPi {
-			t.Errorf("%s tool = %q, want %q", w.key, e.Tool, ToolPi)
+		if e.Tool != model.ToolPi {
+			t.Errorf("%s tool = %q, want %q", w.key, e.Tool, model.ToolPi)
 		}
 		if e.SessionID != w.session {
 			t.Errorf("%s session = %q, want %q", w.key, e.SessionID, w.session)
@@ -264,8 +264,8 @@ func TestOpenClawFixtureEventsAreExact(t *testing.T) {
 		if e.DedupKey != w.key {
 			t.Errorf("event %d key = %q, want %q", i, e.DedupKey, w.key)
 		}
-		if e.Tool != ToolOpenClaw {
-			t.Errorf("event %d tool = %q, want %q", i, e.Tool, ToolOpenClaw)
+		if e.Tool != model.ToolOpenClaw {
+			t.Errorf("event %d tool = %q, want %q", i, e.Tool, model.ToolOpenClaw)
 		}
 		if e.Model != "gemma4:31b" || e.Provider != "ollama-cloud" {
 			t.Errorf("event %d model/provider = %q/%q", i, e.Model, e.Provider)
@@ -331,7 +331,7 @@ func TestTrajectorySidecarIsNeitherDiscoveredNorRead(t *testing.T) {
 		t.Fatalf("fixture missing: %v", err)
 	}
 	obs, err := a.Collect(context.Background(), adapter.Source{
-		Tool: ToolOpenClaw, Class: model.EventLevel, Path: sidecar,
+		Tool: model.ToolOpenClaw, Class: model.EventLevel, Path: sidecar,
 	})
 	if err != nil {
 		t.Fatalf("collect sidecar: %v", err)
@@ -346,7 +346,7 @@ func TestTrajectorySidecarIsNeitherDiscoveredNorRead(t *testing.T) {
 	// A rejected file that later GROWS must not be tail-read as though its
 	// header had been accepted.
 	obs2, err := a.(adapter.Incremental).CollectIncremental(context.Background(),
-		adapter.Source{Tool: ToolOpenClaw, Path: sidecar},
+		adapter.Source{Tool: model.ToolOpenClaw, Path: sidecar},
 		&model.SourceCheckpoint{Size: 1, MTimeNS: 1, Offset: 500, State: obs.Checkpoint.State})
 	if err != nil {
 		t.Fatal(err)
@@ -683,7 +683,7 @@ func TestCompleteButUnterminatedLineIsNotConsumed(t *testing.T) {
 	})
 	touch(t, path)
 	tail, err := NewPi().(adapter.Incremental).CollectIncremental(context.Background(),
-		adapter.Source{Tool: ToolPi, Class: model.EventLevel, Path: path}, obs.Checkpoint)
+		adapter.Source{Tool: model.ToolPi, Class: model.EventLevel, Path: path}, obs.Checkpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestIncrementalSkipsTailsAndRestarts(t *testing.T) {
 		`{"type":"message","id":"e1","timestamp":"2026-08-16T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-x","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,"cost":{"total":0}}}}`,
 	})
 	a := NewPi()
-	src := adapter.Source{Tool: ToolPi, Class: model.EventLevel, Path: path}
+	src := adapter.Source{Tool: model.ToolPi, Class: model.EventLevel, Path: path}
 
 	first, err := a.(adapter.Incremental).CollectIncremental(context.Background(), src, nil)
 	if err != nil {

@@ -19,6 +19,13 @@ func TestReasoningModeForCoversEveryTool(t *testing.T) {
 		ToolOpenCode: ReasoningAdditive,
 		ToolGemini:   ReasoningAdditive,
 		ToolAgy:      ReasoningAdditive,
+		// pi/openclaw, reasonix and dsh all report reasoning inside output.
+		// crush (no tokens) and kimi-code (no reasoning counter) are absent on
+		// purpose and must keep falling back to the conservative default.
+		ToolPi:       ReasoningSubset,
+		ToolOpenClaw: ReasoningSubset,
+		ToolReasonix: ReasoningSubset,
+		ToolDSH:      ReasoningSubset,
 	}
 	for tool, mode := range want {
 		if got := ReasoningModeFor(tool); got != mode {

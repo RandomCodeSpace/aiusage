@@ -163,20 +163,20 @@ func TestFixtureSessionEmitsExactEvents(t *testing.T) {
 	}
 	want := []model.UsageEvent{
 		{
-			Tool: Tool, Model: fixModel, Provider: fixProv,
+			Tool: model.ToolDSH, Model: fixModel, Provider: fixProv,
 			SessionID: fixSession, Project: fixProject,
 			EventTime:   ms(1786855857939),
 			InputTokens: 10065, OutputTokens: 44, TotalTokens: 10109,
 			MessageID: fixMsg1, RequestID: "chatcmpl-988",
-			SourcePath: path, DedupKey: Tool + "|msg|" + fixMsg1, Kind: model.KindUsage,
+			SourcePath: path, DedupKey: model.ToolDSH + "|msg|" + fixMsg1, Kind: model.KindUsage,
 		},
 		{
-			Tool: Tool, Model: fixModel, Provider: fixProv,
+			Tool: model.ToolDSH, Model: fixModel, Provider: fixProv,
 			SessionID: fixSession, Project: fixProject,
 			EventTime:   ms(1786855859054),
 			InputTokens: 10136, OutputTokens: 55, TotalTokens: 10191,
 			MessageID: fixMsg2, RequestID: "chatcmpl-958",
-			SourcePath: path, DedupKey: Tool + "|msg|" + fixMsg2, Kind: model.KindUsage,
+			SourcePath: path, DedupKey: model.ToolDSH + "|msg|" + fixMsg2, Kind: model.KindUsage,
 		},
 	}
 	for i, w := range want {
@@ -192,20 +192,20 @@ func TestFixtureSessionEmitsExactEvents(t *testing.T) {
 	}
 	wantAct := []model.ActivityEvent{
 		{
-			Tool: Tool, Kind: model.ActivityTool, Name: "bash",
+			Tool: model.ToolDSH, Kind: model.ActivityTool, Name: "bash",
 			SessionID: fixSession, Project: fixProject, Model: fixModel,
 			EventTime:     ms(1786855857940),
-			UsageDedupKey: Tool + "|msg|" + fixMsg1, MessageID: fixMsg1,
+			UsageDedupKey: model.ToolDSH + "|msg|" + fixMsg1, MessageID: fixMsg1,
 			TurnSeq: 0, CallsInTurn: 2,
-			SourcePath: path, DedupKey: Tool + "|call|" + fixMsg1 + "|" + fixCall1,
+			SourcePath: path, DedupKey: model.ToolDSH + "|call|" + fixMsg1 + "|" + fixCall1,
 		},
 		{
-			Tool: Tool, Kind: model.ActivityTool, Name: "glob",
+			Tool: model.ToolDSH, Kind: model.ActivityTool, Name: "glob",
 			SessionID: fixSession, Project: fixProject, Model: fixModel,
 			EventTime:     ms(1786855857976),
-			UsageDedupKey: Tool + "|msg|" + fixMsg1, MessageID: fixMsg1,
+			UsageDedupKey: model.ToolDSH + "|msg|" + fixMsg1, MessageID: fixMsg1,
 			TurnSeq: 1, CallsInTurn: 2,
-			SourcePath: path, DedupKey: Tool + "|call|" + fixMsg1 + "|" + fixCall2,
+			SourcePath: path, DedupKey: model.ToolDSH + "|call|" + fixMsg1 + "|" + fixCall2,
 		},
 	}
 	for i, w := range wantAct {
@@ -323,7 +323,7 @@ func TestTornZstdTailKeepsCompleteFramesAndWithholdsCheckpoint(t *testing.T) {
 	if obs.Checkpoint != nil {
 		t.Error("checkpoint advanced over an unread remainder")
 	}
-	if len(obs.Events) != 1 || obs.Events[0].DedupKey != Tool+"|msg|"+fixMsg1 {
+	if len(obs.Events) != 1 || obs.Events[0].DedupKey != model.ToolDSH+"|msg|"+fixMsg1 {
 		t.Fatalf("complete frames lost: %d events %+v", len(obs.Events), obs.Events)
 	}
 }
@@ -636,7 +636,7 @@ func TestAgentPresetBecomesTurnContext(t *testing.T) {
 	obs := collectAll(t, adapter.DiscoverConfig{Home: home})
 	want := model.TurnContext{
 		UsageDedupKey: "dsh|msg|msg-1",
-		Tool:          Tool,
+		Tool:          model.ToolDSH,
 		Dimension:     model.DimensionAgent,
 		Value:         "code-reviewer",
 		SessionID:     "session-x",
@@ -786,7 +786,7 @@ func TestDiscoverAcceptsBothSpellingsAndIgnoresEverythingElse(t *testing.T) {
 		t.Fatalf("sources = %d, want 2: %+v", len(srcs), srcs)
 	}
 	for _, s := range srcs {
-		if s.Tool != Tool || s.Class != model.EventLevel {
+		if s.Tool != model.ToolDSH || s.Class != model.EventLevel {
 			t.Errorf("source %+v has the wrong tool/class", s)
 		}
 	}

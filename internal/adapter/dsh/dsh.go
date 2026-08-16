@@ -80,15 +80,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
-// Tool is the stable tool identifier for DSH.
-//
-// NOTE FOR THE INTEGRATOR: internal/model is off-limits to this adapter, so the
-// id lives here instead of as a model.ToolXxx constant. Promote it to
-// internal/model alongside the others when wiring the adapter in. No entry in
-// model.reasoningModes is required: DSH reports reasoning as a subdivision of
-// output, and the unregistered-tool default is already ReasoningSubset.
-const Tool = "dsh"
-
 // HomeEnv names the environment variable that moves the DSH home, and with it
 // every session log this adapter reads. Exported for the same reason
 // claudecode.ConfigDirEnv and codex.HomeEnv are: what gets collected is decided
@@ -136,7 +127,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return Tool }
+func (Adapter) ID() string { return model.ToolDSH }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "DSH" }
@@ -159,7 +150,7 @@ func (a Adapter) homes(cfg adapter.DiscoverConfig) []string {
 	if cfg.Home != "" {
 		def = filepath.Join(cfg.Home, defaultHomeDir)
 	}
-	return []string{cfg.Root(Tool, def)}
+	return []string{cfg.Root(model.ToolDSH, def)}
 }
 
 // Discover locates every session transcript under <home>/sessions.
@@ -213,7 +204,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 			}
 			seen[path] = struct{}{}
 			srcs = append(srcs, adapter.Source{
-				Tool:  Tool,
+				Tool:  model.ToolDSH,
 				Class: model.EventLevel,
 				Path:  path,
 				Label: "dsh session " + filepath.Base(filepath.Dir(path)),
@@ -267,7 +258,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		// that aborted withholds it, and the unread remainder is picked up next
 		// cycle.
 		obs.Checkpoint = &model.SourceCheckpoint{
-			Tool: Tool, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
+			Tool: model.ToolDSH, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
 		}
 	}
 	switch {
@@ -683,7 +674,7 @@ func decodeRecord(raw []byte, mtime time.Time, hdr header, path string, res *res
 		if hdr.AgentPreset != "" && !hdr.seeded(env.Seq) {
 			res.contexts = append(res.contexts, model.TurnContext{
 				UsageDedupKey: ev.DedupKey,
-				Tool:          Tool,
+				Tool:          model.ToolDSH,
 				Dimension:     model.DimensionAgent,
 				Value:         hdr.AgentPreset,
 				SessionID:     ev.SessionID,
@@ -720,7 +711,7 @@ func buildEvent(u tokenUsage, d assistantData, hdr header, mdl, prov string,
 	}
 
 	ev := model.UsageEvent{
-		Tool:                Tool,
+		Tool:                model.ToolDSH,
 		Model:               mdl,
 		Provider:            prov,
 		SessionID:           hdr.ID,
@@ -758,9 +749,9 @@ func buildEvent(u tokenUsage, d assistantData, hdr header, mdl, prov string,
 // it is confined to logs a foreign writer produced.
 func usageKey(messageID, sessionID string, seq int64) string {
 	if messageID != "" {
-		return Tool + "|msg|" + messageID
+		return model.ToolDSH + "|msg|" + messageID
 	}
-	return Tool + "|" + sessionID + "|seq|" + strconv.FormatInt(seq, 10)
+	return model.ToolDSH + "|" + sessionID + "|seq|" + strconv.FormatInt(seq, 10)
 }
 
 // resolveCalls turns the buffered tool/call records into activity, attributing
@@ -800,7 +791,7 @@ func resolveCalls(calls []pendingCall, anchors map[step]*stepAnchor, hdr header,
 		}
 
 		out = append(out, model.ActivityEvent{
-			Tool:          Tool,
+			Tool:          model.ToolDSH,
 			Kind:          model.ActivityTool,
 			Name:          c.name,
 			SessionID:     hdr.ID,
@@ -833,9 +824,9 @@ func activityKey(anchorID, sessionID string, c pendingCall) string {
 		if id == "" {
 			id = "#" + strconv.FormatInt(c.seq, 10)
 		}
-		return Tool + "|call|" + anchorID + "|" + id
+		return model.ToolDSH + "|call|" + anchorID + "|" + id
 	}
-	return Tool + "|call|" + sessionID + "|seq|" + strconv.FormatInt(c.seq, 10)
+	return model.ToolDSH + "|call|" + sessionID + "|seq|" + strconv.FormatInt(c.seq, 10)
 }
 
 // auditPayload builds the stored audit payload from the decoded record. Values

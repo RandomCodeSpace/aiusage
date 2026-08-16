@@ -63,13 +63,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
-// ToolID is the stable tool identifier for Kimi Code.
-//
-// It lives here rather than in internal/model only until the composition root
-// adopts the adapter; the store keeps no closed vocabulary of tool ids, so the
-// value is what matters and it must never change once rows carry it.
-const ToolID = "kimi-code"
-
 // HomeEnv names the environment variable that moves the Kimi Code data root,
 // and with it every session this adapter reads. Verified against the installed
 // CLI (@moonshot-ai/kimi-code 0.36.1): `getDataDir()` returns
@@ -110,7 +103,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return ToolID }
+func (Adapter) ID() string { return model.ToolKimiCode }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Kimi Code" }
@@ -142,7 +135,7 @@ func (a Adapter) roots(cfg adapter.DiscoverConfig) []string {
 	if cfg.Home != "" {
 		def = filepath.Join(cfg.Home, ".kimi-code")
 	}
-	add(cfg.Root(ToolID, def))
+	add(cfg.Root(model.ToolKimiCode, def))
 	return out
 }
 
@@ -201,7 +194,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 				meta["project"] = p
 			}
 			srcs = append(srcs, adapter.Source{
-				Tool:  ToolID,
+				Tool:  model.ToolKimiCode,
 				Class: model.EventLevel,
 				Path:  path,
 				Label: label,
@@ -448,7 +441,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	return adapter.Observation{
 		Events: events,
 		Checkpoint: &model.SourceCheckpoint{
-			Tool: ToolID, SourcePath: src.Path,
+			Tool: model.ToolKimiCode, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed, State: string(newState),
 		},
 	}, nil
@@ -494,7 +487,7 @@ func buildEvent(ln wireLine, state ckptState, src adapter.Source, mtime time.Tim
 	}
 
 	ev := model.UsageEvent{
-		Tool:      ToolID,
+		Tool:      model.ToolKimiCode,
 		Model:     mdl,
 		SessionID: meta(src, "session"),
 		Project:   meta(src, "project"),
@@ -561,7 +554,7 @@ func dedupKey(ln wireLine, state ckptState, agent string) string {
 		strconv.FormatInt(ln.Usage.InputCacheCreation, 10),
 	}, "|")
 	sum := sha256.Sum256([]byte(tuple))
-	return ToolID + "|" + hex.EncodeToString(sum[:])
+	return model.ToolKimiCode + "|" + hex.EncodeToString(sum[:])
 }
 
 // meta reads one Source.Meta key, tolerating a nil map.

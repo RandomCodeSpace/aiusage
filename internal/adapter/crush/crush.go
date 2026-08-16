@@ -115,11 +115,6 @@ import (
 )
 
 const (
-	// ToolID is the stable tool identifier for Crush. It lives here rather than
-	// in internal/model only because this adapter was built in isolation; it is
-	// the same string a model.ToolCrush constant would carry.
-	ToolID = "crush"
-
 	// GlobalDataEnv names Crush's own global data directory. Crush joins
 	// crush.json (and therefore projects.json) DIRECTLY onto it, with no
 	// "crush" segment of its own.
@@ -176,7 +171,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return ToolID }
+func (Adapter) ID() string { return model.ToolCrush }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Crush" }
@@ -200,7 +195,7 @@ func (a Adapter) globalDir(cfg adapter.DiscoverConfig) string {
 	} else if cfg.Home != "" {
 		def = filepath.Join(cfg.Home, ".local", "share", appName)
 	}
-	return cfg.Root(ToolID, def)
+	return cfg.Root(model.ToolCrush, def)
 }
 
 // project is one entry of Crush's projects.json index.
@@ -266,7 +261,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 		}
 		seen[db] = struct{}{}
 		srcs = append(srcs, adapter.Source{
-			Tool:  ToolID,
+			Tool:  model.ToolCrush,
 			Class: model.EventLevel,
 			Path:  db,
 			Label: "Crush sessions: " + db,
@@ -409,7 +404,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	obs := adapter.Observation{Events: events}
 	if state, err := json.Marshal(gate); err == nil {
 		obs.Checkpoint = &model.SourceCheckpoint{
-			Tool: ToolID, SourcePath: src.Path, State: string(state),
+			Tool: model.ToolCrush, SourcePath: src.Path, State: string(state),
 		}
 	}
 	if skipped > 0 {
@@ -424,7 +419,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 func (a Adapter) event(src adapter.Source, project string, s sessionRow, attr attribution, prev, cur int64) model.UsageEvent {
 	ts := eventTime(s)
 	ev := model.UsageEvent{
-		Tool: ToolID,
+		Tool: model.ToolCrush,
 		// Model is deliberately empty. See the package doc: a zero-token charge
 		// against a known model prices to 0 and the collector would stamp that
 		// over the harness's own figure.
@@ -434,7 +429,7 @@ func (a Adapter) event(src adapter.Source, project string, s sessionRow, attr at
 		Project:    project,
 		EventTime:  ts,
 		SourcePath: src.Path,
-		DedupKey:   ToolID + "|cost|" + s.id + "|" + strconv.FormatInt(cur, 10),
+		DedupKey:   model.ToolCrush + "|cost|" + s.id + "|" + strconv.FormatInt(cur, 10),
 		Kind:       model.KindUsage,
 		Raw: rawJSON(rawPayload{
 			CostUSD:                  s.cost,

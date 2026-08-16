@@ -105,14 +105,6 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/model"
 )
 
-// ToolID is the stable tool identifier for Reasonix.
-//
-// It is declared here rather than in internal/model because this adapter ships
-// without touching the shared package; the integrator may promote it to a
-// model.ToolXxx constant, and the string must not change when they do — it is
-// stamped into every stored row.
-const ToolID = "reasonix"
-
 // StateHomeEnv and HomeEnv name the environment variables that move the
 // Reasonix state root, and with it every stats file this adapter reads.
 // StateHomeEnv is checked FIRST; HomeEnv is the fallback; ~/.reasonix is the
@@ -158,7 +150,7 @@ type Adapter struct{}
 func New() adapter.Adapter { return Adapter{} }
 
 // ID returns the stable tool identifier.
-func (Adapter) ID() string { return ToolID }
+func (Adapter) ID() string { return model.ToolReasonix }
 
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Reasonix" }
@@ -185,7 +177,7 @@ func StatsDir(cfg adapter.DiscoverConfig) string {
 // to and reports zero usage while looking healthy.
 func stateRoot(cfg adapter.DiscoverConfig) string {
 	if cfg.Overrides != nil {
-		if v := strings.TrimSpace(cfg.Overrides[ToolID]); v != "" {
+		if v := strings.TrimSpace(cfg.Overrides[model.ToolReasonix]); v != "" {
 			return resolveRoot(v, cfg.Home)
 		}
 	}
@@ -367,7 +359,7 @@ func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]ad
 			continue
 		}
 		srcs = append(srcs, adapter.Source{
-			Tool:  ToolID,
+			Tool:  model.ToolReasonix,
 			Class: model.EventLevel,
 			Path:  path,
 			Label: "Reasonix usage: " + path,
@@ -462,7 +454,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	obs := adapter.Observation{
 		Events: events,
 		Checkpoint: &model.SourceCheckpoint{
-			Tool: ToolID, SourcePath: src.Path,
+			Tool: model.ToolReasonix, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed,
 		},
 	}
@@ -548,7 +540,7 @@ func parseRecord(line []byte, mtime time.Time, path string) (model.UsageEvent, b
 	}
 
 	ev := model.UsageEvent{
-		Tool:     ToolID,
+		Tool:     model.ToolReasonix,
 		Model:    rec.Model,
 		Provider: providerOf(rec.Model),
 		// The stats ledger is deliberately content-free: it names no session
@@ -578,7 +570,7 @@ func parseRecord(line []byte, mtime time.Time, path string) (model.UsageEvent, b
 // own bytes>. No path, no offset, no read position — see the package doc.
 func dedupKey(line []byte) string {
 	sum := sha256.Sum256(line)
-	return ToolID + "|" + hex.EncodeToString(sum[:16])
+	return model.ToolReasonix + "|" + hex.EncodeToString(sum[:16])
 }
 
 // providerOf returns the billing identity named by a "<provider>/<model>" ref,

@@ -129,7 +129,7 @@ func TestNoActivityOrTurnContextIsInvented(t *testing.T) {
 	root, path := newRoot(t, "planted-2026-08-16.jsonl")
 	_ = root
 	obs, err := New().(Adapter).CollectIncremental(
-		context.Background(), adapter.Source{Tool: ToolID, Path: path}, nil)
+		context.Background(), adapter.Source{Tool: model.ToolReasonix, Path: path}, nil)
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}

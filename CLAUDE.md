@@ -150,6 +150,25 @@ are built from, its `gen_ai.tool.call.id` occurs exactly once in the whole
 export, and the only handle it shares with usage is the traceId, which covers
 every turn of a conversation rather than one of them.
 
+The harnesses added since: pi and openclaw are ONE package over one
+byte-identical session tree and TWO tools whose rows are never summed, taking
+usage from three entry kinds (assistant `message`, plus `compaction` and
+`branch_summary`, which carry the usage of the LLM call that wrote the summary
+and name no model of their own) and joining activity exactly, since a `toolCall`
+block sits in the SAME record as the usage object it cost; crush is cost-only —
+one event per growth of `sessions.cost`, zero tokens, 0.0 refused as unmeasured
+rather than free, sub-agent sessions excluded because the parent's cost already
+contains them, and the assigned token columns never read as a total; kimi-code
+reads the per-agent append-only wire log (subagents included: each agent owns its
+recorder) and emits usage alone, carrying the model forward from the nearest
+prior `llm.request` in the checkpoint, since a tail read can start after it;
+reasonix reads the harness's own stats ledger and emits usage alone, unpriced,
+keyed by a content hash rather than a byte offset; dsh emits usage, tool activity
+and agent turn context, and deliberately records NO context for a fork seed — a
+child log opens with the parent's leading events copied verbatim, both logs
+derive the same usage dedup key, and their headers can disagree about the records
+they share, so the first walked would otherwise re-label the ancestor's turns.
+
 **Copilot activity comes from SPANS, never from metric dataPoints.** One OTEL
 file carries both shapes and only one of them counts anything. A span is written
 once per operation, so one `execute_tool` span is one tool call.
