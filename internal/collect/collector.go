@@ -333,8 +333,19 @@ func storeObservation(ctx context.Context, st store.Store, obs adapter.Observati
 // of the ladder knows is left unpriced: CostMicroUSD stays nil, which stores as
 // SQL NULL. Stamping 0 instead would assert the request was free, and the
 // ledger is append-only — that lie could never be corrected in place.
+//
+// AN EVENT THAT ALREADY CARRIES A COST KEEPS IT, which is what "stamps cost on
+// records that lack one" has always meant and is now enforced rather than
+// assumed. A cost set by the adapter came from the HARNESS's own accounting —
+// copilot's vendor-priced nano-AIU valuation, crush's session cost, goose's
+// provider-reported figure — and the ladder is an ESTIMATE of the same charge
+// from a public rate card. Letting the estimate overwrite the vendor's own
+// number is a strict loss of fidelity, and it silently happened whenever the
+// table happened to know the model id: copilot proxies `gpt-5-mini`, which the
+// embedded LiteLLM snapshot prices, so every Copilot call on that model would
+// have had its exact vendor cost replaced by an approximation of it.
 func stampCost(p Pricer, e *model.UsageEvent) {
-	if p == nil {
+	if p == nil || e.CostMicroUSD != nil {
 		return
 	}
 	if micro, source, ok := p.PriceEvent(*e); ok {

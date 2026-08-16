@@ -143,12 +143,14 @@ sidechain replay cannot count a call twice; opencode joins exactly via
 from; codex NEVER attributes, because its `token_count` records share no
 identity with its `function_call`/`custom_tool_call` records (verified: zero of
 261,938 local token_count records carry a turn_id, while every call does), and a
-positional guess is not on offer; copilot never attributes either, for the same
-reason from a different shape — its `execute_tool` span's parent is the
+positional guess is not on offer; copilot never attributes a CALL either, for
+the same reason from a different shape — its `execute_tool` span's parent is the
 `invoke_agent` span, which makes it a SIBLING of the `chat` spans the usage rows
 are built from, its `gen_ai.tool.call.id` occurs exactly once in the whole
 export, and the only handle it shares with usage is the traceId, which covers
-every turn of a conversation rather than one of them.
+every turn of a conversation rather than one of them. That id is not useless,
+though: a DIFFERENT surface repeats it, and a turn's whole cost joins through it
+even where a call's share cannot — see the three-surface paragraph below.
 
 The harnesses added since: pi and openclaw are ONE package over one
 byte-identical session tree and TWO tools whose rows are never summed, taking
@@ -204,11 +206,130 @@ once per operation, so one `execute_tool` span is one tool call.
 exporter's timer: measured on a live export, a session that made exactly ONE
 tool call had produced 226 dataPoints, every one of them value 1 under an
 identical attribute set. Counting or summing dataPoints reports that call once
-per export interval — a 226x inflation of a single `view`. The export names no
-skill and no hook: the skill list on `invoke_agent` is what was AVAILABLE, and an
-invoked skill arrives as a tool call named `skill` whose skill name lives in
-arguments the exporter does not write. So copilot emits kind='tool' rows and
-nothing else.
+per export interval — a 226x inflation of a single `view`. That rule governs the
+OTEL surface and is unchanged by everything below it.
+
+**Copilot is THREE SURFACES, each authoritative for exactly ONE fact** (issue
+#69). The OTEL export is not the vendor's ledger; it is one of three artefacts
+the CLI writes, and it is also the only one that is OPT-IN — `~/.copilot/otel`
+exists on this machine solely because a shell profile exports
+`COPILOT_OTEL_ENABLED`, while `session-store.db` and `session-state/` are
+written unconditionally. Reading any of the three for what another owns is how
+this adapter would double count, so the split is measured rather than tidy:
+
+TOKENS stay OTEL's, because its numbers are already exact — reconciled against
+the vendor's own per-call ledger over one session, input 975,612, output 15,237,
+cache_read 811,374 and cache_write 56,061 agree TO THE UNIT on both surfaces. It
+also remains the only surface tool activity is keyed from.
+
+COST is VENDOR-PRICED and never touches the LiteLLM ladder. Copilot meters in
+nano-AI-units, 1 AIC = $0.01 by GitHub's own billing documentation, and the
+vendor ships the arithmetic inline: `assistant_usage_events.token_details_json`
+is a `{tokenType, tokenCount, batchSize, costPerBatch}` array whose
+`sum(tokenCount * costPerBatch / batchSize)` reproduces `total_nano_aiu` on 45 of
+45 local rows, and the eight implied per-token rates land on two models'
+published list prices to the cent. So nanoAIU -> micro-USD is a fixed division by
+100,000, TRUNCATED, because rounding up per row could push a window's summed cost
+past the vendor's own total for it and integer division can only ever understate
+— the activity divisor's rule, applied to a different number.
+
+The number reaches the ledger by TWO routes, and which route is decided by which
+one is an IDENTITY, never by which surface reads nicer. A main-agent call carries
+`github.copilot.nano_aiu` on the very `chat` span its usage row is built from, so
+there is no join to get wrong; verified against the store, the attribute equals
+`total_nano_aiu` on all 40 overlapping calls, zero mismatches. A SUBAGENT call
+carries no such attribute at all — 3 of 43 spans, 8.8% of the session's whole
+cost (1,663,250,000 of 18,913,170,000 nanoAIU), and it tracks the INITIATOR
+rather than the outcome, since a span that died with SessionDestroyedError still
+carries its cost while a subagent span that finished cleanly does not. That cost
+exists only in `assistant_usage_events`, and it joins by walking the span's own
+parents: chat -> `invoke_agent task` -> `execute_tool task`, whose
+`gen_ai.tool.call.id` is the string the store records as `parent_tool_call_id`
+(3 of 3 matched, covering all 5 subagent rows). The shape is MANY store rows to
+ONE span — the export writes one span per spawned task however many API calls the
+subagent then made — so this SUMS on the usage side, the mirror of the activity
+ledger's one-row-to-many-calls case, with no divisor. More than one unvalued span
+under one spawn is REFUSED rather than copied or divided.
+
+The other 40 store rows are deliberately NOT joined back, and that is the codex
+rule rather than an omission: the table carries no provider-side call identifier
+at all, and the only per-row handle both surfaces share is the token tuple
+(session, model, input, output, cache_read, cache_write) — a CONTENT FINGERPRINT
+that happens to be unique here (45 of 45 and 43 of 43 distinct, 42 exact matches)
+and would silently misprice the day two calls of a session billed the same
+counts. It costs nothing to refuse, because the number those rows would supply is
+already on the span, proven equal. Measured end to end on this machine: 43 rows
+stored at 189,113 micro-USD against the vendor's own 189,131 — under by 18, one
+per truncated row, and never over.
+
+**The cumulative trap is live in this surface too.**
+`session.usage_checkpoint.totalNanoAiu` and `session.shutdown.totalNanoAiu` are
+session-wide ACCUMULATED counters, exact to the nano-AIU against the running sum
+of `assistant_usage_events` over 12 consecutive local checkpoints. Summing them
+yields 124,893,605,000 against a real 18,913,170,000 — a 6.6x overstatement — and
+shutdown is a snapshot of the same counter rather than a further increment.
+Nothing in the package has a FIELD for either, so they cannot reach the ledger by
+accident; the test that proves they are cumulative decodes them itself.
+
+SKILLS AND HOOKS come from `session-state/<id>/events.jsonl`, which is what the
+export does not name: `github.copilot.context.skills` on `invoke_agent` is what
+was AVAILABLE, not what ran, and OTEL has nothing for hooks at all, while this
+file carries `skill.invoked.data.name` and `hook.start.data.hookType` explicitly.
+`hook.start` and not `hook.end`: the invocation is the fact, and a hook that
+never returned still fired (21 starts against 18 ends). TOOL CALLS ARE NOT READ
+THERE — the same 37 calls appear on both surfaces under different ids, the OTEL
+key is the one already in an append-only table, and emitting both would report
+every Copilot tool call twice. The honest consequence: an install with the export
+switched off records skills and hooks and no tool calls, the same way it records
+no tokens.
+
+SUBAGENT TURN CONTEXT (dimension 'agent') comes from the OTEL span tree alone and
+is exact by structure: every `chat` span's direct parent is an `invoke_agent`
+span (43 of 43, zero hops), and that span carries `gen_ai.agent.name` when and
+only when the turn ran as a subagent — the session's own agent is
+`gen_ai.agent.id = github.copilot.default` with NO name attribute. So the
+emptiness test IS the sentinel test, with no list of default ids to keep in step;
+naming the default would invent an agent and collide with a real subagent of that
+name, the qwen-code "main" rule. A span has one parent, so a second value per
+dimension is unreachable rather than merely unlikely.
+
+**events.jsonl is the one Copilot surface that carries prompt text, and the
+decode is TWO-STAGE.** Unlike the OTEL attribute map it holds content in at least
+six named paths — `user.message.data.content`, `assistant.message.data.content`,
+`tool.execution_start.data.arguments.{command,prompt,file_text,query,...}`,
+`permission.requested.data.permissionRequest.toolArgs`,
+`hook.start.data.input.toolCalls[].args` and `skill.invoked.data.content`. The
+outer struct names only type/id/timestamp and keeps `data` as raw BYTES; those
+bytes are decoded only for the two record types this reads, into structs carrying
+one string each. So `data.content` is never a value in this process for any
+record, and even `data.name` is never one for a record that is not a skill
+invocation — a record type the package has not been taught about contributes
+nothing however much it carries. The session store is read for exactly one
+statement, a `parent_tool_call_id` -> `SUM(total_nano_aiu)` group-by; its `turns`
+table holds whole prompts and replies and nothing has a field for one. Both are
+covered by a plant-a-secret test over fixtures scrubbed from the real files, with
+the canary in every path named here plus `sessions.summary`,
+`turns.user_message`, `turns.assistant_response`, `gen_ai.tool.definitions`,
+`gen_ai.agent.description` and the span `events` array.
+
+`session-store.db` is opened mode=ro + query_only(1) and never immutable=1 — the
+CLI holds it open and writes it live, and on this machine the main file was 4,096
+bytes against a 1.8 MiB WAL, so an immutable reader would have seen an empty
+table. It is NOT a source of its own: cost is a FIELD of a usage row, so a
+separate source could only report it by minting a second usage event for a call
+the OTEL source already reported. It rides on the OTEL sources as
+`Meta["cost_db"]` and is opened at most once per file, only when that file holds
+an unvalued call.
+
+**A cost the adapter stamped is never overwritten by the price ladder.**
+`collect.stampCost` prices only events that arrive UNPRICED, which is what its
+doc comment always claimed and is now enforced. An adapter-set cost came from the
+harness's own accounting — copilot's vendor valuation, crush's session cost,
+goose's provider-reported figure — and the ladder is a public-rate-card ESTIMATE
+of the same charge; letting the estimate win is a strict loss of fidelity, and it
+happened silently whenever the table knew the model id. Copilot proxies
+`gpt-5-mini`, which the embedded LiteLLM snapshot prices, so every Copilot call
+on that model would have had its exact vendor cost replaced by an approximation.
 
 **Turn context is a property of the TURN, and five axes share ONE table**
 (schema v7, usage_turn_context). An activity row of kind='skill' records the turn

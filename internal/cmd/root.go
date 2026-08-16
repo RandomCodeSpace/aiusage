@@ -283,7 +283,11 @@ func discoveredSources(ctx context.Context, cfg config.Config) map[string]int {
 		if err != nil || ctx.Err() != nil {
 			continue
 		}
-		out[ad.ID()] = len(srcs)
+		// USAGE sources only. The question this answers is whether a tool has a
+		// token source, and copilot discovers session-state sources that carry
+		// skills and hooks and never a token (adapter.MetaNoUsage). For every
+		// other adapter this is len(srcs).
+		out[ad.ID()] = adapter.CountUsageSources(srcs)
 	}
 	return out
 }
