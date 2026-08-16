@@ -115,6 +115,53 @@ func TestResolveCostsUnpriceableStaysDash(t *testing.T) {
 	}
 }
 
+// TestUnpricedGroupIsNeverBilledAsOneLongRequest pins the aggregate rule at the
+// seam that needs it. UnpricedGroups arrive pre-aggregated per model, so a
+// group's token counts are a SUM over many requests, not a prompt size: without
+// the aggregate marker, a thousand short turns add up past the model's
+// long-context threshold and the whole group is billed off the second rate card.
+func TestUnpricedGroupIsNeverBilledAsOneLongRequest(t *testing.T) {
+	const threshold = 272_000
+	rates := pricing.Rates{
+		Input:  5e-06,
+		Output: 3e-05,
+		Long:   pricing.LongContext{Threshold: threshold, Input: 1e-05, Output: 4.5e-05},
+	}
+	e := pricing.New(pricing.Options{Overrides: map[string]pricing.Rates{"gpt-5.6-sol": rates}})
+
+	sum := &store.Summary{
+		GroupBy: []string{"tool"},
+		Buckets: []store.Bucket{{
+			Keys: map[string]string{"tool": model.ToolOpenCode}, Events: 1000, UnpricedEvents: 1000,
+		}},
+		Totals: store.Bucket{Events: 1000, UnpricedEvents: 1000},
+	}
+	// 1,000 requests of 1,000 input tokens each: not one of them is long, and
+	// their sum is nearly four times the threshold.
+	groups := []store.UnpricedGroup{{
+		Keys:   map[string]string{"tool": model.ToolOpenCode},
+		Tool:   model.ToolOpenCode,
+		Model:  "gpt-5.6-sol",
+		Events: 1000,
+		Input:  1_000_000,
+	}}
+	if groups[0].Input <= threshold {
+		t.Fatal("fixture does not sum past the threshold, so it proves nothing")
+	}
+
+	const (
+		base = 5_000_000 // 1e6 tokens at 5e-06
+		long = 10_000_000
+	)
+	costs := ResolveCosts(sum, groups, e)
+	if got := costs.Totals.MicroUSD; got == long {
+		t.Fatalf("group cost = %d: a summed group was billed as one long-context request", got)
+	}
+	if got := costs.Totals.MicroUSD; got != base {
+		t.Errorf("group cost = %d, want %d", got, base)
+	}
+}
+
 // TestResolveCostsUnvaluedRemainderIsApproximate covers the honesty gap between
 // "exact" and "unpriced": a bucket whose stamped rows are exact but which still
 // holds rows nothing could value is a FLOOR, so it must wear the tilde rather

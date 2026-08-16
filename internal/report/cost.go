@@ -115,6 +115,13 @@ func stampedCost(b store.Bucket) Cost {
 // priceGroup values one unpriced group at the current table. The cache-write
 // TTL split is not stored, so every cache write is valued at the 5m rate — the
 // cheaper of the two, and the approximate marker already covers the difference.
+//
+// The group is a SUM over many events, so it is charged as an aggregate: its
+// token totals are not any one request's prompt, and letting a thousand short
+// turns add up past a model's long-context threshold would bill the whole group
+// off the long card. That under-values a group that really did hold long
+// requests, which is the same direction the 5m cache-write assumption errs in
+// and is already covered by the tilde.
 func priceGroup(p Pricer, g store.UnpricedGroup) (int64, bool) {
 	micro, _, ok := p.Price(pricing.Charge{
 		Model:             g.Model,
@@ -126,6 +133,7 @@ func priceGroup(p Pricer, g store.UnpricedGroup) (int64, bool) {
 		CacheRead:         g.CacheRead,
 		CacheWrite5m:      g.CacheCreation,
 		AdditiveReasoning: model.ReasoningModeFor(g.Tool) == model.ReasoningAdditive,
+		Aggregate:         true,
 	})
 	return micro, ok
 }

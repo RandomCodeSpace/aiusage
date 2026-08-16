@@ -27,6 +27,14 @@ import (
 // "embedded-<snapshot date>", built by the table loaders.
 const SourceOverride = "override"
 
+// longContextStamp is appended to the price_source of an event that crossed its
+// model's long-context threshold, so a row billed off the second rate card says
+// so ("litellm-2026-08-16+long-context"). It is a suffix on the existing open
+// vocabulary, not a new column: nothing parses price_source, and the alternative
+// — a row priced at double the base rate with a stamp naming only the table —
+// is precisely the silent failure this change exists to end.
+const longContextStamp = "+long-context"
+
 // Rates are the per-token USD rates for one model, in LiteLLM's units (dollars
 // per single token). A zero field means "not published", not "free"; Cost
 // resolves each zero to the documented fallback rate.
@@ -38,6 +46,41 @@ type Rates struct {
 	CacheWrite1h float64 // 0 -> the resolved 5m write rate
 	InputBatch   float64 // 0 -> the standard input rate (no batch tier published)
 	OutputBatch  float64 // 0 -> the standard output rate
+
+	// Long is the second rate card, used for a request whose prompt crosses
+	// this model's published threshold. Zero Threshold means the model has no
+	// long-context tier, which is the common case.
+	Long LongContext
+}
+
+// LongContext is a model's above-threshold rate card. Providers switch cards for
+// the WHOLE request rather than billing a band of tokens separately — OpenAI:
+// "Prompts with >272K input tokens are priced at 2x input and 1.5x output for
+// the full request"; Google: "If a query input context is longer than 200K
+// tokens, all tokens (input and output) are charged at long context rates" — so
+// this is a rate card selected per request, never a marginal breakpoint. Reading
+// LiteLLM's "_above_200k_tokens" field naming as marginal is an artifact of the
+// name and matches no documented provider behaviour; it also under-bills by a
+// factor of ten on real traffic, because a crossing request is typically broad
+// (a large cache read plus a modest input) rather than one bucket deep past the
+// line.
+//
+// Threshold is per model and comes from the LiteLLM field name (see
+// longContextCard): the live table publishes five distinct boundaries — 128K,
+// 200K, 256K, 272K and 512K — so a hardcoded 200K would be wrong for four of
+// them. A zero rate here falls back to the same-named base rate, never to zero:
+// LiteLLM publishes an above-threshold rate only for the buckets it prices, and
+// inventing a multiple of the base rate for the rest would be a made-up number.
+type LongContext struct {
+	// Threshold is the prompt size, in tokens, above which this card applies.
+	// 0 means the model publishes no long-context tier.
+	Threshold int64
+
+	Input        float64
+	Output       float64
+	CacheRead    float64
+	CacheWrite5m float64
+	CacheWrite1h float64
 }
 
 // Priceable reports whether the rates carry any usable price. An all-zero entry
@@ -51,6 +94,7 @@ func (r Rates) Priceable() bool { return r.Input > 0 || r.Output > 0 }
 // the fields they left out keep the table's rates instead of valuing those
 // tokens at nothing.
 func (r Rates) fill(base Rates) Rates {
+	named := r // the rates the caller actually set, before any filling
 	if r.Input == 0 {
 		r.Input = base.Input
 	}
@@ -71,6 +115,37 @@ func (r Rates) fill(base Rates) Rates {
 	}
 	if r.OutputBatch == 0 {
 		r.OutputBatch = base.OutputBatch
+	}
+	if r.Long.Threshold == 0 {
+		// The long-context card is inherited whole, never blended across
+		// sources: a card assumes its own boundary, so taking the threshold
+		// from one table and a rate from another would price both tiers wrong.
+		// A config override cannot express a tier at all, so this is how an
+		// overridden model keeps the published card of the rung it displaced —
+		// "override this rate" is not "delete the long-context tier".
+		//
+		// A rate the override DID name is then dropped from the inherited card,
+		// which leaves Cost's "0 means not published" fallback to bill that
+		// bucket at the user's rate on both cards. The top rung must win for
+		// what it names, above the threshold as well as below it; the buckets it
+		// says nothing about keep the published pair.
+		long := base.Long
+		if named.Input != 0 {
+			long.Input = 0
+		}
+		if named.Output != 0 {
+			long.Output = 0
+		}
+		if named.CacheRead != 0 {
+			long.CacheRead = 0
+		}
+		if named.CacheWrite5m != 0 {
+			long.CacheWrite5m = 0
+		}
+		if named.CacheWrite1h != 0 {
+			long.CacheWrite1h = 0
+		}
+		r.Long = long
 	}
 	return r
 }
@@ -98,12 +173,40 @@ type Charge struct {
 	// False means reasoning is already contained in Output (see
 	// model.ReasoningModeFor) and billing it again would double charge.
 	AdditiveReasoning bool
+
+	// Aggregate marks a charge that stands for SEVERAL requests summed together
+	// — report's display-time valuation of unpriced groups, which arrives
+	// pre-aggregated per model — rather than describing one. Its token counts
+	// are a total, not a prompt size, so no long-context tier is selected for
+	// it: a thousand short turns must never add up to one long-context request.
+	// The zero value is therefore "one request", which is what every ledger path
+	// prices.
+	Aggregate bool
 }
 
 // Tokens is the total token count being charged, used to tell "no usage, so
 // genuinely zero" apart from "priced at zero", which is never reported.
 func (c Charge) Tokens() int64 {
 	return c.Input + c.Output + c.CacheRead + c.CacheWrite5m + c.CacheWrite1h + c.Reasoning
+}
+
+// ContextTokens is the prompt size the long-context tier is measured against:
+// every bucket that is part of the request's input, CACHED OR NOT. Output is
+// excluded because every provider measures the boundary on the prompt (OpenAI:
+// ">272K input tokens"; Google: "query input context longer than 200K tokens").
+//
+// Cache reads are the load-bearing term. The adapters normalize a provider's
+// prompt into disjoint buckets — codex stores `input = raw_input - cached`
+// because the Responses API reports cached_tokens as a SUBSET of input_tokens —
+// so Input + CacheRead is exactly the number OpenAI's own sentence is about, and
+// counting Input alone would be reading a normalization artifact as a prompt
+// size. Measured on this machine's ledger: 17 rows cross 272K on uncached input,
+// 551 cross on input + cache read. Cache writes join them for the same reason —
+// Anthropic's context-window doc counts input_tokens, cache_read_input_tokens
+// and cache_creation_input_tokens alike toward the window, and on this ledger
+// they add no crossings on top.
+func (c Charge) ContextTokens() int64 {
+	return c.Input + c.CacheRead + c.CacheWrite5m + c.CacheWrite1h
 }
 
 // ChargeFor derives the Charge for a stored usage event: token counts straight
@@ -130,10 +233,48 @@ func ChargeFor(e model.UsageEvent) Charge {
 	}
 }
 
+// longApplies reports whether this charge is billed off the long-context card:
+// the model publishes one, the charge is a single request, and its prompt is
+// STRICTLY larger than the threshold. Strict is what the providers state —
+// OpenAI "Prompts with >272K input tokens", Google "longer than 200K tokens" —
+// and it is the reading that never bills a request that fits inside the short
+// card at the long rate. (Vertex's Sonnet 4.5 footnote is the one ">=" in the
+// wild; LiteLLM publishes no comparator, so one rule serves the table and this
+// is the one the affected models document.)
+func (r Rates) longApplies(c Charge) bool {
+	return r.Long.Threshold > 0 && !c.Aggregate && c.ContextTokens() > r.Long.Threshold
+}
+
 // Cost values a charge at these rates, in micro-USD, rounding half up. The
 // result is never negative: token counts and rates are both non-negative.
+//
+// A request over the model's long-context threshold is billed ENTIRELY off the
+// second rate card — every bucket, not the excess above the line.
 func (r Rates) Cost(c Charge) int64 {
 	in, out := r.Input, r.Output
+	cacheRead, write5m, write1h := r.CacheRead, r.CacheWrite5m, r.CacheWrite1h
+	if r.longApplies(c) {
+		if r.Long.Input > 0 {
+			in = r.Long.Input
+		}
+		if r.Long.Output > 0 {
+			out = r.Long.Output
+		}
+		if r.Long.CacheRead > 0 {
+			cacheRead = r.Long.CacheRead
+		}
+		if r.Long.CacheWrite5m > 0 {
+			write5m = r.Long.CacheWrite5m
+		}
+		if r.Long.CacheWrite1h > 0 {
+			write1h = r.Long.CacheWrite1h
+		}
+	}
+	// The batch tier is applied AFTER the card is chosen and still wins, because
+	// LiteLLM publishes no "*_batches_above_<N>k_tokens" rate for any model
+	// (verified against the 3,020-model table): a published batch rate for the
+	// wrong card beats a rate this package would have to invent. A long-context
+	// batch request is therefore under-billed; no row in this ledger is one.
 	if isBatchTier(c.ServiceTier) {
 		if r.InputBatch > 0 {
 			in = r.InputBatch
@@ -142,15 +283,12 @@ func (r Rates) Cost(c Charge) int64 {
 			out = r.OutputBatch
 		}
 	}
-	cacheRead := r.CacheRead
 	if cacheRead == 0 {
 		cacheRead = in
 	}
-	write5m := r.CacheWrite5m
 	if write5m == 0 {
 		write5m = in
 	}
-	write1h := r.CacheWrite1h
 	if write1h == 0 {
 		write1h = write5m
 	}
@@ -257,6 +395,9 @@ func providerPrefixes(provider string) []string {
 // charge) is a gap in that table, not a free request, and gets the same
 // recovery an unpriceable row gets — the next rung down is tried. Only when the
 // ladder runs out is the charge reported unpriced, never $0.00.
+//
+// A charge billed off the model's long-context card carries longContextStamp on
+// the end of whatever the rung stamped.
 func (e *Engine) Price(c Charge) (int64, string, bool) {
 	if e == nil {
 		return 0, "", false
@@ -274,6 +415,9 @@ func (e *Engine) Price(c Charge) (int64, string, bool) {
 		micro := r.Cost(c)
 		if micro == 0 && c.Tokens() > 0 {
 			continue // this rung prices nothing this charge is made of
+		}
+		if r.longApplies(c) {
+			source += longContextStamp
 		}
 		return micro, source, true
 	}

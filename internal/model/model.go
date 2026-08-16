@@ -202,8 +202,9 @@ type UsageEvent struct {
 	// "litellm-<fetch date>", "embedded-<snapshot date>"), or the "+"-joined
 	// composite of the tables that produced it together
 	// ("override+litellm-<fetch date>") when a partial override was completed
-	// from the rung it displaced. Empty when unpriced, so a later correction
-	// knows which table it corrects.
+	// from the rung it displaced. A row billed off a model's long-context rate
+	// card carries a "+long-context" suffix as well. Empty when unpriced, so a
+	// later correction knows which table it corrects.
 	//
 	// The vocabulary is open: the value is stored, exported and displayed
 	// verbatim and nothing parses it, so a new rung or a new composite may

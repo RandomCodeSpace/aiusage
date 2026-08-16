@@ -4,6 +4,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"sync"
 )
 
@@ -28,6 +30,126 @@ type litellmEntry struct {
 	CacheWrite1h float64 `json:"cache_creation_input_token_cost_above_1hr"`
 	InputBatch   float64 `json:"input_cost_per_token_batches"`
 	OutputBatch  float64 `json:"output_cost_per_token_batches"`
+
+	// Long carries the above-threshold rate card, whose LiteLLM keys embed the
+	// threshold in the field NAME and so cannot be struct tags. UnmarshalJSON
+	// fills it; the tag keeps encoding/json from looking for a "Long" key.
+	Long LongContext `json:"-"`
+}
+
+// litellmFixedFields are the price keys litellmEntry names as struct tags, i.e.
+// every field the decoder reads whose name does not carry a threshold. It exists
+// so SnapshotField can answer for the snapshot generator without a second,
+// drifting copy of the list; TestLitellmFixedFieldsMatchTags cross-checks it
+// against the tags themselves.
+var litellmFixedFields = map[string]bool{
+	"input_cost_per_token":                      true,
+	"output_cost_per_token":                     true,
+	"cache_read_input_token_cost":               true,
+	"cache_creation_input_token_cost":           true,
+	"cache_creation_input_token_cost_above_1hr": true,
+	"input_cost_per_token_batches":              true,
+	"output_cost_per_token_batches":             true,
+}
+
+// longContextRateField matches the LiteLLM keys that publish an above-threshold
+// rate for a bucket this package bills, and captures the boundary out of the
+// name. LiteLLM's full grammar is
+// "<bucket>[_above_1hr]_above_<N>k_tokens[_priority|_flex]"; this pattern is
+// anchored at both ends, which decides the two questions the grammar raises:
+//
+//   - the 1h cache write CROSSED with long context
+//     ("cache_creation_input_token_cost_above_1hr_above_200k_tokens", 10 models)
+//     is kept, because aiusage already models the 1h write and would otherwise
+//     bill it off the short card inside a long request;
+//   - "_priority" and "_flex" are DELIBERATELY dropped. They are service tiers
+//     this package does not model at all (isBatchTier is the only tier branch),
+//     so reading one as the long-context rate would price a standard request off
+//     a priority card. Skipping them is a decision, not an oversight: when a
+//     service tier for them arrives, it gets its own fields.
+//
+// Non-token units ("input_cost_per_character_above_128k_tokens",
+// "..._per_image_...", "..._per_video_per_second_...") are excluded by naming the
+// four token buckets explicitly rather than matching a prefix.
+var longContextRateField = regexp.MustCompile(
+	`^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost|cache_creation_input_token_cost_above_1hr)_above_([0-9]+)k_tokens$`)
+
+// SnapshotField reports whether a LiteLLM price key is one this decoder reads,
+// i.e. one the embedded snapshot must KEEP. It is exported for the snapshot
+// generator (gensnapshot.go), which is the only caller: the generator's filter
+// stripping a field the decoder reads is exactly the bug that left every
+// air-gapped install flat-pricing long-context turns, and one predicate for both
+// halves makes the two unable to disagree.
+func SnapshotField(key string) bool {
+	return litellmFixedFields[key] || longContextRateField.MatchString(key)
+}
+
+// UnmarshalJSON decodes the fixed-name price fields by tag and the
+// threshold-bearing ones by pattern. Both halves read the SAME object, so a
+// snapshot and a raw upstream entry decode identically.
+func (e *litellmEntry) UnmarshalJSON(data []byte) error {
+	// plain drops the method set, so decoding it does not recurse.
+	type plain litellmEntry
+	var fixed plain
+	if err := json.Unmarshal(data, &fixed); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*e = litellmEntry(fixed)
+	e.Long = longContextCard(fields)
+	return nil
+}
+
+// longContextCard assembles the above-threshold rate card from an entry's raw
+// fields. No model in the live table publishes rates at two different boundaries
+// (verified: 120 tiered models, five distinct thresholds — 128K, 200K, 256K,
+// 272K, 512K — none carrying more than one), so a single card per model is the
+// whole data model. Should upstream ever disagree with itself, the LOWEST
+// boundary wins and only the rates published AT that boundary are used: a card
+// blended across two boundaries would price both of them wrong, and picking by
+// map iteration order would price the same table differently on every run.
+func longContextCard(fields map[string]json.RawMessage) LongContext {
+	cards := make(map[int64]LongContext)
+	for key, raw := range fields {
+		m := longContextRateField.FindStringSubmatch(key)
+		if m == nil {
+			continue
+		}
+		k, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil || k <= 0 {
+			continue
+		}
+		var rate float64
+		if err := json.Unmarshal(raw, &rate); err != nil || rate <= 0 {
+			continue
+		}
+		threshold := k * 1000
+		card := cards[threshold]
+		card.Threshold = threshold
+		switch m[1] {
+		case "input_cost_per_token":
+			card.Input = rate
+		case "output_cost_per_token":
+			card.Output = rate
+		case "cache_read_input_token_cost":
+			card.CacheRead = rate
+		case "cache_creation_input_token_cost":
+			card.CacheWrite5m = rate
+		case "cache_creation_input_token_cost_above_1hr":
+			card.CacheWrite1h = rate
+		}
+		cards[threshold] = card
+	}
+	var out LongContext
+	for threshold, card := range cards {
+		if out.Threshold == 0 || threshold < out.Threshold {
+			out = card
+		}
+	}
+	return out
 }
 
 func (e litellmEntry) rates() Rates {
@@ -39,6 +161,7 @@ func (e litellmEntry) rates() Rates {
 		CacheWrite1h: e.CacheWrite1h,
 		InputBatch:   e.InputBatch,
 		OutputBatch:  e.OutputBatch,
+		Long:         e.Long,
 	}
 }
 
