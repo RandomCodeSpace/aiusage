@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -417,6 +418,61 @@ func TestIncrementalReReadsFromZeroOnShrink(t *testing.T) {
 	}
 }
 
+// TestIncrementalReReadsFromZeroOnSameSizeRewrite is the OTHER half of the
+// offset-trust rule, and the shrink test cannot reach it: there the stored
+// offset is larger than the new file and would be rejected on its own bounds.
+// A same-size rewrite leaves the offset perfectly in range and pointing at the
+// end, so trusting it reads nothing and the replaced records are never seen —
+// silent loss that looks exactly like an idle day. Only pure GROWTH is trusted.
+func TestIncrementalReReadsFromZeroOnSameSizeRewrite(t *testing.T) {
+	_, path := newRoot(t, "live-2026-08-16.jsonl")
+	a := New().(Adapter)
+	src := adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path}
+
+	first, err := a.CollectIncremental(context.Background(), src, nil)
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Three different records padded back out to the original byte count, so
+	// size alone cannot tell the file was replaced. The padding is trailing
+	// whitespace, which the reader already treats as padding rather than data.
+	var rewritten []byte
+	for i, n := range []int64{4001, 4002, 4003} {
+		rewritten = append(rewritten, []byte(`{"ts":"2026-08-16T0`+string(rune('6'+i))+
+			`:00:00.000000001Z","model":"ollama/gemma4:31b-cloud","source":"cli","prompt":`+
+			strconv.FormatInt(n, 10)+`,"completion":8,"total":`+strconv.FormatInt(n+8, 10)+
+			`,"requests":1}`+"\n")...)
+	}
+	if len(rewritten) > len(body) {
+		t.Fatalf("rewrite is %d bytes, longer than the original %d", len(rewritten), len(body))
+	}
+	for len(rewritten) < len(body) {
+		rewritten = append(rewritten, ' ')
+	}
+	if err := os.WriteFile(path, rewritten, 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	touch(t, path)
+
+	second, err := a.CollectIncremental(context.Background(), src, first.Checkpoint)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(second.Events) != 3 {
+		t.Fatalf("second pass events = %d, want 3 (a same-size rewrite must re-read from zero)", len(second.Events))
+	}
+	for i, ev := range second.Events {
+		if ev.DedupKey == first.Events[i].DedupKey {
+			t.Errorf("record %d kept the replaced record's key %q", i, ev.DedupKey)
+		}
+	}
+}
+
 // TestDedupKeyIsContentNotPosition is the reason the key is not the byte offset.
 // Prepending a record shifts every later record's position; if the key rode on
 // the offset, every shifted line would be counted a second time and an
@@ -565,6 +621,15 @@ func TestRootPrecedence(t *testing.T) {
 	t.Setenv(StateHomeEnv, "")
 	if got := StatsDir(adapter.DiscoverConfig{Home: userHome}); got != filepath.Join(home, "stats") {
 		t.Errorf("with only %s set, stats dir = %q, want %q", HomeEnv, got, filepath.Join(home, "stats"))
+	}
+
+	// Whitespace is unset on BOTH rungs, not just the lower one. A blank
+	// REASONIX_STATE_HOME that stopped the chain here would resolve to nothing
+	// at all and report zero usage while REASONIX_HOME names a good root.
+	t.Setenv(StateHomeEnv, "   ")
+	if got := StatsDir(adapter.DiscoverConfig{Home: userHome}); got != filepath.Join(home, "stats") {
+		t.Errorf("with a blank %s, stats dir = %q, want the %s root %q",
+			StateHomeEnv, got, HomeEnv, filepath.Join(home, "stats"))
 	}
 
 	t.Setenv(HomeEnv, "   ")
