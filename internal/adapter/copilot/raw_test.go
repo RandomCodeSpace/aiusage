@@ -127,6 +127,7 @@ var wantAllowList = []string{
 	"gen_ai.usage.reasoning_tokens",
 	"gen_ai.usage.total_tokens",
 	"gen_ai.usage.total.token_count",
+	"github.copilot.nano_aiu",
 	"gen_ai.request.model",
 	"gen_ai.response.model",
 	"gen_ai.system",

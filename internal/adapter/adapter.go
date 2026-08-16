@@ -23,6 +23,42 @@ type Source struct {
 	Meta  map[string]string // adapter-specific extras (e.g. session id, dir)
 }
 
+// MetaNoUsage marks a discovered source that carries NO token usage — activity
+// or turn context only.
+//
+// It exists because "does this tool have a data source" is asked by surfaces
+// that mean TOKENS: doctor decides whether to print a tool's enablement
+// checklist from it, and the TUI's By-Tool footnote states whether a token
+// source exists at all (issue #44). Copilot discovers one session-state source
+// per session for its skills and hooks while its tokens come only from an
+// OPT-IN OTEL export, so counting those would tell a user with the export
+// switched off that their token source is present and would suppress the
+// checklist that is the only way to turn it on. The value is unread; presence
+// of the key is the mark.
+const MetaNoUsage = "no_usage"
+
+// CarriesUsage reports whether this source can produce usage events. Sources
+// say yes unless they mark themselves otherwise, so an adapter that never
+// thinks about it behaves exactly as before.
+func (s Source) CarriesUsage() bool {
+	if s.Meta == nil {
+		return true
+	}
+	_, marked := s.Meta[MetaNoUsage]
+	return !marked
+}
+
+// CountUsageSources returns how many of these sources can produce usage events.
+func CountUsageSources(srcs []Source) int {
+	n := 0
+	for _, s := range srcs {
+		if s.CarriesUsage() {
+			n++
+		}
+	}
+	return n
+}
+
 // Observation is the result of reading a Source once. EventLevel adapters fill
 // Events; Aggregate adapters fill Snapshots. An adapter may return both.
 type Observation struct {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
@@ -263,18 +264,25 @@ func printAdapterDiscovery(c *cobra.Command, cfg config.Config) {
 	for _, ad := range defaultRegistry().All() {
 		srcs, err := ad.Discover(ctx, dc)
 		absent := err == nil && len(srcs) == 0
+		// The enablement checklist answers "how do I get TOKENS", so it is owed
+		// to an adapter that found sources none of which carry any — copilot
+		// discovers a session-state source per session for skills and hooks
+		// while its usage comes only from the opt-in OTEL export.
+		noUsage := err == nil && adapter.CountUsageSources(srcs) == 0
 		status := fmt.Sprintf("%d source(s)", len(srcs))
 		switch {
 		case err != nil:
 			status = fmt.Sprintf("%d source(s), error: %v", len(srcs), err)
 		case absent:
 			status = absentStatus
+		case noUsage:
+			status = fmt.Sprintf("%d source(s), none carrying usage", len(srcs))
 		}
 		fmt.Fprintf(out, "%-12s %s\n", ad.ID(), status)
 		if note, ok := adapterNotes[ad.ID()]; ok {
 			fmt.Fprintf(out, "             note: %s\n", note)
 		}
-		if absent {
+		if noUsage {
 			printEnablementGuide(out, ad.ID())
 		}
 	}

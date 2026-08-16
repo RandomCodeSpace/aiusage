@@ -144,3 +144,42 @@ func TestSyntheticEventCarriesProviderAndCost(t *testing.T) {
 		t.Errorf("synthetic cost = %d,%v want 600,true", c, ok)
 	}
 }
+
+// TestAdapterSuppliedCostSurvivesTheLadder. A cost the adapter already stamped
+// came from the HARNESS's own accounting — copilot's vendor-priced nano-AIU
+// figure, crush's session cost, goose's provider-reported number — and the
+// ladder is a public-rate-card estimate of the same charge. The estimate must
+// not overwrite the vendor's own value, which is exactly what happened whenever
+// the table happened to know the model id.
+func TestAdapterSuppliedCostSurvivesTheLadder(t *testing.T) {
+	vendor := model.UsageEvent{
+		Tool: model.ToolCopilot, Model: "gpt-5", EventTime: refDay.Add(time.Hour),
+		InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+		DedupKey: "copilot|vendor", Kind: model.KindUsage,
+	}
+	vendor.SetCost(7, "copilot-nano-aiu")
+
+	ad := &fakeAdapter{
+		id: model.ToolCopilot, class: model.EventLevel,
+		emit: func(int) adapter.Observation {
+			return adapter.Observation{Events: []model.UsageEvent{vendor}}
+		},
+	}
+	st := newFakeStore()
+	// The pricer knows this model and would value the same charge at 150.
+	p := &tokenPricer{known: map[string]bool{"gpt-5": true}}
+
+	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	evs, _ := st.ListEvents(context.Background(), store.Filter{})
+	if len(evs) != 1 {
+		t.Fatalf("events = %d, want 1", len(evs))
+	}
+	if c, ok := evs[0].Cost(); !ok || c != 7 {
+		t.Errorf("cost = %d,%v want the vendor's 7,true", c, ok)
+	}
+	if evs[0].PriceSource != "copilot-nano-aiu" {
+		t.Errorf("price source = %q, want the adapter's own stamp", evs[0].PriceSource)
+	}
+}
