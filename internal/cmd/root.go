@@ -29,6 +29,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/crush"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
+	"github.com/RandomCodeSpace/aiusage/internal/adapter/kimicode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/pi"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
@@ -324,6 +325,12 @@ func discoveryEnv() []string {
 		// is a different consequence from where aiusage keeps its database.
 		crush.XDGDataHomeEnv,
 		hermes.HomeEnv,
+		// Both Kimi Code variables are named here even though the adapter is
+		// not in the registry yet: the guard reads the adapter SOURCES, and a
+		// variable that moves a discovery root has to suppress the install from
+		// the moment the code that reads it exists.
+		kimicode.HomeEnv,
+		kimicode.DataDirEnv,
 		opencode.DataDirEnv,
 		// Pi and OpenClaw share one package and one session format, and
 		// PI_CODING_AGENT_DIR moves BOTH surfaces: OpenClaw resolves its agent
