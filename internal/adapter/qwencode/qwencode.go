@@ -15,11 +15,18 @@
 // is a counter or an identity; the surface has no content field at all.
 //
 // ABSENCE IS NOT PROOF OF NON-USE. The write is gated on
-// `privacy.usageStatisticsEnabled` (default true), so a missing usage/ directory
-// means EITHER the harness was never run OR the user opted out. Discovery
-// therefore returns no sources and NO error when the directory is absent: an
-// error would report a deliberate privacy choice as a fault, and inventing a
-// fallback surface would collect what the user turned off.
+// `privacy.usageStatisticsEnabled` (default true, overridable per run by
+// QWEN_USAGE_STATISTICS_ENABLED), so a missing usage/ directory means EITHER
+// the harness was never run OR the user opted out. Discovery therefore returns
+// no sources and NO error when the directory is absent: an error would report a
+// deliberate privacy choice as a fault, and inventing a fallback surface would
+// collect what the user turned off.
+//
+// PRESENCE IS NOT PROOF OF EVERYTHING EITHER. The same call site skips the
+// write for an INTERNAL prompt id, so the harness's own utility calls (next
+// speaker checks, summarisation and the like) spend tokens that never reach
+// this ledger. The rows that are here are exact; the ledger is a floor, not a
+// bill, and it will read low against a provider console.
 //
 // THE BUCKET COMES FROM `timestamp`, NEVER FROM THE FILE NAME. Two fields of
 // this surface are writer-local by the harness's own documentation: the record's
@@ -30,13 +37,49 @@
 // field read for time here — which is also the project rule: grouping keys are
 // derived on read, from UTC seconds.
 //
-// TOKEN SEMANTICS ARE GEMINI'S, because Qwen Code is a Gemini CLI fork and the
-// record is built straight off `GenerateContentResponseUsageMetadata`:
-// `cachedTokens` is `cachedContentTokenCount`, a SUBSET of the prompt count in
-// `inputTokens`, so it is mapped to CacheRead and subtracted from Input rather
-// than added beside it; `thoughtsTokens` is `thoughtsTokenCount`, which sits
-// BESIDE `outputTokens` rather than inside it (the harness's own total fallback
-// is input+output+thoughts), so reasoning here is ADDITIVE, not a subset.
+// TOKEN SEMANTICS ARE GEMINI'S SHAPE, FILLED BY WHICHEVER WIRE ANSWERED. Qwen
+// Code is a Gemini CLI fork and the record is built straight off
+// `GenerateContentResponseUsageMetadata` (ApiResponseEvent copies
+// promptTokenCount / candidatesTokenCount / cachedContentTokenCount /
+// thoughtsTokenCount / totalTokenCount into the ledger's five counters) — but
+// only authType gemini and vertex-ai fill that struct from a Gemini response.
+// openai and qwen-oauth fill it in `convertOpenAIResponseToGemini`, and
+// anthropic in a converter of its own. The SHAPE is shared; the SEMANTICS are
+// not, and the ledger records no separate hint about which applied.
+//
+// `cachedTokens` is a SUBSET of the prompt count on every one of those wires
+// (`cachedContentTokenCount` inside `promptTokenCount`;
+// `prompt_tokens_details.cached_tokens` inside `prompt_tokens`;
+// `cache_read_input_tokens` folded into the anthropic converter's own prompt
+// total), so it is mapped to CacheRead and SUBTRACTED from Input rather than
+// added beside it. `calculateInputTokens` also falls back to the cached count
+// when the prompt count is absent, so `inputTokens == cachedTokens` is a real
+// record shape and Input is then legitimately zero.
+//
+// `thoughtsTokens` is NOT additive here, which is the one place this surface
+// contradicts its Gemini ancestry. On the OpenAI-compatible wires — authType
+// openai, and qwen-oauth whose QwenContentGenerator EXTENDS
+// OpenAIContentGenerator — the converter writes `candidatesTokenCount =
+// usage.completion_tokens` beside `thoughtsTokenCount =
+// usage.completion_tokens_details.reasoning_tokens`, and reasoning_tokens is a
+// COMPONENT of completion_tokens (the converter's own estimation fallback
+// clamps the count with `Math.min(estimated, completionTokens)`, which only
+// holds if it sits inside). The anthropic converter writes no thoughts count at
+// all. Only the native Gemini wire reports thoughts BESIDE candidates.
+//
+// A reasoning mode is a property of the TOOL in this project
+// (model.ReasoningModeFor), not of a row, so one rule has to cover a ledger
+// that mixes wires: SUBSET. It is exact for openai, qwen-oauth and anthropic,
+// and on the Gemini wire it can only UNDER-bill, which is the direction this
+// project takes when it cannot know. See ReasoningMode below.
+//
+// Reasoning is therefore not part of the total floor either. The provider's own
+// `totalTokens` stays authoritative and is raised only when it falls below
+// `input + cached + output` (issue #49). Adding reasoning to that floor would
+// raise the stored total by the reasoning count of every OpenAI-wire record —
+// an OVERSTATEMENT appended to an immutable ledger, on the wire most Qwen Code
+// installs use. Cache read stays outside the floor for the reason it always
+// does: it is already inside the prompt count.
 //
 // The ledger reports no cache-creation count and no service tier, and it names
 // no project or working directory, so those fields stay empty rather than
@@ -111,16 +154,21 @@ import (
 // ReasoningMode below, which this package cannot register from the outside.
 const Tool = "qwen-code"
 
-// ReasoningMode is the reasoning-billing rule this surface actually reports, so
-// the fact travels with the adapter that measured it. thoughtsTokens sits
-// BESIDE outputTokens (the harness's own total fallback is
-// input + output + thoughts), so reasoning must be billed on top of output.
+// ReasoningMode is the reasoning-billing rule this surface reports, so the fact
+// travels with the adapter that measured it: SUBSET. thoughtsTokens is INSIDE
+// outputTokens on the OpenAI-compatible wires (authType openai and qwen-oauth —
+// the wire this machine's own records took), and is never written at all on the
+// anthropic one; only the native Gemini wire reports it beside output. One tool
+// id cannot carry two rules, so the mode is the one that is exact on three
+// wires and can only under-bill on the fourth. Billing this ADDITIVE would
+// charge the reasoning tokens of every OpenAI-wire turn twice, since the output
+// count it sits inside is already being charged.
 //
-// It is NOT in effect yet: model.ReasoningModeFor keys on the tool id and falls
-// back to ReasoningSubset for one it does not know, which UNDER-bills Qwen
-// reasoning. Registering this constant in model.reasoningModes is part of
-// wiring the adapter up.
-const ReasoningMode = model.ReasoningAdditive
+// It is the same value model.ReasoningModeFor returns for a tool it does not
+// know, so nothing is mis-billed while the adapter is unregistered. Registering
+// it in model.reasoningModes is still part of wiring the adapter up: the
+// fallback is a default, and this is a measurement.
+const ReasoningMode = model.ReasoningSubset
 
 // RuntimeDirEnv and HomeEnv name the environment variables that move the Qwen
 // ledger, and with it everything this adapter reads. They are exported because
@@ -131,6 +179,15 @@ const ReasoningMode = model.ReasoningAdditive
 // The precedence is the harness's own: QWEN_RUNTIME_DIR wins, then QWEN_HOME,
 // then ~/.qwen. QWEN_DATA_DIR is deliberately absent — no such variable exists
 // in the harness; a third-party parser invented it.
+//
+// The harness has one rung BETWEEN those two that no environment variable
+// exposes: `advanced.runtimeOutputDir` in settings.json (Storage's own order is
+// QWEN_RUNTIME_DIR > runtimeOutputDir > QWEN_HOME > ~/.qwen). It is not read
+// here, and it cannot be read reliably: settings merge across scopes and a
+// relative value resolves against the WORKSPACE the qwen process was started
+// in, which a polling daemon has no way to enumerate. An install that sets it
+// therefore collects nothing rather than something wrong — the same silence as
+// an opted-out install, and the reason absence is never reported as a fault.
 const (
 	RuntimeDirEnv = "QWEN_RUNTIME_DIR"
 	HomeEnv       = "QWEN_HOME"
@@ -444,10 +501,13 @@ func (r record) event(path string, mtime time.Time) (model.UsageEvent, bool) {
 
 	// The provider's own total stays authoritative wherever it covers what is
 	// stored beside it, and is raised when it does not (issue #49): a row must
-	// never report a total below its own components. Reasoning is part of that
-	// floor because it is additive on this surface.
+	// never report a total below its own components. Reasoning is NOT one of
+	// them, for the same reason cache read is not: on the OpenAI-compatible
+	// wires it is already inside the output count, so adding it here would
+	// raise the stored total by the reasoning count of every reasoning turn —
+	// see the package comment.
 	total := adapter.NonNeg(r.TotalTokens)
-	if sum := input + cached + output + reasoning; total < sum {
+	if sum := input + cached + output; total < sum {
 		total = sum
 	}
 	if total == 0 {

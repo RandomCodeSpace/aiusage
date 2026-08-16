@@ -2,6 +2,7 @@ package qwencode
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -229,9 +230,12 @@ func TestBucketsFromTimestampNotFileNameOrLocalDate(t *testing.T) {
 	}
 }
 
-// TestTokenMapping pins the Gemini accounting this surface inherits: cached is a
-// subset of the prompt count, thoughts sit beside output, and a provider total
-// that under-reports its own components is raised rather than stored.
+// TestTokenMapping pins the accounting this surface reports: cached is a subset
+// of the prompt count, thoughts are a subset of the output count (the
+// OpenAI-compatible wires write candidatesTokenCount = completion_tokens beside
+// thoughtsTokenCount = completion_tokens_details.reasoning_tokens, which is one
+// of them), and a provider total below the components that are NOT subsets is
+// raised rather than stored.
 func TestTokenMapping(t *testing.T) {
 	obs, err := collectRoot(t, filepath.Join("testdata", "edge"))
 	if err == nil {
@@ -252,9 +256,11 @@ func TestTokenMapping(t *testing.T) {
 		// The harness's own fallback when the API omits prompt tokens:
 		// inputTokens == cachedTokens, so Input is legitimately zero.
 		"e-3": {in: 0, out: 5, cacheRead: 700, total: 705},
-		// thoughtsTokens is ADDITIVE, and the provider's total left it out:
-		// 200 + 30 + 70 = 300 > the 230 it claimed.
-		"e-4": {in: 200, out: 30, reasoning: 70, total: 300},
+		// thoughtsTokens is INSIDE outputTokens: 100 completion tokens of which
+		// 70 were reasoning, totalling 300 with the prompt. The provider's own
+		// total is kept — adding reasoning to the floor would store 370 for a
+		// turn that cost 300, an overstatement no later row can take back.
+		"e-4": {in: 200, out: 100, reasoning: 70, total: 300},
 		// cached > input cannot happen upstream but must not produce a negative
 		// Input if it ever does: the clamp caps cached at the prompt count.
 		"e-6": {in: 0, out: 4, cacheRead: 10, total: 14},
@@ -279,16 +285,37 @@ func TestTokenMapping(t *testing.T) {
 	}
 }
 
-// TestTotalNeverUnderReportsItsComponents is the issue #49 invariant, checked
-// over every fixture: a stored row may not claim a total below the counts stored
-// beside it.
-func TestTotalNeverUnderReportsItsComponents(t *testing.T) {
+// TestTotalIsTheProviderFigureOrTheComponentFloor pins BOTH directions of the
+// stored total over every fixture, because each has its own way of being wrong.
+//
+// Below: the issue #49 invariant — a row may not claim a total under the counts
+// stored beside it. Above: the total may not exceed the provider's own figure
+// for any other reason, and reasoning is the one that would. thoughtsTokens is
+// inside outputTokens on the OpenAI-compatible wires, so a floor that added it
+// would inflate every reasoning turn by its reasoning count and append that to
+// an immutable ledger. Cache read is outside the floor for the same reason,
+// which is why the equality is exact rather than a pair of bounds.
+func TestTotalIsTheProviderFigureOrTheComponentFloor(t *testing.T) {
 	for _, root := range []string{"live", "edge", "planted"} {
 		obs, _ := collectRoot(t, filepath.Join("testdata", root))
+		if len(obs.Events) == 0 {
+			t.Errorf("%s: no events", root)
+		}
 		for _, e := range obs.Events {
-			sum := e.InputTokens + e.CacheReadTokens + e.CacheCreationTokens + e.OutputTokens + e.ReasoningTokens
-			if e.TotalTokens < sum {
-				t.Errorf("%s/%s: total %d < components %d", root, e.MessageID, e.TotalTokens, sum)
+			var raw struct {
+				TotalTokens int64 `json:"totalTokens"`
+			}
+			if err := json.Unmarshal([]byte(e.Raw), &raw); err != nil {
+				t.Fatalf("%s/%s: audit payload unreadable: %v", root, e.MessageID, err)
+			}
+			want := e.InputTokens + e.CacheReadTokens + e.CacheCreationTokens + e.OutputTokens
+			if raw.TotalTokens > want {
+				want = raw.TotalTokens
+			}
+			if e.TotalTokens != want {
+				t.Errorf("%s/%s: total %d, want max(provider %d, floor in+cache+out) = %d "+
+					"(reasoning %d is inside output and must not move it)",
+					root, e.MessageID, e.TotalTokens, raw.TotalTokens, want, e.ReasoningTokens)
 			}
 		}
 	}
