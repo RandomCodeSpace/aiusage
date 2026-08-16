@@ -125,18 +125,25 @@ func TestToolResponseRowsAreNeverRead(t *testing.T) {
 }
 
 // TestPrivacyCanariesNeverEscape plants nothing new — the fixture already
-// carries SCRUB-CANARY-<n> in every field a real database fills with human or
-// model text: session name and description, recipe json, user prompts, turn
-// context, tool arguments, the LLM-generated tool title in `_meta`, the tool
-// error string, the tool's output and the assistant's reply. None of it may
-// reach any emitted field, raw payload included.
+// carries SCRUB-CANARY-<n> in every COLUMN of the three tables that can hold
+// human or model text (session name, description, recipe json, recipe values,
+// extension data, message content and message metadata) and in every
+// content-bearing BLOCK TYPE of content_json: user prompts, turn context,
+// assistant text, thinking, redacted thinking, image data, tool arguments, a
+// tool confirmation prompt, the LLM-written `_meta` title and chain summary, a
+// failed call's error string and a tool response's output. None of it may reach
+// any emitted field, raw payload included.
+//
+// The types the decode has no field for are the load-bearing half: they prove
+// the allow-list drops content at the PARSE, not in a filter downstream that a
+// later edit could bypass.
 func TestPrivacyCanariesNeverEscape(t *testing.T) {
 	script, err := os.ReadFile(filepath.Join("testdata", "sessions.sql"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
 	planted := strings.Count(string(script), "SCRUB-CANARY-")
-	if planted < 16 {
+	if planted < 24 {
 		t.Fatalf("fixture plants only %d canaries; the test is weaker than it claims", planted)
 	}
 
@@ -217,6 +224,32 @@ func TestActivityWatermarkIsSeparate(t *testing.T) {
 	}
 	if dump := fmt.Sprintf("%+v", second); strings.Contains(dump, "SCRUB-CANARY-") {
 		t.Errorf("tool arguments escaped: %s", dump)
+	}
+}
+
+// TestUndatedMessagesProduceNoCalls: activity_events stores event_time_unix NOT
+// NULL and is append-only, so a zero time.Time would land as year 1 in a table
+// that has no UPDATE and no DELETE to take it back out — a row inside every
+// all-time window, forever. An undated message is refused exactly as an undated
+// ledger row is, and it costs the pass nothing else.
+func TestUndatedMessagesProduceNoCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := buildDB(t, dir)
+	writeRows(t, path, `INSERT INTO messages (id, message_id, session_id, role, content_json, created_timestamp)
+		VALUES (60, 'chatcmpl-undated', '20260816_3', 'assistant',
+		'[{"type":"toolRequest","id":"call_u","toolCall":{"status":"success","value":{"name":"shell"}}}]', 0)`)
+
+	obs := collect(t, adapter.Source{Tool: ToolID, Class: model.EventLevel, Path: path})
+	for _, a := range obs.Activity {
+		if a.EventTime.IsZero() || a.EventTime.Year() < 2000 {
+			t.Errorf("undated call emitted with EventTime %v (key %s)", a.EventTime, a.DedupKey)
+		}
+	}
+	if len(obs.Activity) != 3 {
+		t.Errorf("want the fixture's 3 dated calls, got %d", len(obs.Activity))
+	}
+	if len(obs.Events) == 0 {
+		t.Error("an undated message cost the source its usage events")
 	}
 }
 

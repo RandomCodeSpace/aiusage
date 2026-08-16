@@ -22,9 +22,39 @@ import (
 // That is a privacy property first and a cost saving second: what is not
 // selected cannot leak.
 //
-// m.id > ? — messages are append-only with an AUTOINCREMENT id, so a rowid
-// watermark reads each row exactly once. It is deliberately a SECOND watermark:
-// usage comes from a different table that advances at its own pace.
+// m.id > ? — the id is INTEGER PRIMARY KEY AUTOINCREMENT, so it is never reused
+// and never moves backwards, and a rowid watermark therefore reads each row at
+// most once. It is deliberately a SECOND watermark: usage comes from a
+// different table that advances at its own pace.
+//
+// `messages` is NOT append-only, and the watermark is honest about what that
+// costs. Read out of the shipped goose 1.46 binary, the writer carries
+// `UPDATE messages SET content_json = ? WHERE id = ?` (an in-place rewrite of a
+// stored row) and two truncating deletes — `DELETE FROM messages WHERE
+// session_id = ? AND (created_timestamp > ? OR (created_timestamp = ? AND
+// id >= ?))` for a rewind and `DELETE FROM messages WHERE session_id = ?` for a
+// session delete. The consequences, in order of how much they matter:
+//
+//   - A row REWRITTEN after it was read is never revisited, so a call added to
+//     it later is not collected. That is an undercount of a secondary stream,
+//     and it is the direction this ledger tolerates; the alternative — dropping
+//     the watermark and re-decoding every assistant message on every poll —
+//     still could not land the new call, because the dedup key of position 0 of
+//     that row is already stored and would conflict-skip.
+//   - A DELETE only removes rows from the SOURCE. The activity already
+//     collected stays in aiusage's own ledger, which is the point of collecting
+//     it. AUTOINCREMENT means the rows written after a rewind take fresh ids,
+//     so no key ever collides with a deleted row's.
+//   - goose's own reader selects a message's rows as a SET
+//     (`SELECT id, content_json FROM messages WHERE session_id = ? AND
+//     message_id = ? ORDER BY id ASC`), i.e. one message id MAY span several
+//     rows. This machine's corpus has never done it (6 assistant rows, 6
+//     distinct message ids), but if it does, TurnSeq/CallsInTurn describe the
+//     ROW rather than the message. That is the split-identity bug class, and it
+//     is inert here for one reason only: goose activity is never attributed, so
+//     CallsInTurn is never a cost divisor. It would have to be settled per
+//     MESSAGE — one query over the message's whole row range — the day this
+//     adapter learns to attribute.
 const activityQuery = `SELECT m.id, m.message_id, m.session_id, m.created_timestamp,
 	m.content_json, s.working_dir
 	FROM messages m
@@ -137,10 +167,17 @@ func messageCalls(content []byte, rowID int64, messageID, sessionID string, crea
 	if ts > msTimestampThreshold {
 		ts /= 1000
 	}
-	when := time.Time{}
-	if ts > 0 {
-		when = time.Unix(ts, 0).UTC()
+	if ts <= 0 {
+		// Undated: the same refusal buildEvent makes one file over, for the same
+		// reason. activity_events stores event_time_unix NOT NULL and is
+		// append-only, so a zero time.Time would land as year 1 — a row in every
+		// all-time window, in a table with no UPDATE and no DELETE to take it
+		// back out. messages.created_timestamp is NOT NULL and goose writes it
+		// from the clock, so this is a corrupt or imported row, not a shape the
+		// writer produces.
+		return nil
 	}
+	when := time.Unix(ts, 0).UTC()
 
 	out := make([]model.ActivityEvent, 0, len(names))
 	for i, name := range names {
@@ -204,10 +241,11 @@ func callName(b contentBlock) (string, bool) {
 }
 
 // callKey is the stable identity of one tool call: the message row it was
-// written on plus its position among that message's calls.
+// written on plus its position among that row's calls.
 //
-// The position is an index within the RECORD, never a read position — the
-// message row keeps its rowid forever, so the key is the same on every poll.
+// The position is an index within the RECORD, never a read position — a row's
+// rowid is assigned once and never reassigned (AUTOINCREMENT), so the key is
+// the same on every poll for as long as the row exists.
 // The provider's own call id ("call_srht34n0") is deliberately not used: it is
 // short and provider-generated, and nothing has counted it for uniqueness
 // across a whole install, which is the standard of evidence an id has to meet
