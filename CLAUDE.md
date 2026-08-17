@@ -491,6 +491,39 @@ insert into an append-only table, the 551 rows keep their $77.59, and correcting
 them would mean $74.53 of synthetic `kind='adjustment'` noise against a 0.30%
 month-old error. Fix forward.
 
+**Who priced a row is a CLOSED vocabulary of vendors against an open ladder.**
+`price_source` stays free-form (a new rung must not need a schema change), but
+exactly one place classifies it: `model.PriceProvenance`. Empty is `CostAbsent`
+— unpriced, never free. The VENDOR set is an explicit allow-list of four stamps
+(`copilot-nano-aiu`, `crush-session-cost`, `pi-reported`, `openclaw-reported`)
+plus one family (`goose`, whose tail is goose's own provenance word), because
+those are the four adapters that call `SetCost` and the ones `collect.stampCost`
+is forbidden to overwrite. Everything else is `CostComputed`, and the default
+runs that way on purpose: the ladder's rungs are open-ended
+(`litellm-<date>`, `embedded-<date>`, `override`, their `+` composites, the
+`+long-context` suffix), so enumerating them means chasing every new one, while
+an unrecognised source read as vendor would overstate confidence in a number
+this project guessed. It is an allow-list rather than a prefix match on tool ids
+for the raw-payload reason: "starts with a tool name" silently admits whatever a
+future stamp is called. Family names carry no SQL LIKE metacharacter, since
+store builds a LIKE pattern from them. The UI spends this distinction as a
+glyph: plain `$` is the bill, `~$` is our estimate, `-` is absent — and `≥` is a
+SEPARATE mark meaning some row in the window had no price at all, so a total can
+be approximate, bounded, both or neither.
+
+**The partition invariant is UI, not just SQL.** `store.SummarizeTurnContext`
+makes the dimension a required argument because a dimension-blind join
+overstates by 28.1%; the Activity tab is the other half of the same rule.
+`tui.ActivityPivot` is ONE SCALAR — the activity ledger's per-call reading plus
+the five turn-context dimensions, cycled by `p`, never combined — so "show me
+agents and skills together" is unrepresentable rather than discouraged. Its
+cycle is built at init from `model.TurnDimensions()` rather than restated, so a
+sixth attribution axis reaches the tab by being added to the store's vocabulary
+and nowhere else. The kind column is DROPPED in a turn-context pivot: five cells
+truncate `mcp_tool` and `mcp_server` to the same `mcp_s…`, which would make two
+partitions indistinguishable in the one column meant to separate them, so the
+panel title carries the dimension instead.
+
 **Adapters are strictly observational.** They read files/DBs the agent CLIs
 have already produced, nothing more: no writes, no write locks, no rotation.
 SQLite sources open read-only (mode=ro; immutable=1 only when the source is
