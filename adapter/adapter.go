@@ -1,10 +1,113 @@
 // Package adapter defines the read-only interface every agent-CLI integration
 // implements, plus the registry that wires them together.
 //
-// CRITICAL: adapters are strictly observational. They MUST only read
-// already-produced local files/DBs. They must never write, modify, lock for
-// writing, rotate, or otherwise influence agent files. Open SQLite sources
-// read-only (immutable=1 / mode=ro) so a poll can never disturb the agent.
+// It imports no concrete adapter and must not: a consumer who only wants the
+// interface should not link fifteen file-format parsers, and the packages that
+// implement this one importing it back is a cycle besides. The fan-out lives in
+// adapter/all (Default). Plumbing our own adapters share hides under
+// adapter/internal, so no helper becomes API surface by accident.
+//
+// # STRICTLY OBSERVATIONAL
+//
+// This is the rule the whole package exists to keep. An adapter reads local
+// files and databases the harness has ALREADY written, and does nothing else:
+// no writes, no modification, no write locks, no rotation, no compaction, no
+// deletion, not even a lock that would make the harness wait. A user's coding
+// session must be unable to notice that this project is running.
+//
+// Every SQLite source is opened mode=ro with query_only(1) and a busy timeout;
+// immutable=1 is used NOWHERE, deliberately. A harness holds its own database
+// open and writes it live, so an immutable reader can read a stale or empty
+// picture rather than the file's real contents - measured on one install, a
+// 4096-byte main file holding no rows at all while every row lived in the WAL
+// beside it. mode=ro is the flag that cannot write; immutable=1 is the flag
+// that lies.
+//
+// # THE SHAPE OF A READ
+//
+// Discover locates sources under the configured roots; Collect reads one source
+// and returns an Observation. An Observation carries up to three INDEPENDENT
+// streams - usage events, activity, turn contexts - plus a checkpoint that must
+// only be set once a read completed, since a partial read that advances the
+// checkpoint skips its own remainder forever. The streams are independent
+// because a source may report calls it reports no usage for, and usage it
+// reports no calls for; none of them is derived from another.
+//
+// Nothing in an Observation has a field for a prompt, a command, an argument or
+// a file's contents. Activity and turn context are NAMES and counts, enforced by
+// the model types rather than by a switch, and the raw audit payload is built
+// from an allow-list of usage/model/identity fields. Content that has nowhere
+// to land cannot leak.
+//
+// Missing, partial and corrupt inputs are normal: an adapter returns what it
+// could read plus a non-fatal error, and never aborts the collection cycle for
+// the other fourteen.
+//
+// # WHAT A CAPABILITIES DECLARATION MEANS
+//
+// Capabilities is a required method, so an adapter declares what this project
+// can honestly say about its harness: where a cost figure came from (vendor
+// stamp vs computed from a public rate card), whether a tool call can be joined
+// to the turn that paid for it (exact join / recorded-but-unattributed / no
+// activity at all), how the source reports reasoning tokens, and how well the
+// adapter itself is verified (live against a real install, or fixture against
+// constructed data). Tool MUST equal ID(), and every field MUST be set - a
+// surface renders an empty field as an empty line, which reads as a rendering
+// fault rather than as a missing fact.
+//
+// It is a compiled declaration beside the code it describes, not a table
+// somewhere else, because a second statement of a fact drifts from the first:
+// a sixteenth adapter does not compile until it declares itself, which beats a
+// guard test reminding someone to edit a map (issue #72, decision 1). Reasoning
+// is filled from model.ReasoningReportFor rather than restated, so the pricing
+// engine and this declaration cannot disagree about what a source reports.
+//
+// It describes the ADAPTER, not an install. A declaration of "exact join" still
+// yields no activity on a machine where the surface that carries it is switched
+// off, the way Copilot's opt-in OTEL export can be.
+//
+// # THE INTERFACE IS FROZEN
+//
+// Capabilities was the last required method (issue #72, decision 4). Every
+// future capability arrives as an OPTIONAL interface discovered by type
+// assertion, the way Incremental already is: the collector asserts for it and
+// falls back to a full Collect when it is absent. The reason is external
+// implementers - a new required method breaks every implementation outside this
+// module at once, while an optional one costs an existing adapter nothing.
+//
+// # THE THREE NAMED BUG CLASSES
+//
+// Every adapter is checked against these before it merges (CONTEXT.md). Each is
+// named for a mistake that already happened here, and each misreports in the
+// one direction this project promises never to go.
+//
+//   - SPLIT-IDENTITY RECORDS. One usage identity spans several source records.
+//     Claude Code streams a single API response across transcript records that
+//     share a message id and PARTITIONS its tool_use blocks between them, so
+//     usage must collapse per message (keep-best) while calls and turn contexts
+//     UNION across it - reading the winning record's copy silently drops what
+//     its siblings carried. Cline is the same class inverted: its message
+//     document is rewritten whole on every save, so no byte offset survives,
+//     while the message ids inside it do not change.
+//
+//   - CUMULATIVE-VS-EVENT COUNTING. A surface re-exports a running counter on a
+//     timer, and summing the exports multiplies the truth. Measured on a live
+//     Copilot export, a session that made exactly ONE tool call had produced
+//     226 identical metric dataPoints; a span is written once per operation, so
+//     events come from spans and never from summing re-exports. The same trap
+//     sits on that harness's cost counters, which are session-wide totals.
+//
+//   - ASSIGNED-NOT-ACCUMULATED COLUMNS. A column holds the LAST value rather
+//     than a running total, and reading it as a total misreports. Goose's
+//     sessions.total_tokens is assigned, so its adapter reads the purpose-built
+//     usage_ledger and never a token column of sessions; Crush names the two
+//     columns it refuses in the struct field names themselves.
+//
+// The standing rule underneath all three: when a source offers no honest join,
+// attribute NOTHING. Codex's token counts share no identity with its call
+// records, so its calls are recorded unattributed - a timestamp-nearest match
+// would invent an attribution the source does not support, and an invented
+// number is worse than a missing one.
 package adapter
 
 import (

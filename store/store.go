@@ -1,8 +1,124 @@
-// Package store defines the persistence contract and reporting query types.
-// The concrete implementation (sqlite.go) is backed by modernc.org/sqlite
-// (pure Go, CGO_ENABLED=0). The schema (schema.sql) enforces append-only
-// immutability of usage history via UNIQUE(dedup_key) + no-UPDATE/no-DELETE
-// triggers — see PLAN.md.
+// Package store is the append-only usage ledger and the query surface over it.
+//
+// The database is one SQLite file driven by modernc.org/sqlite (pure Go,
+// CGO_ENABLED=0). It holds the token ledger, the activity ledger, the turn
+// attribution table, a derived rollup and the collector's own working state,
+// and Open / OpenReadOnly are the only ways in. schema.sql always describes the
+// full latest schema; older files run the ordered steps in migrate.go.
+//
+// # HISTORY IS APPENDED, NEVER EDITED
+//
+// usage_events is the immutable record of what a harness spent, and two of the
+// tables beside it are on the same terms: activity_events (one row per tool,
+// skill or hook invocation) and usage_turn_context (what a turn ran under).
+// Each carries BEFORE UPDATE and BEFORE DELETE triggers that RAISE(ABORT), so
+// a mutation aborts in the database rather than being caught by discipline in
+// this package. Rows arrive through INSERT .. ON CONFLICT(dedup_key) DO
+// NOTHING - deliberately not INSERT OR IGNORE, which would also swallow CHECK
+// violations - which is what makes a re-read of an unchanged source a no-op
+// rather than a double count. A correction is a NEW row with kind='adjustment';
+// nothing is ever rewritten, so a number this project once reported can always
+// be reproduced.
+//
+// aggregate_state, source_checkpoints and usage_rollup are the only mutable
+// data tables (schema_meta holds the version stamp and the rollup watermark).
+// They are working state, not history: losing any of them costs a re-read or a
+// rebuild, never a fact.
+//
+// Two consequences a caller feels. First, a write can partially succeed: a row
+// that fails its own insert (CHECK violation, empty dedup key) is skipped and
+// reported in the returned error while the rest of the batch commits, so the
+// returned counts stay meaningful when the error is non-nil - one poison row
+// must not abort a batch that is re-read every cycle. Second, one read of one
+// source commits as ONE transaction (ApplyBatch): events, activity, turn
+// contexts and the checkpoint together, because a checkpoint that outran its
+// data would skip that data forever.
+//
+// # TWO HANDLES
+//
+// Open is the full handle: it creates the file if absent, applies WAL,
+// synchronous=NORMAL, busy_timeout=5000 and foreign_keys=ON, migrates an older
+// schema, refuses a newer one (an older binary must never stamp a version
+// backwards), and chmods the database and its WAL/SHM sidecars to 0600 because
+// the raw column can hold transcript content. It is what the collector holds.
+//
+// OpenReadOnly is the read handle: an EXISTING database, opened mode=ro, with
+// no schema creation, no migration and no file mode touched. Its schema version
+// must equal this binary's EXACTLY and is refused in either direction -
+// migrating would be a write, and a reader that quietly serves a schema it does
+// not understand is worse than one that will not start. Every write path of
+// such a handle returns this package's own error, so a read-only consumer fails
+// on the method it called instead of on a driver error three layers down. That
+// refusal is a runtime one: both handles are the same concrete type today, and
+// a caller that wants the absence at compile time declares its own narrow
+// interface over the methods it actually calls, which is also the cheapest way
+// to fake this package in a test. EnsureRollup and RebuildRollup are writes and
+// are refused there; RollupStale is a read and is not.
+//
+// # A READ HANDLE IS SAFE AGAINST A LIVE COLLECTOR
+//
+// This is a promise of the API, not an accident of the implementation, and it
+// is not withdrawn without a major version. A read handle may be open, and
+// queried, while a collector writes the same file: WAL means readers do not
+// block the writer and the writer does not block readers, so a report never
+// waits on a collection pass and never sees half of one - each source's pass
+// commits atomically.
+//
+// The honest sentence: a read can still fail with SQLITE_BUSY, because WAL has
+// moments (crash recovery, a checkpoint that restarts the log) where a reader
+// needs a lock a writer holds, and the wait before it gives up is the
+// busy_timeout - fixed at 5000ms in both DSNs, not configurable. A read is
+// idempotent, so a retry is always safe. One case sits outside the promise: the
+// schema version is checked once, at open, so a NEWER collector migrating the
+// file underneath a live read handle is not covered; reopen it.
+//
+// # ONE DIMENSION PER QUERY, ALWAYS
+//
+// Cost is partitioned six ways: the five turn-context dimensions
+// (model.TurnDimensions - agent, skill, mcp_tool, mcp_server, plugin) plus
+// activity_events' per-call attribution. Each is honest alone and meaningless
+// summed, the way cost-by-region and cost-by-product are two views of one
+// budget. A turn commonly carries three or four contexts at once and EVERY row
+// names the turn's full cost, so a dimension-blind join counts the same tokens
+// once per context the turn held: measured on a real ledger, 6.213bn tokens and
+// $6,023.52 reported for turns that cost 4.984bn and $4,700.90, a 28.1%
+// overstatement from one missing predicate.
+//
+// So the dimension is a REQUIRED ARGUMENT of SummarizeTurnContext and
+// TopTurnContext, never a filter field a caller could leave unset. It is
+// validated against the closed vocabulary before any SQL exists, and the WHERE
+// builder writes the dimension predicate unconditionally, so no argument and no
+// combination of empty filters produces a statement without it. Grouping by
+// "dimension" is refused by name (it is exactly the operation that concatenates
+// two partitions), as is grouping by any dimension other than the one queried;
+// ActivityFilter's Kinds and Names are refused because honouring them means
+// joining activity_events, where a turn with two matching calls joins twice.
+// No query here reads two dimensions, or both this table and activity_events,
+// in one statement - and a caller must not add two results together either.
+//
+// Within one dimension the join is 1:1 (PRIMARY KEY (usage_dedup_key,
+// dimension) against a UNIQUE dedup_key), so a bucket's cost is a plain SUM
+// with no divisor. The activity queries are the opposite case and DO divide:
+// one assistant turn commonly emits several calls against a single usage
+// object, so each call takes the turn's counts divided by the number of rows
+// naming that turn - counted in the table, integer, non-negative, which bounds
+// the shares by the turn's real total by construction. Calls whose usage row is
+// absent are reported as unattributed: unknown, never free. Rows with no
+// stamped cost are likewise unpriced and never $0 - a bucket carries
+// UnpricedEvents so a caller knows its CostMicroUSD is an understatement until
+// those are display-priced.
+//
+// # WithRaw IS AN AUDIT PAYLOAD, NOT A DATA SOURCE
+//
+// usage_events.raw exists to answer "what did the provider actually say", and
+// adapters now build it from an explicit allow-list of usage/model/identity
+// fields. Rows appended BEFORE that allow-list landed can hold whole transcript
+// lines, and append-only means they are never rewritten - that history is
+// exactly as it was stored. The default ListEvents projection therefore names
+// its columns and excludes raw; WithRaw is the explicit opt-in, and the CLI
+// passes it for export --include-raw and nothing else. The gate that matters is
+// upstream of every reader: privacy.no_raw drops the column at collection, and
+// what was never stored cannot be projected.
 package store
 
 import (
