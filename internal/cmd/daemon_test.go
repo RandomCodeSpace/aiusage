@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
-	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 

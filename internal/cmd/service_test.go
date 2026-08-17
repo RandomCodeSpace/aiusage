@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
-	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 )

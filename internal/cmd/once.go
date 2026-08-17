@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
-	"github.com/RandomCodeSpace/aiusage/internal/collect"
 )
 
 // onceRegistry is a seam so tests can drive `once` with failing adapters.

@@ -93,7 +93,7 @@ type ToolCapability struct {
 // copilot (copilot/cost.go PriceSourceAIU), crush (crush/crush.go
 // PriceSourceReported), goose (goose/goose.go priceSource) and pi's two tools
 // (pi/pi.go, a.tool+"-reported"). Every other adapter leaves CostMicroUSD nil
-// and the row is priced by the ladder in internal/collect, or not at all.
+// and the row is priced by the ladder in collect, or not at all.
 //
 // Activity: ActivityExact is the adapters that set UsageDedupKey on the rows
 // they emit — claudecode (claudecode.go mintActivity), clinecli

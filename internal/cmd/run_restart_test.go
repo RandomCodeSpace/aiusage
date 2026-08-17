@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/collect"
+	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/store"
 )
 
