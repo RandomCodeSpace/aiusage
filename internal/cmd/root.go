@@ -305,25 +305,24 @@ func discoveredSources(ctx context.Context, cfg config.Config) map[string]int {
 // The registry is asked, not a table: each adapter states where its cost figures
 // come from, whether a tool call can be joined to the turn that paid for it and
 // how well it is verified, so the statement cannot drift from the code it
-// describes (issue #72, decision 1).
+// describes (issue #72, decision 1). The aggregation itself is the registry's -
+// Registry.Capabilities, keyed by ad.ID() - since a consumer of the public API
+// wants that map too and should not have to write the loop.
 //
-// Retired tools go in FIRST and are therefore overwritten by any adapter that
-// claims the same id. usage_events is append-only, so a ledger still holds rows
-// for tools nothing collects any more and the dashboard still has to describe
-// them; a tool that comes back to life is described by its adapter, and the list
-// of the retired stays a claim about what is NOT registered rather than a second
-// opinion about what is (TestRetiredToolsHaveNoAdapter).
-//
-// Keyed by ad.ID() rather than by the declaration's own Tool field: the registry
-// is the authority on which tool an adapter is, and the two agreeing is a
-// property worth testing rather than assuming (TestCapabilityDeclarationsNameTheirOwnTool).
+// What is left here is the part only this CLI knows: retired tools go in FIRST
+// and are therefore overwritten by any adapter that claims the same id.
+// usage_events is append-only, so a ledger still holds rows for tools nothing
+// collects any more and the dashboard still has to describe them; a tool that
+// comes back to life is described by its adapter, and the list of the retired
+// stays a claim about what is NOT registered rather than a second opinion about
+// what is (TestRetiredToolsHaveNoAdapter).
 func toolCapabilities() map[string]model.ToolCapability {
 	out := make(map[string]model.ToolCapability)
 	for _, c := range model.RetiredCapabilities() {
 		out[c.Tool] = c
 	}
-	for _, ad := range defaultRegistry().All() {
-		out[ad.ID()] = ad.Capabilities()
+	for tool, decl := range defaultRegistry().Capabilities() {
+		out[tool] = decl
 	}
 	return out
 }

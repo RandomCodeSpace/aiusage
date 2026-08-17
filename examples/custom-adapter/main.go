@@ -153,10 +153,12 @@ func run() error {
 	// registry holding no state, so appending to its slice is safe.
 	reg := adapter.NewRegistry(append(all.Default().All(), exampleAdapter{})...)
 
-	if ad, ok := reg.Get(exampleTool); ok {
-		c := ad.Capabilities()
-		fmt.Printf("registered %s (%s): cost=%s activity=%s reasoning=%s tier=%s\n\n",
-			ad.ID(), ad.DisplayName(), c.Cost, c.Activity, c.Reasoning, c.Tier)
+	// The adapter declares, the registry aggregates: Capabilities() returns
+	// every registered declaration keyed by tool id, so a consumer describing
+	// the tools it can report on never keeps a table of its own.
+	if c, ok := reg.Capabilities()[exampleTool]; ok {
+		fmt.Printf("registered %s: cost=%s activity=%s reasoning=%s tier=%s\n\n",
+			c.Tool, c.Cost, c.Activity, c.Reasoning, c.Tier)
 	}
 
 	// Home points at an EMPTY directory so the built-in adapters discover

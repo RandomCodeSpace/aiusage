@@ -284,6 +284,27 @@ func NewRegistry(as ...Adapter) *Registry { return &Registry{adapters: as} }
 // All returns every registered adapter.
 func (r *Registry) All() []Adapter { return r.adapters }
 
+// Capabilities returns every registered adapter's own declaration, keyed by
+// tool id. The adapter DECLARES and the registry AGGREGATES (issue #72,
+// decision 1): there is no table anywhere that has to be edited when a
+// sixteenth adapter arrives, because an adapter that does not declare itself
+// does not compile.
+//
+// Keyed by ad.ID() rather than by the declaration's own Tool field: the registry
+// is the authority on which tool an adapter IS, and the two agreeing is a
+// property worth testing rather than assuming. A caller that also has to
+// describe tools NO adapter collects any more - a ledger is append-only, so
+// rows outlive the adapter that wrote them - lays model.RetiredCapabilities()
+// down first and lets this map overwrite it, so a tool that comes back to life
+// is described by its adapter rather than by the list of the departed.
+func (r *Registry) Capabilities() map[string]model.ToolCapability {
+	out := make(map[string]model.ToolCapability, len(r.adapters))
+	for _, a := range r.adapters {
+		out[a.ID()] = a.Capabilities()
+	}
+	return out
+}
+
 // Get returns the adapter for id, if registered.
 func (r *Registry) Get(id string) (Adapter, bool) {
 	for _, a := range r.adapters {

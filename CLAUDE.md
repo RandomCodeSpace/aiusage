@@ -566,11 +566,16 @@ share, and promoting the tree they sat in would have made them API surface
 nobody decided on.
 
 An adapter declares its own capabilities (`Capabilities() model.ToolCapability`,
-a required interface method) rather than being described by a table elsewhere.
-The value type lives in `model` because `internal/tui` renders it and may not
-import `adapter`; the declarations reach the TUI the way the discovery counts
-do, through `cmd` reading the registry into a map and injecting it via
-`tui.Options`.
+a required interface method) rather than being described by a table elsewhere,
+and `Registry.Capabilities()` aggregates them into a map keyed by the
+REGISTERED id — the declaration's own `Tool` field never moves the entry, since
+the registry is the authority on which tool an adapter is. The value type lives
+in `model` because `internal/tui` renders it and may not import `adapter`; the
+declarations reach the TUI the way the discovery counts do, through `cmd`
+calling that method and injecting the map via `tui.Options`. `cmd` lays
+`model.RetiredCapabilities()` down FIRST and lets the registry's map overwrite
+it: a ledger is append-only, so it still holds rows for tools nothing collects
+any more, and a tool that comes back to life must be described by its adapter.
 
 `internal/service` sits off to the side: it may import stdlib and nothing else —
 never collect/store/report/tui. It knows how a machine supervises processes, not
