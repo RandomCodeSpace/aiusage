@@ -68,6 +68,30 @@
 // beside the code that depends on it and lets a method be added here without
 // breaking an implementation nobody in this module wrote.
 //
+// # TWO ERRORS WORTH BRANCHING ON, AND NO MORE
+//
+// A sentinel is a promise: once it exists, code outside this module tests for
+// it and it can never be retired quietly. So this package exports one where a
+// caller can do something different because of it, and nothing where it cannot
+// (issue #72, decision 6). Everything else is a plain wrapped error carrying a
+// message a person reads.
+//
+// ErrSchemaNewer, matched with errors.Is, is the database written by a NEWER
+// build than the binary opening it. Both handles refuse it - Open will not
+// migrate a schema it does not understand, OpenReadOnly will not serve one -
+// and the answer is the same either way: upgrade. An OLDER database is
+// deliberately not this error; Open migrates it, and through the read handle it
+// asks for the opposite action.
+//
+// SkippedRowsError, matched with errors.As, is the partial success described
+// above: a non-nil error WHOSE COUNTS ARE STILL TRUE. It names the table, how
+// many rows were offered, and every row that was refused with its own dedup key
+// and cause, so a caller can log what was rejected instead of parsing a
+// message. Unwrap reaches the first row's cause, so errors.Is still finds the
+// CHECK violation or driver error underneath. A caller that treats a non-nil
+// error from a batch write as "nothing happened" under-reports a pass that
+// mostly worked.
+//
 // # A READ HANDLE IS SAFE AGAINST A LIVE COLLECTOR
 //
 // This is a promise of the API, not an accident of the implementation, and it

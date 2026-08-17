@@ -164,7 +164,11 @@ func ensureSchema(ctx context.Context, db *sql.DB, path string) error {
 	case current < SchemaVersion:
 		return applyMigrations(ctx, db, current, SchemaVersion, migrations)
 	default:
-		return fmt.Errorf("store: database schema is v%d, newer than this binary's v%d; upgrade aiusage to open it", current, SchemaVersion)
+		// Wrapped in ErrSchemaNewer so a caller can branch on the one open
+		// failure it can do something about; the message keeps both versions,
+		// which is what a person reading it needs.
+		return fmt.Errorf("%w: %s records v%d, this binary's is v%d; upgrade aiusage to open it",
+			ErrSchemaNewer, path, current, SchemaVersion)
 	}
 }
 

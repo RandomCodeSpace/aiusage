@@ -522,22 +522,13 @@ func insertActivityTx(ctx context.Context, tx *sql.Tx, acts []model.ActivityEven
 	}
 	defer stmt.Close()
 
-	var (
-		skipped   int
-		firstSkip error
-	)
-	skip := func(rowErr error) {
-		skipped++
-		if firstSkip == nil {
-			firstSkip = rowErr
-		}
-	}
+	skips := rowSkips{table: tableActivityEvents}
 	for _, a := range acts {
 		if err := ctx.Err(); err != nil {
 			return inserted, nil, err
 		}
 		if a.DedupKey == "" {
-			skip(fmt.Errorf("store: activity with empty dedup key (tool=%s name=%s)", a.Tool, a.Name))
+			skips.add(a.DedupKey, fmt.Errorf("store: activity with empty dedup key (tool=%s name=%s)", a.Tool, a.Name))
 			continue
 		}
 		calls := a.CallsInTurn
@@ -551,17 +542,14 @@ func insertActivityTx(ctx context.Context, tx *sql.Tx, acts []model.ActivityEven
 			a.TurnSeq, calls, a.SourcePath,
 		)
 		if execErr != nil {
-			skip(fmt.Errorf("store: insert activity %s: %w", a.DedupKey, execErr))
+			skips.add(a.DedupKey, fmt.Errorf("store: insert activity %s: %w", a.DedupKey, execErr))
 			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
 		}
 	}
-	if skipped > 0 {
-		return inserted, fmt.Errorf("store: skipped %d of %d activity row(s); first: %w", skipped, len(acts), firstSkip), nil
-	}
-	return inserted, nil, nil
+	return inserted, skips.err(len(acts)), nil
 }
 
 // activityObservedUnix returns the observed timestamp in UTC seconds, falling

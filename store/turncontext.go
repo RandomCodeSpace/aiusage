@@ -725,22 +725,13 @@ func insertTurnContextsTx(ctx context.Context, tx *sql.Tx, ctxs []model.TurnCont
 	}
 	defer stmt.Close()
 
-	var (
-		skipped   int
-		firstSkip error
-	)
-	skip := func(rowErr error) {
-		skipped++
-		if firstSkip == nil {
-			firstSkip = rowErr
-		}
-	}
+	skips := rowSkips{table: tableTurnContext}
 	for _, c := range ctxs {
 		if err := ctx.Err(); err != nil {
 			return inserted, nil, err
 		}
 		if c.UsageDedupKey == "" {
-			skip(fmt.Errorf("store: turn context with empty usage dedup key (tool=%s dimension=%s value=%s)", c.Tool, c.Dimension, c.Value))
+			skips.add(c.UsageDedupKey, fmt.Errorf("store: turn context with empty usage dedup key (tool=%s dimension=%s value=%s)", c.Tool, c.Dimension, c.Value))
 			continue
 		}
 		obs := c.ObservedTime
@@ -752,15 +743,12 @@ func insertTurnContextsTx(ctx context.Context, tx *sql.Tx, ctxs []model.TurnCont
 			c.EventTime.UTC().Unix(), obs.UTC().Unix(), c.SourcePath,
 		)
 		if execErr != nil {
-			skip(fmt.Errorf("store: insert turn context %s/%s: %w", c.UsageDedupKey, c.Dimension, execErr))
+			skips.add(c.UsageDedupKey, fmt.Errorf("store: insert turn context %s/%s: %w", c.UsageDedupKey, c.Dimension, execErr))
 			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
 		}
 	}
-	if skipped > 0 {
-		return inserted, fmt.Errorf("store: skipped %d of %d turn context row(s); first: %w", skipped, len(ctxs), firstSkip), nil
-	}
-	return inserted, nil, nil
+	return inserted, skips.err(len(ctxs)), nil
 }

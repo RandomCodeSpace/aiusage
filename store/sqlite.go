@@ -138,6 +138,15 @@ func OpenReadOnly(path string) (*Reader, error) {
 	}
 	if version != SchemaVersion {
 		db.Close()
+		// A NEWER database is the same refusal Open gives and carries the same
+		// sentinel: whichever handle a caller asked for, the answer is to
+		// upgrade the binary. An OLDER one is deliberately NOT ErrSchemaNewer -
+		// the instruction is the opposite, and it is the plain message below.
+		if version > SchemaVersion {
+			return nil, fmt.Errorf(
+				"%w: %s records schema v%d, this binary's is v%d; a read-only handle never migrates, so run a matching aiusage build",
+				ErrSchemaNewer, path, version, SchemaVersion)
+		}
 		return nil, fmt.Errorf(
 			"store: %s records schema v%d, this binary's is v%d; a read-only handle never migrates, so open it read-write once (or run a matching aiusage build) before serving it",
 			path, version, SchemaVersion)
@@ -240,22 +249,15 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 	defer stmt.Close()
 
 	var (
-		skipped   int
-		firstSkip error
-		roll      rollupDelta
+		skips = rowSkips{table: tableUsageEvents}
+		roll  rollupDelta
 	)
-	skip := func(rowErr error) {
-		skipped++
-		if firstSkip == nil {
-			firstSkip = rowErr
-		}
-	}
 	for _, e := range events {
 		if err := ctx.Err(); err != nil {
 			return inserted, nil, err
 		}
 		if e.DedupKey == "" {
-			skip(fmt.Errorf("store: event with empty dedup key (tool=%s)", e.Tool))
+			skips.add(e.DedupKey, fmt.Errorf("store: event with empty dedup key (tool=%s)", e.Tool))
 			continue
 		}
 		kind := e.Kind
@@ -271,7 +273,7 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 			e.Provider, e.ServiceTier, nullCost(e), e.PriceSource,
 		)
 		if execErr != nil {
-			skip(fmt.Errorf("store: insert event %s: %w", e.DedupKey, execErr))
+			skips.add(e.DedupKey, fmt.Errorf("store: insert event %s: %w", e.DedupKey, execErr))
 			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
@@ -286,10 +288,7 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 	if err := roll.apply(ctx, tx); err != nil {
 		return inserted, nil, err
 	}
-	if skipped > 0 {
-		return inserted, fmt.Errorf("store: skipped %d of %d event(s); first: %w", skipped, len(events), firstSkip), nil
-	}
-	return inserted, nil, nil
+	return inserted, skips.err(len(events)), nil
 }
 
 // applySnapshotFault, when non-nil, runs between the event insert and the
