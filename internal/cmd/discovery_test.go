@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // A discovery sweep that never gets to run must report every tool as unknown -

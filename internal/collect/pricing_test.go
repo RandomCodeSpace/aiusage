@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // tokenPricer values a charge at one micro-USD per non-cache token, refusing

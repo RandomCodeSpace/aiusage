@@ -3,7 +3,7 @@ package views
 import (
 	"charm.land/lipgloss/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // empty.go renders the three honest empty treatments. "Zero tokens", "no

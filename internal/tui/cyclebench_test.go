@@ -12,8 +12,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // cyclebench_test.go measures the `t` (range cycle) key against a REAL on-disk

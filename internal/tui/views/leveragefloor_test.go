@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // hourInputBuckets builds n consecutive hour buckets whose input clears the

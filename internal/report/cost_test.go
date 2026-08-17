@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/pricing"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/pricing"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // fixedPricer values every charge at one micro-USD per token, except for the

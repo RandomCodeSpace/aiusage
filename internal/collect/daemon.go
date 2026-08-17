@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // DaemonOptions configures RunDaemon.

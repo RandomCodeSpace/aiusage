@@ -6,7 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // activity.go renders the Activity tab: what the agent actually DID — which

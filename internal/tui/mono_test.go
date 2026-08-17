@@ -8,8 +8,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // mono_test.go is the monochrome-legibility gate for the visual design language

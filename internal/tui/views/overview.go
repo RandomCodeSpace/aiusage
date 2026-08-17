@@ -6,7 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // OverviewData is everything the Overview view needs to render one frame. The

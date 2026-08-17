@@ -17,7 +17,7 @@ import (
 	"charm.land/lipgloss/v2/compat"
 	zone "github.com/lrstanley/bubblezone/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // Ctx carries the styling and formatting the views need, injected by the root

@@ -6,8 +6,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // wide is a roomy layout: these tests are about the cost tile's fit rule, not

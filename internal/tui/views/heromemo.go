@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // HeroMemo caches the Overview's rendered braille hero chart and KPI sparkline

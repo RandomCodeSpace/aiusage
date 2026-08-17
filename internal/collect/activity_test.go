@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // activityObs builds an observation of one turn that cost `total` tokens and

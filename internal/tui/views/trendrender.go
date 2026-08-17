@@ -11,7 +11,7 @@ import (
 	"github.com/NimbleMarkets/ntcharts/v2/canvas/runes"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // trendrender.go draws the hero's trend body: three self-scaled heat lanes,

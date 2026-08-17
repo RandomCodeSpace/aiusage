@@ -12,7 +12,7 @@
 //  4. nothing. A model no rung can price is UNPRICED, never $0.00.
 //
 // Integer micro-USD is the unit everywhere: it sums exactly across millions of
-// rows, where float dollars drift. The package imports only internal/model.
+// rows, where float dollars drift. The package imports only model.
 package pricing
 
 import (

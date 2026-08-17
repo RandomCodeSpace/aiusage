@@ -8,7 +8,7 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // stubDaemon replaces the collection loop and the exec syscall for the duration

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // pricedSource is fakeData with cost qualifiers on every bucket: some rows

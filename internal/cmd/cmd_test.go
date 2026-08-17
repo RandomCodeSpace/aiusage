@@ -15,7 +15,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // claudeFixture is one realistic Claude Code transcript line: a Direct-shape

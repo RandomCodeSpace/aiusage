@@ -11,8 +11,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 var ansiWindow = regexp.MustCompile("\x1b\\[[0-9;]*m")

@@ -8,7 +8,7 @@ import (
 
 // capability_test.go is the seam that keeps model.ToolCapabilities honest.
 //
-// The declarations live in internal/model because internal/tui renders them and
+// The declarations live in model because internal/tui renders them and
 // may not import internal/adapter (layering). That puts them one package away
 // from the source they describe, so they can drift — an adapter can be
 // registered, or learn to read a vendor price, without anyone touching the

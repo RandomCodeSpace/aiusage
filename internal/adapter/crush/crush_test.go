@@ -844,7 +844,7 @@ func TestCollectHandlesAPathWithSpaces(t *testing.T) {
 // Stamping a model would let the collector re-price the event: a zero-token
 // charge against a model the price table knows resolves to 0 with ok=true, and
 // the stamped 0 replaces the harness's own figure in an append-only row.
-// Verified against internal/pricing; see the package doc.
+// Verified against pricing; see the package doc.
 func TestModelIsNeverStamped(t *testing.T) {
 	dbPath := buildDB(t, t.TempDir(), "costly.sql")
 	for _, e := range collect(t, dbPath, "/proj").Events {

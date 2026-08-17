@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // TestScrubCompositionBracketsLocalDay pins a non-UTC zone and proves the

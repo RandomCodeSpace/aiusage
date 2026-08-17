@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // The hero's leverage floor is configurable (issue #39), which is only true if

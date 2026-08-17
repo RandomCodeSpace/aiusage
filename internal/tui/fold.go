@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/RandomCodeSpace/aiusage/internal/store"
+import "github.com/RandomCodeSpace/aiusage/store"
 
 // fold.go collapses the by-tool long tail. Sixteen tool ids are supported and a
 // real machine runs several of them for a few hundred tokens a week, so an

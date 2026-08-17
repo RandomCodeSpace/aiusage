@@ -38,8 +38,8 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/qwencode"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/reasonix"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // globalFlags holds the values bound to the root command's persistent flags.

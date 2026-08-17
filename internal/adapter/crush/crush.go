@@ -72,7 +72,7 @@
 // collector re-prices every event it stores, and pricing a charge of zero
 // tokens against a model the price table knows returns (0, "embedded-...",
 // ok=true), which overwrites the harness-reported cost with a stamped 0 —
-// verified against internal/pricing. An empty model is not looked up at all
+// verified against pricing. An empty model is not looked up at all
 // (pricing.lookupKeys returns nothing for an empty name), so the cost survives.
 // Provider is stamped, since a lookup keyed on provider alone never happens.
 // When pricing learns to refuse a zero-token charge outright, the model can be

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // breakdownSummary groups two tools that account for reasoning differently:

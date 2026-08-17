@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // dimSource records every turn-context dimension a load asks the store for, so

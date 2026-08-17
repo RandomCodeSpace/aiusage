@@ -6,7 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // memoTestCtx builds the minimal chart-capable Ctx (non-zero adaptive colors —

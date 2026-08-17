@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // realStore opens a SQLite store in a temp dir, so these tests drive the
@@ -27,7 +27,7 @@ func realStore(t *testing.T) *store.SQLite {
 // assertCycleRollupMatchesLedger compares the two tables through store queries
 // on both sides, so SQLite does the local bucketing for the ledger and the
 // rollup alike. Events are placed on exact UTC hour starts, which makes the
-// comparison independent of the system zone (see internal/store/rollup_test.go).
+// comparison independent of the system zone (see store/rollup_test.go).
 func assertCycleRollupMatchesLedger(t *testing.T, st *store.SQLite, dims ...string) {
 	t.Helper()
 	ctx := context.Background()

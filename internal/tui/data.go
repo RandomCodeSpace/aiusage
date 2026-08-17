@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // Range is a selectable reporting window cycled with the `t` key.

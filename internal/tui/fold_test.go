@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 var ansiFold = regexp.MustCompile("\x1b\\[[0-9;:]*m")

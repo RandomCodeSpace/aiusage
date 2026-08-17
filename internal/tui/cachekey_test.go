@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // keyFilter is a filter that exercises every field cacheKey encodes, including

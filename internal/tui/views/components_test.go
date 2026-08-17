@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // Split exposes the four raw DB columns. Reasoning must NOT fold into output

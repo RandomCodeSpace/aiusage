@@ -10,7 +10,7 @@ import (
 	"github.com/NimbleMarkets/ntcharts/v2/linechart"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // chartstyle.go centralises construction of ntcharts widgets from

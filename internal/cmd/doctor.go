@@ -14,8 +14,8 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // adapterNotes are operator-facing caveats surfaced by `doctor` for adapters

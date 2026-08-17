@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // timeLayout is the export timestamp format: RFC3339 in UTC, machine-stable and

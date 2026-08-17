@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // freshness_test.go covers issue #7: the freshness enum (J-cut chip contract),

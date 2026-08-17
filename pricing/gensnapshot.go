@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/pricing"
+	"github.com/RandomCodeSpace/aiusage/pricing"
 )
 
 // filterDesc is recorded in _meta so the snapshot documents how it was cut. It

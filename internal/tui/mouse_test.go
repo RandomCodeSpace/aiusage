@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // mouse_test.go drives the mouse-first input model (issues #23 / #24) through

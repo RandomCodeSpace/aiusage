@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // nowFn yields the cycle's observation timestamp. It is a package-level seam so

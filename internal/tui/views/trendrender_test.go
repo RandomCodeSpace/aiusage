@@ -10,7 +10,7 @@ import (
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
 
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // trendrender_test.go pins the hero's heat lanes: the slab is uniform, the

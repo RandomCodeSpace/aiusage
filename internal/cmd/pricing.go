@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
-	"github.com/RandomCodeSpace/aiusage/internal/pricing"
 	"github.com/RandomCodeSpace/aiusage/internal/report"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/pricing"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // newPricer builds the pricing ladder for the resolved config: the config

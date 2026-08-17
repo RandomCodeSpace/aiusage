@@ -3,9 +3,9 @@ package report
 import (
 	"strings"
 
-	"github.com/RandomCodeSpace/aiusage/internal/pricing"
-	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/model"
+	"github.com/RandomCodeSpace/aiusage/pricing"
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // Cost is the resolved display cost of one bucket.
