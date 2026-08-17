@@ -23,7 +23,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
-	"github.com/RandomCodeSpace/aiusage/adapter/agy"
+	"github.com/RandomCodeSpace/aiusage/adapter/all"
 	"github.com/RandomCodeSpace/aiusage/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/adapter/clinecli"
 	"github.com/RandomCodeSpace/aiusage/adapter/codex"
@@ -327,32 +327,16 @@ func toolCapabilities() map[string]model.ToolCapability {
 
 // defaultRegistry returns the registry wired with every built-in adapter.
 //
-// The wiring lives here (in cmd) rather than in package adapter because each
-// sub-adapter package imports aiusage/adapter for the Adapter contract
-// types; having package adapter import them back would create an import cycle.
-// cmd is the natural composition root, so it owns the concrete wiring.
-func defaultRegistry() *adapter.Registry {
-	return adapter.NewRegistry(
-		claudecode.New(),
-		codex.New(),
-		copilot.New(),
-		opencode.New(),
-		hermes.New(),
-		agy.New(),
-		clinecli.New(),
-		crush.New(),
-		dsh.New(),
-		goose.New(),
-		kimicode.New(),
-		// Pi and OpenClaw are two harnesses over one session format, so one
-		// package serves both. They are separate registry entries because they
-		// are separate tools: their rows must never be summed into one.
-		pi.NewPi(),
-		pi.NewOpenClaw(),
-		qwencode.New(),
-		reasonix.New(),
-	)
-}
+// The list itself lives in adapter/all, not here: cmd was only ever holding it
+// because package adapter cannot import the packages that import it, and that
+// is an argument for a SEPARATE package rather than for the CLI owning the
+// wiring (issue #73, decision 2). cmd is now its first consumer, on the same
+// terms as anyone else's.
+//
+// The indirection stays because cmd still has a use for it that a library does
+// not: one place to swap the registry in tests (onceRegistry) and one name for
+// every call site to reach it by.
+func defaultRegistry() *adapter.Registry { return all.Default() }
 
 // discoveryEnv names every environment variable that moves WHAT the adapters
 // read, as opposed to where aiusage keeps its own files (config.PathEnvNames
