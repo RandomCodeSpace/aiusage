@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // act builds an activity row tied to a usage event's dedup key.

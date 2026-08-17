@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // seedForReadOnly creates a current-version database holding two events and

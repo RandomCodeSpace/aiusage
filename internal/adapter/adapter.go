@@ -10,7 +10,7 @@ package adapter
 import (
 	"context"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // Source is a concrete usage source discovered by an adapter — typically a

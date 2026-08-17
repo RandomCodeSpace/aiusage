@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // secretSkillInput is planted in the input of every Skill call and in the

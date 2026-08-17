@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // makeStateDB creates a Hermes-shaped state.db with a sessions table and runs

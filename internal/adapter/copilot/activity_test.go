@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // The fixtures below copy the SHAPE of a live export

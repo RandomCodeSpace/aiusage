@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // solRates are gpt-5.6-sol's published rates, base and long-context card, copied

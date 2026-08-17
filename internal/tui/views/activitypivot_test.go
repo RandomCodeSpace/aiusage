@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // turnContextTestData is the Activity tab in a turn-context pivot: a ranked page

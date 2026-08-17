@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // capability_test.go is the seam that keeps model.ToolCapabilities honest.

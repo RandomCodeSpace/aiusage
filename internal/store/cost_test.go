@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 var costRef = time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)

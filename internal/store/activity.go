@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // activityTableDDL is activity_events' CREATE TABLE as the v5 migration applies

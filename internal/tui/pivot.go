@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/RandomCodeSpace/aiusage/internal/model"
+import "github.com/RandomCodeSpace/aiusage/model"
 
 // pivot.go carries the Activity tab's reading selector. Six readings share one
 // tab: the activity ledger's per-invocation view, and the five turn-context

@@ -31,7 +31,7 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/adapter/geminishape"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // metaProject labels every Antigravity turn (no cwd is recorded here).

@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // sentinel is planted in every content-shaped field of the planted fixture. Any

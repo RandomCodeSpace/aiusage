@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // opExecuteTool is the gen_ai.operation.name of a tool-call span. It is the

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // collectActivityAll runs discovery + collection and returns every activity row.

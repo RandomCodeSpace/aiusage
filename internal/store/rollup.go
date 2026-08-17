@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // rollupTableDDL is the rollup's CREATE TABLE as the v4 migration applies it.

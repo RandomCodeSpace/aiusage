@@ -49,8 +49,8 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/tokenutil"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // attrMarker fast-skips JSONL lines that cannot carry usage attributes.

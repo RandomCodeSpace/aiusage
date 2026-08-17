@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // TestCheckpointRoundTrip verifies upsert-through-ApplyEvents and read-back,

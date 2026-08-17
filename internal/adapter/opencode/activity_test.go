@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // opencodeSecret is planted in every tool part's input and output. No activity

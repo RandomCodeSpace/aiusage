@@ -94,7 +94,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // turnContextTableDDL is usage_turn_context's CREATE TABLE as the v7 migration

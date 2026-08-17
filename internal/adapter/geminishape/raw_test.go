@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // telemetryLine is a Gemini CLI telemetry record padded with the kind of

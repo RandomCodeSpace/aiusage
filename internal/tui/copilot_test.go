@@ -6,9 +6,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
 	"github.com/RandomCodeSpace/aiusage/internal/store"
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // byToolModel loads a By-Tool model over fakeData — whose tool rows are

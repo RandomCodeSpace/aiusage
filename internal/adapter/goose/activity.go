@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // activityQuery reads the tool calls goose recorded above the message

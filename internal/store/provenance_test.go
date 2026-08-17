@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 var provRef = time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)

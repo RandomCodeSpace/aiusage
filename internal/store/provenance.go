@@ -3,7 +3,7 @@ package store
 import (
 	"strings"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // provenance.go builds the ONE SQL predicate that separates a vendor-reported

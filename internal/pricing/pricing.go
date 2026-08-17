@@ -19,7 +19,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // SourceOverride is the price_source stamped when a config override priced the

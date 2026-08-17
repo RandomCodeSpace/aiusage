@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // secret is planted in EVERY field of the session format that can hold content.

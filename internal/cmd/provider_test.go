@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // TestSummaryByProvider is the issue #38 CLI wiring: --by provider used to be

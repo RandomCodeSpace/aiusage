@@ -77,7 +77,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // HomeEnv names the environment variable that moves the DSH home, and with it

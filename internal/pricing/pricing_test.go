@@ -3,7 +3,7 @@ package pricing
 import (
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // TestCostRoundsHalfUp pins the micro-USD rounding rule. Sub-micro fractions

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // turnCtx builds a turn-context row for a usage event's dedup key.

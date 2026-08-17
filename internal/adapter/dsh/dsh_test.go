@@ -14,7 +14,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/model"
+	"github.com/RandomCodeSpace/aiusage/model"
 )
 
 // The fixture is a REAL DSH session captured on this machine — a two-step turn
