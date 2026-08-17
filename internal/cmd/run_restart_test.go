@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/RandomCodeSpace/aiusage/internal/adapter"
+	"github.com/RandomCodeSpace/aiusage/adapter"
 	"github.com/RandomCodeSpace/aiusage/internal/collect"
 	"github.com/RandomCodeSpace/aiusage/store"
 )

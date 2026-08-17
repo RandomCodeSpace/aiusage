@@ -33,7 +33,7 @@ import (
 // Sources carries the adapter-discovery result — how many read-only sources
 // each tool id has on this machine — so the TUI can state whether a tool has a
 // data source at all. It is threaded in here rather than discovered by the TUI
-// because internal/tui must not import internal/adapter (layering), the same
+// because internal/tui must not import adapter (layering), the same
 // reason CollectInterval arrives from the caller. A tool MISSING from the map
 // is unknown, not zero: an adapter whose discovery failed says nothing.
 // LeverageFloor is the configured per-bucket input floor for the hero's

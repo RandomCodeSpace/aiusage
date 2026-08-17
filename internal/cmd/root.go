@@ -22,21 +22,21 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/RandomCodeSpace/aiusage/internal/adapter"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/agy"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/claudecode"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/clinecli"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/codex"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/copilot"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/crush"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/dsh"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/goose"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/hermes"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/kimicode"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/opencode"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/pi"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/qwencode"
-	"github.com/RandomCodeSpace/aiusage/internal/adapter/reasonix"
+	"github.com/RandomCodeSpace/aiusage/adapter"
+	"github.com/RandomCodeSpace/aiusage/adapter/agy"
+	"github.com/RandomCodeSpace/aiusage/adapter/claudecode"
+	"github.com/RandomCodeSpace/aiusage/adapter/clinecli"
+	"github.com/RandomCodeSpace/aiusage/adapter/codex"
+	"github.com/RandomCodeSpace/aiusage/adapter/copilot"
+	"github.com/RandomCodeSpace/aiusage/adapter/crush"
+	"github.com/RandomCodeSpace/aiusage/adapter/dsh"
+	"github.com/RandomCodeSpace/aiusage/adapter/goose"
+	"github.com/RandomCodeSpace/aiusage/adapter/hermes"
+	"github.com/RandomCodeSpace/aiusage/adapter/kimicode"
+	"github.com/RandomCodeSpace/aiusage/adapter/opencode"
+	"github.com/RandomCodeSpace/aiusage/adapter/pi"
+	"github.com/RandomCodeSpace/aiusage/adapter/qwencode"
+	"github.com/RandomCodeSpace/aiusage/adapter/reasonix"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
 	"github.com/RandomCodeSpace/aiusage/store"
@@ -262,7 +262,7 @@ func discoverConfig(cfg config.Config) adapter.DiscoverConfig {
 // prints. The TUI takes it at startup so a statement like "no data source" is a
 // fact about the machine instead of an inference from an empty range
 // (issue #44); it is resolved here because cmd is the composition root and
-// internal/tui must not import internal/adapter.
+// internal/tui must not import adapter.
 //
 // An adapter whose discovery ERRORS is left out of the map entirely: unknown is
 // not zero, and a failed glob must not be reported as an absent source. A
@@ -295,7 +295,7 @@ func discoveredSources(ctx context.Context, cfg config.Config) map[string]int {
 // defaultRegistry returns the registry wired with every built-in adapter.
 //
 // The wiring lives here (in cmd) rather than in package adapter because each
-// sub-adapter package imports aiusage/internal/adapter for the Adapter contract
+// sub-adapter package imports aiusage/adapter for the Adapter contract
 // types; having package adapter import them back would create an import cycle.
 // cmd is the natural composition root, so it owns the concrete wiring.
 func defaultRegistry() *adapter.Registry {

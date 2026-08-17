@@ -406,13 +406,13 @@ func TestDiscoveryEnvCoversEveryAdapterVariable(t *testing.T) {
 	}
 }
 
-// adapterEnvLookups parses every non-test source file under internal/adapter and
+// adapterEnvLookups parses every non-test source file under adapter and
 // returns each environment variable it reads. Constants are resolved within
 // their own package, which is how the adapters spell these (a bare literal and
 // a package constant are both used today).
 func adapterEnvLookups(t *testing.T) []envLookup {
 	t.Helper()
-	const root = "../adapter"
+	const root = "../../adapter"
 
 	fset := token.NewFileSet()
 	byDir := map[string][]*ast.File{}

@@ -47,7 +47,7 @@ func TestDiscoveredSourcesIsBounded(t *testing.T) {
 }
 
 // The sweep above is only worth running if its result reaches the dashboard.
-// cmd is the composition root - internal/tui must not import internal/adapter -
+// cmd is the composition root - internal/tui must not import adapter -
 // so the counts travel exactly one way: the Sources argument of the tui.Options
 // the root command hands to Run. Nothing about that argument is load-bearing at
 // compile time, so this drives the real command and asserts the VALUES that

@@ -7,7 +7,7 @@ package model
 // CONTEXT.md, in machine-readable form.
 //
 // IT LIVES IN model AND NOT IN adapter. The dashboard is what shows it, and
-// internal/tui may not import internal/adapter (layering: model < adapter,
+// internal/tui may not import adapter (layering: model < adapter,
 // store < collect, report, tui). model is the shared floor both sides already
 // stand on, which is the same reason FormatCost and the reasoning modes are
 // here.

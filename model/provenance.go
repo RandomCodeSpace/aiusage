@@ -39,10 +39,10 @@ const (
 // vendorPriceSources is the exact ALLOW-LIST of adapter-stamped price sources.
 // Verified against the adapter sources that stamp them:
 //
-//	copilot-nano-aiu    internal/adapter/copilot/cost.go  (PriceSourceAIU)
-//	crush-session-cost  internal/adapter/crush/crush.go   (PriceSourceReported)
-//	pi-reported         internal/adapter/pi/pi.go         (a.tool + "-reported")
-//	openclaw-reported   internal/adapter/pi/pi.go         (the same expression,
+//	copilot-nano-aiu    adapter/copilot/cost.go  (PriceSourceAIU)
+//	crush-session-cost  adapter/crush/crush.go   (PriceSourceReported)
+//	pi-reported         adapter/pi/pi.go         (a.tool + "-reported")
+//	openclaw-reported   adapter/pi/pi.go         (the same expression,
 //	                                                       for the other tool)
 //
 // It is an allow-list and not a prefix match on tool ids, for the same reason
@@ -61,7 +61,7 @@ var vendorPriceSources = []string{
 // goose is the only one: it labels a cost with the provenance goose itself
 // recorded ('provider_reported', 'estimated', 'carried_forward', ...) under a
 // "goose-" prefix, and stamps a bare "goose" when the column is empty
-// (internal/adapter/goose/goose.go, priceSource). A family matches the bare
+// (adapter/goose/goose.go, priceSource). A family matches the bare
 // name and the name followed by "-".
 //
 // Family names must contain no SQL LIKE metacharacter: store builds a LIKE
