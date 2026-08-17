@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -418,17 +419,13 @@ func (l *Ledger) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, e
 	if err := tx.Commit(); err != nil {
 		return out, fmt.Errorf("store: commit: %w", err)
 	}
-	// A usage skip is reported ahead of an activity skip: the ledger is the
-	// authoritative half, and a caller that logs one line should see that one.
-	// The turn-context skip comes last for the same reason — it is the most
-	// derived of the three.
-	if skipErr != nil {
-		return out, skipErr
-	}
-	if actSkipErr != nil {
-		return out, actSkipErr
-	}
-	return out, ctxSkipErr
+	// All three partial-success reports survive: errors.Join keeps each
+	// SkippedRowsError reachable through errors.As, so a batch that skipped a
+	// usage row AND an activity row loses neither detail. The usage skip joins
+	// first — the ledger is the authoritative half, and a caller that prints
+	// the error sees that one lead — with activity next and turn context last,
+	// the most derived of the three. Join returns nil when every arm is nil.
+	return out, errors.Join(skipErr, actSkipErr, ctxSkipErr)
 }
 
 // Checkpoint returns the stored incremental state for (tool, sourcePath), or
