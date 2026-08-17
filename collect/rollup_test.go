@@ -123,7 +123,7 @@ func TestCycleMaintainsRollupThroughTheStore(t *testing.T) {
 	reg := adapter.NewRegistry(events, aggregates)
 
 	for cycle := 0; cycle < 3; cycle++ {
-		stats, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+		stats, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{})
 		if err != nil {
 			t.Fatalf("cycle %d: %v", cycle, err)
 		}
@@ -165,7 +165,7 @@ func TestCycleRebuildsRollupThatFellBehind(t *testing.T) {
 			}}
 		},
 	}
-	stats, err := RunCycle(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{})
+	stats, err := RunOnce(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestCycleRebuildsRollupThatFellBehind(t *testing.T) {
 	assertCycleRollupMatchesLedger(t, st, "hour")
 
 	// And the next pass finds nothing to repair.
-	stats, err = RunCycle(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{})
+	stats, err = RunOnce(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("second cycle: %v", err)
 	}

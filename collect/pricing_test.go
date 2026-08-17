@@ -57,7 +57,7 @@ func TestRunCycleStampsCost(t *testing.T) {
 	st := newFakeStore()
 	p := &tokenPricer{known: map[string]bool{"gpt-5": true}}
 
-	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
+	if _, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestRunCycleWithoutPricerLeavesEventsUnpriced(t *testing.T) {
 		emit: func(int) adapter.Observation { return adapter.Observation{Events: []model.UsageEvent{ev}} },
 	}
 	st := newFakeStore()
-	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	evs, _ := st.ListEvents(context.Background(), store.Filter{})
@@ -129,7 +129,7 @@ func TestSyntheticEventCarriesProviderAndCost(t *testing.T) {
 	st := newFakeStore()
 	p := &tokenPricer{known: map[string]bool{"gemini-3-flash-preview": true}}
 
-	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
+	if _, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	evs, _ := st.ListEvents(context.Background(), store.Filter{})
@@ -169,7 +169,7 @@ func TestAdapterSuppliedCostSurvivesTheLadder(t *testing.T) {
 	// The pricer knows this model and would value the same charge at 150.
 	p := &tokenPricer{known: map[string]bool{"gpt-5": true}}
 
-	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
+	if _, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithPricer(p)); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	evs, _ := st.ListEvents(context.Background(), store.Filter{})

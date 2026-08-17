@@ -11,9 +11,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
 
 // spawnDaemon launches a detached background collection daemon (`aiusage run`).
@@ -25,9 +25,9 @@ import (
 // stderr appended to cfg.LogPath. We Start (never Wait): ensureDaemon must
 // return immediately and never block the foreground command.
 // stopDaemon signals a running daemon to exit and waits for it to release its
-// lock. It is a package-level var so tests can stub it (the real StopDaemon
+// lock. It is a package-level var so tests can stub it (the real daemon.Stop
 // blocks on the kernel lock, which a flock-based fake holds for the whole test).
-var stopDaemon = collect.StopDaemon
+var stopDaemon = daemon.Stop
 
 // daemonArgs builds the argv for the spawned `self run`.
 //
@@ -148,15 +148,15 @@ var spawnDaemon = func(cfg config.Config) error {
 // ensureDaemon makes sure a collection daemon is running for cfg, spawning a
 // detached one if not.
 //
-// Singleton + self-heal both reduce to the same flock check (collect.DaemonStatus):
-//   - if a daemon is running, the lock is held -> DaemonStatus reports running
+// Singleton + self-heal both reduce to the same flock check (daemon.Status):
+//   - if a daemon is running, the lock is held -> daemon.Status reports running
 //     -> we do nothing (no second daemon);
 //   - if no daemon is running (never started, or crashed/killed so the kernel
-//     dropped its lock), DaemonStatus reports not-running -> we spawn a fresh
+//     dropped its lock), daemon.Status reports not-running -> we spawn a fresh
 //     one. A crashed daemon's stale pidfile is harmless: the freed lock is what
 //     matters, and the new daemon overwrites the pidfile and re-takes the lock.
 //
-// Catchup is inherent: RunDaemon runs an immediate first RunCycle on startup,
+// Catchup is inherent: daemon.Run runs an immediate first RunOnce on startup,
 // so a freshly (re)spawned daemon backfills any gap before its first tick.
 //
 // Version sync: if a daemon is running but was built from a different binary
@@ -182,14 +182,14 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 	ctx, cancel := supervisionContext(ctx)
 	defer cancel()
 
-	running, pid := collect.DaemonStatus(cfg)
+	running, pid := daemon.Status(cfg)
 	if !running {
 		if superviseStart(ctx, cfg, flags, warn) {
 			return nil
 		}
 		return spawnDaemon(cfg)
 	}
-	recorded := collect.ReadDaemonVersion(cfg)
+	recorded := daemon.ReadVersion(cfg)
 	self := buildinfo.Identity()
 	// Normalised, not verbatim: the same release installed two ways spells its
 	// version differently (GoReleaser strips the leading v, the module version

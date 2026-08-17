@@ -1,4 +1,21 @@
-package collect
+// Package daemon is how THIS MACHINE supervises a collector: the pidfile and
+// its advisory lock, the recorded build identity that keeps CLI and daemon in
+// lockstep, the stop-and-wait, and the self-update watch on the executable.
+//
+// None of that is a library concern (issue #72, decision 3). Package collect
+// exports RunOnce and Run and nothing else: a consumer embedding this project
+// wants a collection pass, not a pidfile in a directory it did not choose, a
+// version stamp in a format only this CLI reads, or a SIGTERM aimed at a pid.
+// So the loop that a consumer would want is public and the machinery around it
+// is here, one level below cmd, composing collect the way any other consumer
+// would.
+//
+// It deliberately runs its OWN ticker loop rather than calling collect.Run:
+// the tick checks whether the executable was replaced BEFORE it spends another
+// cycle on superseded code, and returns ErrBinaryReplaced so the caller can exec
+// the new build. That is a lifecycle decision taken between ticks, which a plain
+// loop has no way to express.
+package daemon
 
 import (
 	"context"
@@ -13,16 +30,17 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
+	"github.com/RandomCodeSpace/aiusage/collect"
 )
 
-// DaemonOptions configures RunDaemon.
-type DaemonOptions struct {
-	Interval time.Duration // poll interval; clamped to a sane minimum
-	PIDPath  string        // path to write the pidfile; lock is PIDPath+".lock"
-	Version  string        // build identity recorded for CLI/daemon version sync
-	Logger   *log.Logger   // optional; defaults to log.Default()
-	Pricer   Pricer        // optional; stamps cost on every new event
-	NoRaw    bool          // config privacy.no_raw: store no audit payloads
+// Options configures Run.
+type Options struct {
+	Interval time.Duration  // poll interval; clamped to a sane minimum
+	PIDPath  string         // path to write the pidfile; lock is PIDPath+".lock"
+	Version  string         // build identity recorded for CLI/daemon version sync
+	Logger   *log.Logger    // optional; defaults to log.Default()
+	Pricer   collect.Pricer // optional; stamps cost on every new event
+	NoRaw    bool           // config privacy.no_raw: store no audit payloads
 	// ExecPath is the daemon's own executable, watched for replacement so an
 	// upgrade takes effect without waiting for someone to run a command. Empty
 	// disables the watch. Resolve it at startup: once the file has been replaced
@@ -36,14 +54,14 @@ type DaemonOptions struct {
 // last-resort floor.
 const minInterval = time.Second
 
-// RunDaemon runs collection cycles until ctx is cancelled. It enforces a single
+// Run runs collection cycles until ctx is cancelled. It enforces a single
 // running instance per pidfile using an advisory flock on PIDPath+".lock":
 // a second daemon sharing the same pidfile fails fast rather than double-polling.
 //
 // Lifecycle: acquire lock -> write pid -> run one cycle immediately -> tick every
 // Interval. On ctx cancellation the in-flight cycle is allowed to finish, the
 // pidfile is removed, and the lock released. Per-cycle stats are logged.
-func RunDaemon(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.DiscoverConfig, opt DaemonOptions) error {
+func Run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapter.DiscoverConfig, opt Options) error {
 	logger := opt.Logger
 	if logger == nil {
 		logger = log.Default()
@@ -66,20 +84,20 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.
 
 	// Record this daemon's build identity so a CLI of a different build detects
 	// the mismatch and restarts us (keeping CLI + daemon in lockstep).
-	writeDaemonVersion(opt.PIDPath, opt.Version)
-	defer os.Remove(daemonVersionPath(opt.PIDPath))
+	writeVersion(opt.PIDPath, opt.Version)
+	defer os.Remove(versionPath(opt.PIDPath))
 
 	logger.Printf("aiusage daemon started: pid=%d interval=%s pidfile=%s", os.Getpid(), interval, opt.PIDPath)
 
-	cycleOpts := []Option{WithPricer(opt.Pricer)}
+	cycleOpts := []collect.Option{collect.WithPricer(opt.Pricer)}
 	if opt.NoRaw {
-		cycleOpts = append(cycleOpts, WithoutRaw())
+		cycleOpts = append(cycleOpts, collect.WithoutRaw())
 	}
 
 	runOne := func() {
-		// Cancellation is observed inside RunCycle; an aborted cycle returns the
+		// Cancellation is observed inside RunOnce; an aborted cycle returns the
 		// ctx error which we log without treating it as a fatal collection fault.
-		stats, err := RunCycle(ctx, reg, st, dc, cycleOpts...)
+		stats, err := collect.RunOnce(ctx, reg, st, dc, cycleOpts...)
 		if err != nil && ctx.Err() == nil {
 			logger.Printf("cycle error: %v", err)
 		}
@@ -135,7 +153,7 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.
 	}
 }
 
-// AcquireCollectionLock takes the same advisory lock RunDaemon holds, for a
+// AcquireCollectionLock takes the same advisory lock Run holds, for a
 // one-shot cycle (`once`). Without it a one-shot races the daemon: both read
 // the same aggregate baseline and insert the same delta under different
 // nano-timestamped dedup keys, doubling the count. Contention fails fast with
@@ -143,7 +161,7 @@ func RunDaemon(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.
 //
 // While held, the holder is indistinguishable from a running daemon to
 // cmd.ensureDaemon (same flock), so the one-shot stamps its pid and build
-// identity the way RunDaemon does: with no recorded version a concurrent CLI
+// identity the way Run does: with no recorded version a concurrent CLI
 // hits the forced-restart path — a stop that stalls up to 3s and a SIGTERM
 // aimed at whatever stale pid the pidfile holds. The returned release func
 // removes both stamps and must be called when the cycle finishes.
@@ -156,10 +174,10 @@ func AcquireCollectionLock(pidPath, version string) (func(), error) {
 		return nil, err
 	}
 	_ = writePID(pidPath) // best-effort: the version stamp below averts the restart path
-	writeDaemonVersion(pidPath, version)
+	writeVersion(pidPath, version)
 	quiet := log.New(io.Discard, "", 0)
 	return func() {
-		os.Remove(daemonVersionPath(pidPath))
+		os.Remove(versionPath(pidPath))
 		removePID(pidPath, quiet)
 		lock.release(quiet)
 	}, nil

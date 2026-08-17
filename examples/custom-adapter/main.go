@@ -173,7 +173,7 @@ func run() error {
 
 	ctx := context.Background()
 	for pass := 1; pass <= 2; pass++ {
-		stats, err := collect.RunCycle(ctx, reg, st, dc)
+		stats, err := collect.RunOnce(ctx, reg, st, dc)
 		if err != nil {
 			return err
 		}

@@ -1,4 +1,4 @@
-package collect
+package daemon
 
 import (
 	"errors"
@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// ErrBinaryReplaced is returned by RunDaemon when the executable it was started
+// ErrBinaryReplaced is returned by Run when the executable it was started
 // from has been overwritten on disk — an upgrade landed while the daemon was
 // running. It is a signal, not a fault: the caller is expected to release its
 // resources and exec the new binary (cmd.newRunCmd does).

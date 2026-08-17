@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 )
 
@@ -709,7 +709,7 @@ func TestEnsureDaemonRestartsTheUnitOnBuildMismatch(t *testing.T) {
 	defer release()
 
 	cfg := config.Config{PIDPath: pidPath, DBPath: filepath.Join(t.TempDir(), "usage.db")}
-	collect.WriteDaemonVersion(cfg, "v1.0.0")
+	daemon.WriteVersion(cfg, "v1.0.0")
 
 	// Installed and running, which is what makes this a restart.
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -823,7 +823,7 @@ func TestDoctorReportsSupervision(t *testing.T) {
 			if tc.daemon {
 				// The lock has to sit exactly where loadConfig derives PIDPath
 				// from XDG_STATE_HOME, or doctor looks for a daemon elsewhere.
-				rel, err := collect.AcquireCollectionLock(
+				rel, err := daemon.AcquireCollectionLock(
 					filepath.Join(state, "aiusage", "aiusage.pid"), buildinfo.Identity())
 				if err != nil {
 					t.Fatalf("acquire lock: %v", err)

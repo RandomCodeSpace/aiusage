@@ -1,4 +1,4 @@
-package collect
+package daemon
 
 import (
 	"os"
@@ -9,9 +9,9 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 )
 
-// DaemonStatus reports whether a collection daemon is currently running for the
+// Status reports whether a collection daemon is currently running for the
 // given configuration, using the SAME advisory lock the daemon takes in
-// RunDaemon: a non-blocking exclusive flock on cfg.PIDPath+".lock".
+// Run: a non-blocking exclusive flock on cfg.PIDPath+".lock".
 //
 // The lock is the single source of truth. A live daemon holds LOCK_EX for its
 // whole lifetime and the kernel drops it automatically on exit (clean or crash),
@@ -22,9 +22,9 @@ import (
 //     pid from cfg.PIDPath and report (true, pid). A pid of 0 means the pidfile
 //     was unreadable/empty but the lock is held, so running is still true.
 //
-// DaemonStatus never blocks and never spawns. It is safe to call from the TUI
+// Status never blocks and never spawns. It is safe to call from the TUI
 // header, doctor, and ensureDaemon.
-func DaemonStatus(cfg config.Config) (running bool, pid int) {
+func Status(cfg config.Config) (running bool, pid int) {
 	lockPath := cfg.PIDPath + ".lock"
 
 	// O_RDWR (no O_CREATE): we are only probing. If the lock file does not exist

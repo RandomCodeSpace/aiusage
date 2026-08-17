@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
 
 // stampCurrentVersion records the running build's identity as the daemon version
@@ -22,7 +22,7 @@ import (
 // the same build → no restart).
 func stampCurrentVersion(t *testing.T, cfg config.Config) {
 	t.Helper()
-	collect.WriteDaemonVersion(cfg, buildinfo.Identity())
+	daemon.WriteVersion(cfg, buildinfo.Identity())
 }
 
 // stubSpawn replaces the package-level spawnDaemon with a counter for the test's
@@ -39,7 +39,7 @@ func stubSpawn(t *testing.T) (*int, func()) {
 	return &calls, func() { spawnDaemon = prev }
 }
 
-// seedLock creates pidPath+".lock" (so DaemonStatus can open it) and returns the
+// seedLock creates pidPath+".lock" (so daemon.Status can open it) and returns the
 // path. It does NOT hold the lock — that simulates "lock file exists, daemon not
 // running" (self-heal / first-run-after-crash).
 func seedLock(t *testing.T, dir string) string {
@@ -171,7 +171,7 @@ func TestEnsureDaemonSingletonAfterSpawn(t *testing.T) {
 func TestEnsureDaemonDuringOnceCycle(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "aiusage.pid")
-	release, err := collect.AcquireCollectionLock(pidPath, buildinfo.Identity())
+	release, err := daemon.AcquireCollectionLock(pidPath, buildinfo.Identity())
 	if err != nil {
 		t.Fatalf("acquire collection lock: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestEnsureDaemonIdentityMismatch(t *testing.T) {
 
 			cfg := config.Config{PIDPath: pidPath}
 			if tc.recorded != "" {
-				collect.WriteDaemonVersion(cfg, tc.recorded)
+				daemon.WriteVersion(cfg, tc.recorded)
 			}
 
 			calls, restore := stubSpawn(t)
@@ -583,7 +583,7 @@ func TestNonTTYRootPrintsHelp(t *testing.T) {
 
 // TestDaemonOptionsStampsVersion guards the version-sync wiring: the daemon's
 // options must carry buildinfo.Identity() as Version. A regression here (Version
-// left empty) makes RunDaemon skip writing daemon.version, so ReadDaemonVersion
+// left empty) makes daemon.Run skip writing daemon.version, so daemon.ReadVersion
 // always returns "" != the CLI identity and ensureDaemon needlessly restarts the
 // daemon on every CLI invocation.
 func TestDaemonOptionsStampsVersion(t *testing.T) {

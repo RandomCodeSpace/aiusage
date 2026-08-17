@@ -42,9 +42,9 @@ func TestCycleStoresActivityAlongsideUsage(t *testing.T) {
 		emit: func(int) adapter.Observation { return obs },
 	})
 
-	stats, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+	stats, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{})
 	if err != nil {
-		t.Fatalf("RunCycle: %v", err)
+		t.Fatalf("RunOnce: %v", err)
 	}
 	if stats.EventsInserted != 1 {
 		t.Fatalf("events inserted = %d, want 1", stats.EventsInserted)
@@ -54,9 +54,9 @@ func TestCycleStoresActivityAlongsideUsage(t *testing.T) {
 	}
 
 	// A second pass re-reads the same source: nothing new in either ledger.
-	stats2, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+	stats2, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{})
 	if err != nil {
-		t.Fatalf("second RunCycle: %v", err)
+		t.Fatalf("second RunOnce: %v", err)
 	}
 	if stats2.ActivityInserted != 0 || stats2.EventsInserted != 0 {
 		t.Fatalf("re-read inserted %d events / %d activity, want 0/0",
@@ -111,9 +111,9 @@ func TestCycleStoresTurnContextsAndNoAttributionInflates(t *testing.T) {
 		emit: func(int) adapter.Observation { return obs },
 	})
 
-	stats, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+	stats, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{})
 	if err != nil {
-		t.Fatalf("RunCycle: %v", err)
+		t.Fatalf("RunOnce: %v", err)
 	}
 	// Three ROWS from two turns: the counters count (turn, dimension) pairs.
 	if stats.TurnContextsSeen != 3 || stats.TurnContextsInserted != 3 {
@@ -176,9 +176,9 @@ func TestCycleStoresTurnContextsAndNoAttributionInflates(t *testing.T) {
 
 	// A second pass re-reads the same source: a turn's context is not recorded
 	// twice on any axis, so its cost is not served twice either.
-	stats2, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+	stats2, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{})
 	if err != nil {
-		t.Fatalf("second RunCycle: %v", err)
+		t.Fatalf("second RunOnce: %v", err)
 	}
 	if stats2.TurnContextsInserted != 0 {
 		t.Fatalf("re-read inserted %d turn contexts, want 0", stats2.TurnContextsInserted)
@@ -206,8 +206,8 @@ func TestCycleActivityNeverOutRunsTheLedger(t *testing.T) {
 	})
 
 	for range 2 {
-		if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
-			t.Fatalf("RunCycle: %v", err)
+		if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+			t.Fatalf("RunOnce: %v", err)
 		}
 	}
 
@@ -245,9 +245,9 @@ func TestActivityHasNoRawToStrip(t *testing.T) {
 		},
 	})
 
-	stats, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}, WithoutRaw())
+	stats, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}, WithoutRaw())
 	if err != nil {
-		t.Fatalf("RunCycle: %v", err)
+		t.Fatalf("RunOnce: %v", err)
 	}
 	if stats.ActivityInserted != 2 {
 		t.Fatalf("activity inserted = %d, want 2 under no_raw", stats.ActivityInserted)

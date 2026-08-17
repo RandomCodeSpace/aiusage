@@ -39,7 +39,7 @@ func TestWithoutRawStoresNoPayload(t *testing.T) {
 	st := newFakeStore()
 	ctx := context.Background()
 
-	if _, err := RunCycle(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithoutRaw()); err != nil {
+	if _, err := RunOnce(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithoutRaw()); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestDefaultKeepsRawPayload(t *testing.T) {
 	st := newFakeStore()
 	ctx := context.Background()
 
-	if _, err := RunCycle(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestNoRawShrinksExistingAggregateState(t *testing.T) {
 	ctx := context.Background()
 
 	// Cycle 1: default policy, the payload lands in aggregate_state.
-	if _, err := RunCycle(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
 	last, _ := st.LastState(ctx, model.ToolGemini, "file|turn-1")
@@ -122,7 +122,7 @@ func TestNoRawShrinksExistingAggregateState(t *testing.T) {
 	}
 
 	// Cycle 2: no_raw, identical counters. The baseline must still be rewritten.
-	if _, err := RunCycle(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithoutRaw()); err != nil {
+	if _, err := RunOnce(ctx, adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}, WithoutRaw()); err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
 	last, _ = st.LastState(ctx, model.ToolGemini, "file|turn-1")

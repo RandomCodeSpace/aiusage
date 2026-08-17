@@ -15,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/adapter"
 	"github.com/RandomCodeSpace/aiusage/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/collect"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
 )
@@ -375,7 +376,7 @@ func TestOnceFailsFastWhenDaemonHoldsLock(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	pidPath := filepath.Join(stateDir, "aiusage", "aiusage.pid")
-	release, err := collect.AcquireCollectionLock(pidPath, "fake-daemon-build")
+	release, err := daemon.AcquireCollectionLock(pidPath, "fake-daemon-build")
 	if err != nil {
 		t.Fatalf("hold lock: %v", err)
 	}

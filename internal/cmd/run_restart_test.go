@@ -8,19 +8,20 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
 	"github.com/RandomCodeSpace/aiusage/collect"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
 
 // stubDaemon replaces the collection loop and the exec syscall for the duration
 // of a test, returning a pointer to the options the loop was called with and to
 // the path the restart handed to exec.
-func stubDaemon(t *testing.T, result error) (*collect.DaemonOptions, *string) {
+func stubDaemon(t *testing.T, result error) (*daemon.Options, *string) {
 	t.Helper()
 	origRun, origExec := runDaemon, execSelf
 	t.Cleanup(func() { runDaemon, execSelf = origRun, origExec })
 
-	var opts collect.DaemonOptions
+	var opts daemon.Options
 	var execed string
-	runDaemon = func(_ context.Context, _ *adapter.Registry, _ collect.Store, _ adapter.DiscoverConfig, o collect.DaemonOptions) error {
+	runDaemon = func(_ context.Context, _ *adapter.Registry, _ collect.Store, _ adapter.DiscoverConfig, o daemon.Options) error {
 		opts = o
 		return result
 	}
@@ -38,7 +39,7 @@ func stubDaemon(t *testing.T, result error) (*collect.DaemonOptions, *string) {
 func TestRunExecsIntoTheReplacementBinary(t *testing.T) {
 	isolateState(t)
 	db := filepath.Join(t.TempDir(), "usage.db")
-	opts, execed := stubDaemon(t, collect.ErrBinaryReplaced)
+	opts, execed := stubDaemon(t, daemon.ErrBinaryReplaced)
 
 	out, err := runCmd(t, "--db", db, "--config", offlineConfig(t), "run")
 	if err != nil {

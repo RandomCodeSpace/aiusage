@@ -10,9 +10,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
-	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
@@ -167,14 +167,14 @@ func printSupervision(c *cobra.Command, cfg config.Config) {
 	// worth printing.
 	if ctx.Err() != nil {
 		fmt.Fprintf(out, "unknown: the service manager did not answer within %s\n", supervisionBudget)
-		if running, pid := collect.DaemonStatus(cfg); running {
+		if running, pid := daemon.Status(cfg); running {
 			fmt.Fprintf(out, "a collector is running right now regardless (pid %d)\n", pid)
 		}
 		fmt.Fprintln(out)
 		return
 	}
 
-	if running, pid := collect.DaemonStatus(cfg); running {
+	if running, pid := daemon.Status(cfg); running {
 		fmt.Fprintf(out, "unsupervised background process (pid %d); `aiusage setup` installs systemd user units\n\n", pid)
 		return
 	}

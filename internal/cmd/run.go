@@ -15,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
 
 // repairPrivatePerms tightens permissions left behind by older releases, which
@@ -38,8 +39,8 @@ func repairPrivatePerms(cfg config.Config) {
 // restarts the daemon only when the binary actually changes; leaving it empty
 // would make the recorded version never match the CLI's identity and restart the
 // daemon on every CLI invocation.
-func daemonOptions(cfg config.Config) collect.DaemonOptions {
-	return collect.DaemonOptions{
+func daemonOptions(cfg config.Config) daemon.Options {
+	return daemon.Options{
 		Interval: time.Duration(cfg.IntervalSeconds) * time.Second,
 		PIDPath:  cfg.PIDPath,
 		Version:  buildinfo.Identity(),
@@ -68,9 +69,9 @@ var execSelf = func(path string) error {
 
 // runDaemon is the collection loop, as a package-level var so the restart path
 // can be driven in a test without replacing the test binary on disk.
-var runDaemon = collect.RunDaemon
+var runDaemon = daemon.Run
 
-// cycleOptions builds the RunCycle options for cfg, so a one-shot cycle honours
+// cycleOptions builds the RunOnce options for cfg, so a one-shot cycle honours
 // exactly the same pricing and privacy settings the daemon does.
 func cycleOptions(cfg config.Config) []collect.Option {
 	opts := []collect.Option{collect.WithPricer(newPricer(cfg))}
@@ -109,7 +110,7 @@ func newRunCmd() *cobra.Command {
 			opt := daemonOptions(cfg)
 			opt.Logger = log.New(c.ErrOrStderr(), "", log.LstdFlags)
 			err = runDaemon(ctx, defaultRegistry(), st, discoverConfig(cfg), opt)
-			if !errors.Is(err, collect.ErrBinaryReplaced) {
+			if !errors.Is(err, daemon.ErrBinaryReplaced) {
 				return err
 			}
 			// An upgrade landed under us. Close the database explicitly: exec

@@ -182,7 +182,7 @@ func TestIncrementalCycleExactDelta(t *testing.T) {
 	ctx := context.Background()
 
 	// Cycle 1: everything lands in full.
-	s1, err := RunCycle(ctx, fx.reg, fx.st, fx.dc)
+	s1, err := RunOnce(ctx, fx.reg, fx.st, fx.dc)
 	if err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestIncrementalCycleExactDelta(t *testing.T) {
 		`{"id":"t2","model":"antigravity","sessionId":"gs","timestamp":"2026-05-29T10:08:00Z","tokens":{"input":20,"output":5,"total":25}}`+"\n")
 
 	// Cycle 2: exactly the delta, nothing more, nothing missing.
-	s2, err := RunCycle(ctx, fx.reg, fx.st, fx.dc)
+	s2, err := RunOnce(ctx, fx.reg, fx.st, fx.dc)
 	if err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestIncrementalCycleExactDelta(t *testing.T) {
 
 	// Cycle 3: nothing changed anywhere -> no events seen, no snapshots, no
 	// inserts. This is the near-zero-work steady state.
-	s3, err := RunCycle(ctx, fx.reg, fx.st, fx.dc)
+	s3, err := RunOnce(ctx, fx.reg, fx.st, fx.dc)
 	if err != nil {
 		t.Fatalf("cycle 3: %v", err)
 	}

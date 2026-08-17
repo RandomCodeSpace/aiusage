@@ -1,4 +1,4 @@
-package collect
+package daemon
 
 import (
 	"os"
@@ -30,7 +30,7 @@ func holdLock(t *testing.T, pidPath string) func() {
 	}
 }
 
-func TestDaemonStatus(t *testing.T) {
+func TestStatus(t *testing.T) {
 	tests := []struct {
 		name        string
 		writePID    bool
@@ -51,7 +51,7 @@ func TestDaemonStatus(t *testing.T) {
 
 			if tc.writePID {
 				// A free lock file exists from a prior daemon; create it so the
-				// probe can open it (no O_CREATE in DaemonStatus).
+				// probe can open it (no O_CREATE in Status).
 				if err := os.WriteFile(pidPath+".lock", nil, 0o644); err != nil {
 					t.Fatalf("seed lock file: %v", err)
 				}
@@ -66,7 +66,7 @@ func TestDaemonStatus(t *testing.T) {
 				defer release()
 			}
 
-			running, pid := DaemonStatus(cfg)
+			running, pid := Status(cfg)
 			if running != tc.wantRunning {
 				t.Errorf("running=%v, want %v", running, tc.wantRunning)
 			}
@@ -77,10 +77,10 @@ func TestDaemonStatus(t *testing.T) {
 	}
 }
 
-// TestDaemonStatusReleasesProbeLock confirms DaemonStatus does not leave the
+// TestStatusReleasesProbeLock confirms Status does not leave the
 // lock held after reporting not-running: a subsequent caller must still be able
 // to take it (otherwise the probe itself would block a real daemon).
-func TestDaemonStatusReleasesProbeLock(t *testing.T) {
+func TestStatusReleasesProbeLock(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "aiusage.pid")
 	if err := os.WriteFile(pidPath+".lock", nil, 0o644); err != nil {
@@ -88,7 +88,7 @@ func TestDaemonStatusReleasesProbeLock(t *testing.T) {
 	}
 	cfg := config.Config{PIDPath: pidPath}
 
-	if running, _ := DaemonStatus(cfg); running {
+	if running, _ := Status(cfg); running {
 		t.Fatalf("expected not-running on a free lock")
 	}
 	// Probe released its lock, so we can take it now.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/collect"
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
 
 // onceRegistry is a seam so tests can drive `once` with failing adapters.
@@ -34,7 +35,7 @@ func newOnceCmd() *cobra.Command {
 			// and both insert the delta, double counting it. The identity is
 			// stamped so a concurrent ensureDaemon treats this cycle as a
 			// same-build daemon instead of force-restarting it.
-			release, err := collect.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
+			release, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
 			if err != nil {
 				return err
 			}
@@ -46,7 +47,7 @@ func newOnceCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			stats, err := collect.RunCycle(cmdContext(c), onceRegistry(), st, discoverConfig(cfg),
+			stats, err := collect.RunOnce(cmdContext(c), onceRegistry(), st, discoverConfig(cfg),
 				cycleOptions(cfg)...)
 			if err != nil {
 				return fmt.Errorf("collection cycle: %w", err)

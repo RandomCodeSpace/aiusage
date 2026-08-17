@@ -1,15 +1,10 @@
 package collect
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -506,7 +501,7 @@ func TestRunCycleIdempotentEvents(t *testing.T) {
 	ctx := context.Background()
 	dc := adapter.DiscoverConfig{}
 
-	s1, err := RunCycle(ctx, reg, st, dc)
+	s1, err := RunOnce(ctx, reg, st, dc)
 	if err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
@@ -514,7 +509,7 @@ func TestRunCycleIdempotentEvents(t *testing.T) {
 		t.Fatalf("cycle 1 inserted=%d want 1", s1.EventsInserted)
 	}
 
-	s2, err := RunCycle(ctx, reg, st, dc)
+	s2, err := RunOnce(ctx, reg, st, dc)
 	if err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
@@ -537,7 +532,7 @@ func TestRunCycleStampsObservedTime(t *testing.T) {
 		emit: func(int) adapter.Observation { return adapter.Observation{Events: []model.UsageEvent{ev}} },
 	}
 	st := newFakeStore()
-	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	got, _ := st.ListEvents(context.Background(), store.Filter{})
@@ -556,7 +551,7 @@ func TestPerSourceErrorIsNonFatal(t *testing.T) {
 		emit:       func(int) adapter.Observation { return adapter.Observation{} },
 	}
 	st := newFakeStore()
-	stats, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{})
+	stats, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("cycle should not fail on per-source error: %v", err)
 	}
@@ -600,7 +595,7 @@ func TestEventLevelInvariantSurvivesCompaction(t *testing.T) {
 	st := newFakeStore()
 	ctx := context.Background()
 
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
 	if got := windowTotal(t, st, winStart, winEnd); got != 2_000_000 {
@@ -608,7 +603,7 @@ func TestEventLevelInvariantSurvivesCompaction(t *testing.T) {
 	}
 
 	// Source compacted to empty; re-poll must not erode the stored history.
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
 	if got := windowTotal(t, st, winStart, winEnd); got != 2_000_000 {
@@ -657,7 +652,7 @@ func TestAggregateInvariantMonotonicWithReset(t *testing.T) {
 	defer restore()
 
 	// Cycle 1: first observation -> full 900,000 materialised.
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
 	if got := windowTotal(t, st, time.Time{}, time.Time{}); got != 900_000 {
@@ -666,7 +661,7 @@ func TestAggregateInvariantMonotonicWithReset(t *testing.T) {
 
 	// Cycle 2: grows to 2,000,000 -> +1,100,000 delta -> cumulative 2,000,000.
 	clock = clock.Add(time.Minute)
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
 	if got := windowTotal(t, st, time.Time{}, time.Time{}); got != 2_000_000 {
@@ -675,7 +670,7 @@ func TestAggregateInvariantMonotonicWithReset(t *testing.T) {
 
 	// Cycle 3: snapshot reset to 0 -> no negative delta -> stored stays >= 2,000,000.
 	clock = clock.Add(time.Minute)
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 3: %v", err)
 	}
 	if got := windowTotal(t, st, time.Time{}, time.Time{}); got < 2_000_000 {
@@ -726,7 +721,7 @@ func TestSnapshotCrashWindowNoDoubleCount(t *testing.T) {
 	restore := setNow(func() time.Time { return clock })
 	defer restore()
 
-	stats, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{})
+	stats, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
@@ -741,7 +736,7 @@ func TestSnapshotCrashWindowNoDoubleCount(t *testing.T) {
 	}
 
 	clock = clock.Add(time.Minute)
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
 	if got := windowTotal(t, st.fakeStore, time.Time{}, time.Time{}); got != 900_000 {
@@ -791,7 +786,7 @@ func TestSnapshotZeroDeltaSkipsStateWrite(t *testing.T) {
 	restore := setNow(func() time.Time { return clock })
 	defer restore()
 
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 1: %v", err)
 	}
 	if st.applies != 1 {
@@ -800,7 +795,7 @@ func TestSnapshotZeroDeltaSkipsStateWrite(t *testing.T) {
 	stored := st.state[model.ToolHermes+"|cell"]
 
 	clock = clock.Add(time.Minute)
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
 	if st.applies != 1 {
@@ -815,7 +810,7 @@ func TestSnapshotZeroDeltaSkipsStateWrite(t *testing.T) {
 
 	// Counters move again: the write path resumes and the delta materialises.
 	clock = clock.Add(time.Minute)
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle 3: %v", err)
 	}
 	if st.applies != 2 {
@@ -867,7 +862,7 @@ func TestRunCycleAllFailed(t *testing.T) {
 		collectErr: errors.New("boom"),
 		emit:       func(int) adapter.Observation { return adapter.Observation{} },
 	}
-	stats, err := RunCycle(context.Background(), adapter.NewRegistry(bad), newFakeStore(), adapter.DiscoverConfig{})
+	stats, err := RunOnce(context.Background(), adapter.NewRegistry(bad), newFakeStore(), adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
@@ -894,7 +889,7 @@ func TestRunCyclePartialFailureNotAllFailed(t *testing.T) {
 			}}}
 		},
 	}
-	stats, err := RunCycle(context.Background(), adapter.NewRegistry(bad, good), newFakeStore(), adapter.DiscoverConfig{})
+	stats, err := RunOnce(context.Background(), adapter.NewRegistry(bad, good), newFakeStore(), adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
@@ -937,7 +932,7 @@ func TestRunCycleCanceledMarksStatsTruncated(t *testing.T) {
 		emit: func(int) adapter.Observation { return adapter.Observation{} },
 	}
 
-	stats, err := RunCycle(ctx, adapter.NewRegistry(first, second), newFakeStore(), adapter.DiscoverConfig{})
+	stats, err := RunOnce(ctx, adapter.NewRegistry(first, second), newFakeStore(), adapter.DiscoverConfig{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cycle error = %v, want context.Canceled", err)
 	}
@@ -956,7 +951,7 @@ func TestRunCycleCompleteNotCanceled(t *testing.T) {
 		id: model.ToolCodex, class: model.EventLevel,
 		emit: func(int) adapter.Observation { return adapter.Observation{} },
 	}
-	stats, err := RunCycle(context.Background(), adapter.NewRegistry(ad), newFakeStore(), adapter.DiscoverConfig{})
+	stats, err := RunOnce(context.Background(), adapter.NewRegistry(ad), newFakeStore(), adapter.DiscoverConfig{})
 	if err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
@@ -965,182 +960,9 @@ func TestRunCycleCompleteNotCanceled(t *testing.T) {
 	}
 }
 
-// TestRunDaemonLogsCanceledCycle: the daemon's cycle line must say the counts
-// are partial when the cycle was cut short. The context is already cancelled,
-// so the immediate first cycle truncates at the first adapter and RunDaemon
-// returns without waiting on the ticker.
-func TestRunDaemonLogsCanceledCycle(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	ad := &fakeAdapter{
-		id: model.ToolCodex, class: model.EventLevel,
-		emit: func(int) adapter.Observation { return adapter.Observation{} },
-	}
-
-	var buf bytes.Buffer
-	opt := DaemonOptions{
-		Interval: time.Hour,
-		PIDPath:  filepath.Join(t.TempDir(), "aiusage.pid"),
-		Logger:   log.New(&buf, "", 0),
-	}
-	if err := RunDaemon(ctx, adapter.NewRegistry(ad), newFakeStore(), adapter.DiscoverConfig{}, opt); err != nil {
-		t.Fatalf("RunDaemon: %v", err)
-	}
-
-	var cycleLine string
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if strings.Contains(line, "adapters=") {
-			cycleLine = line
-			break
-		}
-	}
-	if cycleLine == "" {
-		t.Fatalf("daemon logged no cycle line:\n%s", buf.String())
-	}
-	if !strings.Contains(cycleLine, "canceled") {
-		t.Fatalf("truncated cycle logged as a normal one: %q", cycleLine)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// daemon: single-instance lock + immediate first cycle + graceful stop.
-// ---------------------------------------------------------------------------
-
-func TestRunDaemonSingleInstanceAndImmediateCycle(t *testing.T) {
-	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "aiusage.pid")
-
-	ev := model.UsageEvent{
-		Tool: model.ToolCodex, EventTime: refDay.Add(6 * time.Hour),
-		TotalTokens: 42, DedupKey: "codex|daemon-1", Kind: model.KindUsage,
-	}
-	ad := &fakeAdapter{
-		id: model.ToolCodex, class: model.EventLevel,
-		emit: func(int) adapter.Observation { return adapter.Observation{Events: []model.UsageEvent{ev}} },
-	}
-	reg := adapter.NewRegistry(ad)
-	st := newFakeStore()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	opt := DaemonOptions{
-		Interval: time.Hour, // long, so only the immediate cycle runs
-		PIDPath:  pidPath,
-		Logger:   log.New(discard{}, "", 0),
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- RunDaemon(ctx, reg, st, adapter.DiscoverConfig{}, opt) }()
-
-	// Wait for the immediate first cycle to materialise the event and the
-	// pidfile + lock to exist.
-	waitFor(t, time.Second, func() bool {
-		got, _ := st.ListEvents(context.Background(), store.Filter{})
-		return len(got) == 1 && fileExists(pidPath) && fileExists(pidPath+".lock")
-	})
-
-	// A second daemon on the same pidfile must fail fast on the lock.
-	err2 := RunDaemon(context.Background(), reg, st, adapter.DiscoverConfig{}, opt)
-	if err2 == nil {
-		t.Fatalf("second daemon should have failed to acquire lock")
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("daemon returned error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("daemon did not stop after cancel")
-	}
-
-	// Pidfile removed on clean shutdown.
-	if fileExists(pidPath) {
-		t.Fatalf("pidfile %s should be removed on shutdown", pidPath)
-	}
-}
-
-// TestAcquireCollectionLockContention proves a one-shot cycle cannot interleave
-// with a lock-holding daemon (the cross-process aggregate double count), gets an
-// actionable error, and that the lock is usable again after release — in both
-// directions.
-func TestAcquireCollectionLockContention(t *testing.T) {
-	pidPath := filepath.Join(t.TempDir(), "aiusage.pid")
-
-	daemonLock, err := acquireLock(pidPath)
-	if err != nil {
-		t.Fatalf("daemon lock: %v", err)
-	}
-
-	if _, err := AcquireCollectionLock(pidPath, "v-test"); err == nil {
-		t.Fatalf("one-shot acquired the lock while the daemon holds it")
-	} else if !strings.Contains(err.Error(), "already collecting") {
-		t.Fatalf("contention error not actionable: %v", err)
-	}
-
-	daemonLock.release(log.New(discard{}, "", 0))
-
-	release, err := AcquireCollectionLock(pidPath, "v-test")
-	if err != nil {
-		t.Fatalf("lock after daemon release: %v", err)
-	}
-	// While `once` holds the lock, a starting daemon must fail fast too.
-	if _, err := acquireLock(pidPath); err == nil {
-		t.Fatalf("daemon acquired the lock while a one-shot holds it")
-	}
-	release()
-
-	lock, err := acquireLock(pidPath)
-	if err != nil {
-		t.Fatalf("daemon lock after one-shot release: %v", err)
-	}
-	lock.release(log.New(discard{}, "", 0))
-}
-
-// TestAcquireCollectionLockStampsIdentity: while a one-shot holds the
-// collection lock it is indistinguishable from a running daemon (same flock),
-// so it must stamp its own pid + build identity — otherwise a concurrent
-// ensureDaemon reads an unrecorded version and force-restarts against a stale
-// pid. Both stamps must be gone after release.
-func TestAcquireCollectionLockStampsIdentity(t *testing.T) {
-	pidPath := filepath.Join(t.TempDir(), "aiusage.pid")
-
-	release, err := AcquireCollectionLock(pidPath, "v-test")
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	if got := readPID(pidPath); got != os.Getpid() {
-		t.Errorf("pidfile pid = %d, want own pid %d", got, os.Getpid())
-	}
-	if data, err := os.ReadFile(daemonVersionPath(pidPath)); err != nil || string(data) != "v-test" {
-		t.Errorf("recorded version = %q (err=%v), want v-test", data, err)
-	}
-
-	release()
-	if fileExists(pidPath) {
-		t.Errorf("pidfile %s not removed on release", pidPath)
-	}
-	if fileExists(daemonVersionPath(pidPath)) {
-		t.Errorf("version stamp %s not removed on release", daemonVersionPath(pidPath))
-	}
-}
-
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }
-
-func fileExists(p string) bool {
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
-}
 
 func waitFor(t *testing.T, max time.Duration, cond func() bool) {
 	t.Helper()
@@ -1183,7 +1005,7 @@ func TestSyntheticEventKeepsRecordTime(t *testing.T) {
 		},
 	}
 	st := newFakeStore()
-	if _, err := RunCycle(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(context.Background(), adapter.NewRegistry(ad), st, adapter.DiscoverConfig{}); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	evs, _ := st.ListEvents(context.Background(), store.Filter{})

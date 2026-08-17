@@ -536,10 +536,20 @@ model < adapter, store < collect, report, tui < cmd
 
 Five of those are PUBLIC packages at the module root — `model`, `adapter`,
 `store`, `pricing`, `collect` — and everything else stays under `internal/`
-(cmd, tui, report, service, sysmon, config, buildinfo). The promotion moved
-import paths and nothing else; the arrows below are what they always were.
+(cmd, daemon, tui, report, service, sysmon, config, buildinfo). The promotion
+moved import paths and nothing else; the arrows below are what they always were.
 `main.go` stays at the module root, so `go install
 github.com/RandomCodeSpace/aiusage@latest` keeps resolving.
+
+The public collector is `collect.RunOnce(ctx, ...)` and
+`collect.Run(ctx, interval, ...)`, and NOTHING supervisory: no pidfile, no lock,
+no version stamp, no self-update watch, no signal handling. All of that is
+`internal/daemon`, which composes public collect exactly the way an out-of-tree
+consumer would (issue #72, decision 3) — a consumer embedding this project has
+its own supervisor and would have to fight ours. The store reaches it as
+`collect.Store`, an interface collect declares over the six methods a pass
+consumes, so no public collect signature mentions `internal/config` or a fat
+store interface.
 
 Imports point strictly downward: `model` imports nothing internal; adapters,
 the store and `pricing` depend only on `model`; collect/report/tui compose

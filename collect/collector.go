@@ -6,7 +6,20 @@
 // stored accumulator state, so a source that later shrinks (compaction,
 // deletion, reset) can never reduce a previously-reported total.
 //
-// INJECTION SEAMS: RunCycle accepts a Pricer interface to price each new event
+// TWO ENTRY POINTS, AND NOTHING AROUND THEM: RunOnce performs one pass and Run
+// performs one every interval until its context is cancelled (issue #72,
+// decision 3). Everything a MACHINE needs around a long-running collector -
+// a pidfile and its lock, a recorded build identity, a stop-and-wait, a watch on
+// the executable for an upgrade - is deliberately absent, because those are this
+// project's answers to questions a consumer embedding the package has already
+// answered its own way. aiusage's own daemon keeps all of it in internal/daemon,
+// which composes this package exactly the way any other consumer would.
+//
+// The store is taken as Store, an interface this package declares over the six
+// methods a pass actually uses (decision 8), so *store.Ledger satisfies it
+// without either package naming the other's shape.
+//
+// INJECTION SEAMS: RunOnce accepts a Pricer interface to price each new event
 // at ingest time, and an optional Refresher to update the price table before
 // stamping. A Pricer implementation returns microUSD, source, and ok; ok=false
 // leaves the event unpriced (CostMicroUSD = nil). Cost stamped by an adapter
@@ -65,7 +78,7 @@ type Pricer interface {
 }
 
 // Refresher is the optional half of Pricer: a price ladder that can update
-// itself from upstream. RunCycle offers it one chance per cycle; the
+// itself from upstream. RunOnce offers it one chance per cycle; the
 // implementation is expected to throttle itself and to fail silently.
 type Refresher interface {
 	Refresh(ctx context.Context) error
@@ -75,14 +88,30 @@ type Refresher interface {
 type Option func(*cycleOptions)
 
 type cycleOptions struct {
-	pricer Pricer
-	noRaw  bool
+	pricer  Pricer
+	noRaw   bool
+	onCycle func(CycleStats, error)
 }
 
 // WithPricer stamps a cost on every new event from the price table in effect at
 // ingest. Without it (the default) events are stored unpriced.
 func WithPricer(p Pricer) Option {
 	return func(o *cycleOptions) { o.pricer = p }
+}
+
+// WithCycleCallback reports the outcome of each pass Run makes: the stats and
+// the error RunOnce returned, in that order, on Run's own goroutine.
+//
+// It exists because Run is a loop with no return value until it stops, so
+// without it a long-running collector is a black box - a consumer could not log
+// a pass, export a counter, or notice that every source has been failing for an
+// hour. RunOnce ignores it: a caller holding the stats already has them.
+//
+// The callback runs BETWEEN passes and blocks the next one, which is the honest
+// ordering (a pass is not reported until it is over) and makes a slow callback a
+// slow collector. Keep it to logging or a metric.
+func WithCycleCallback(fn func(CycleStats, error)) Option {
+	return func(o *cycleOptions) { o.onCycle = fn }
 }
 
 // WithoutRaw drops every adapter's raw audit payload before it reaches the
@@ -95,7 +124,7 @@ func WithoutRaw() Option {
 	return func(o *cycleOptions) { o.noRaw = true }
 }
 
-// CycleStats reports the outcome of a single RunCycle.
+// CycleStats reports the outcome of a single RunOnce.
 type CycleStats struct {
 	Adapters       int      // adapters iterated
 	Sources        int      // sources discovered + collected
@@ -142,17 +171,17 @@ func (s CycleStats) AllFailed() bool {
 	return len(s.Errors) > 0 && s.SourcesFailed == s.Sources
 }
 
-// RunCycle performs one full collection pass. Per-source and per-adapter errors
+// RunOnce performs one full collection pass. Per-source and per-adapter errors
 // are non-fatal: they are appended to CycleStats.Errors and collection
-// continues. RunCycle only returns a non-nil error for failures that prevent
+// continues. RunOnce only returns a non-nil error for failures that prevent
 // the cycle from making any meaningful progress (none currently — the loop is
 // fully resilient), so callers may safely run it on a ticker.
 //
-// A cancelled context truncates the pass: RunCycle returns ctx.Err() together
+// A cancelled context truncates the pass: RunOnce returns ctx.Err() together
 // with CycleStats.Canceled set, and the counts in those stats cover only the
 // work done so far. Nothing is lost by the truncation — checkpoints ride the
 // event transactions — but the stats must be reported as partial.
-func RunCycle(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.DiscoverConfig, opts ...Option) (CycleStats, error) {
+func RunOnce(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.DiscoverConfig, opts ...Option) (CycleStats, error) {
 	var o cycleOptions
 	for _, fn := range opts {
 		fn(&o)

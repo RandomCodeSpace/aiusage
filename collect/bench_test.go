@@ -57,13 +57,13 @@ func BenchmarkRunCycle(b *testing.B) {
 	defer restore()
 
 	// First cycle inserts everything; iterations then measure the steady state.
-	if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+	if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 		b.Fatalf("warm-up cycle: %v", err)
 	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := RunCycle(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
+		if _, err := RunOnce(ctx, reg, st, adapter.DiscoverConfig{}); err != nil {
 			b.Fatalf("cycle: %v", err)
 		}
 	}
@@ -92,13 +92,13 @@ func BenchmarkRunCycleUnchangedSources(b *testing.B) {
 	appendLines(b, fx.codexSession, pad.String())
 
 	// Warm-up cycle inserts everything and writes the checkpoints.
-	if s, err := RunCycle(ctx, fx.reg, fx.st, fx.dc); err != nil || len(s.Errors) > 0 {
+	if s, err := RunOnce(ctx, fx.reg, fx.st, fx.dc); err != nil || len(s.Errors) > 0 {
 		b.Fatalf("warm-up cycle: err=%v errors=%v", err, s.Errors)
 	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		s, err := RunCycle(ctx, fx.reg, fx.st, fx.dc)
+		s, err := RunOnce(ctx, fx.reg, fx.st, fx.dc)
 		if err != nil {
 			b.Fatalf("cycle: %v", err)
 		}

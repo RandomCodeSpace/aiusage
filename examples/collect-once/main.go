@@ -1,7 +1,7 @@
 // Command collect-once runs exactly one collection pass with every adapter this
 // project ships and prints what it wrote. It is the daemon minus the ticker:
 // adapter/all.Default() supplies the registry, store.Open creates the database
-// at the current schema version, and collect.RunCycle discovers each source,
+// at the current schema version, and collect.RunOnce discovers each source,
 // reads it read-only and appends what it found. The database is a throwaway
 // under os.MkdirTemp, which keeps the pass off a real ledger and also means the
 // aggregate adapters diff against baselines this database owns - so nothing is
@@ -58,7 +58,7 @@ func run() error {
 	defer stop()
 
 	fmt.Printf("collecting into %s\n\n", dbPath)
-	stats, err := collect.RunCycle(ctx, all.Default(), st, dc)
+	stats, err := collect.RunOnce(ctx, all.Default(), st, dc)
 
 	// The stats are printed BEFORE the error is examined, and the cancelled flag
 	// is printed with them: a cancelled pass returns counts that cover only the
