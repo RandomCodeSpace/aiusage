@@ -142,6 +142,24 @@ type Adapter interface {
 	Discover(ctx context.Context, cfg DiscoverConfig) ([]Source, error)
 	// Collect reads a single source and returns its observations. Read-only.
 	Collect(ctx context.Context, src Source) (Observation, error)
+	// Capabilities declares what this project can actually say about the tool:
+	// where a cost figure came from, whether a tool call can be joined to the
+	// turn that paid for it, how the source reports reasoning tokens, and how
+	// well the adapter is verified. Tool MUST equal ID(), and every field MUST
+	// be set — a surface renders an empty field as an empty line, which reads as
+	// a rendering fault rather than as a missing fact.
+	//
+	// It is a REQUIRED method rather than a table somewhere else because the
+	// declaration is a statement about this code, and a statement kept beside
+	// the code it describes cannot drift from it. A sixteenth adapter does not
+	// compile until it declares itself, which beats a guard test reminding
+	// someone to edit a map (issue #72, decision 1). The value type lives in
+	// model so the dashboard reads it without importing this package.
+	//
+	// Reasoning is filled from model.ReasoningReportFor rather than restated:
+	// there is ONE table of reasoning behaviour, and the pricing engine and this
+	// declaration must never disagree about what a source reports.
+	Capabilities() model.ToolCapability
 }
 
 // Incremental is an optional Adapter capability: given the checkpoint stored

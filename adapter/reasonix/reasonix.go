@@ -155,6 +155,21 @@ func (Adapter) ID() string { return model.ToolReasonix }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Reasonix" }
 
+// Capabilities declares what this project can say about Reasonix.
+//
+// Cost is COMPUTED: nothing here calls SetCost, so a row is valued from the
+// public rate card or left unpriced. There is NO activity at all — this adapter
+// references model.ActivityEvent nowhere.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolReasonix,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(model.ToolReasonix),
+		Tier:      model.TierLive,
+	}
+}
+
 // StatsDir resolves the stats directory for one discovery config, applying the
 // full three-step root resolution. Exported for the CLI's `sources`/`doctor`
 // surfaces, which report where an adapter is looking without collecting.

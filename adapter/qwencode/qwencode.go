@@ -209,6 +209,21 @@ func (Adapter) ID() string { return model.ToolQwenCode }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Qwen Code" }
 
+// Capabilities declares what this project can say about Qwen Code.
+//
+// Cost is COMPUTED: nothing here calls SetCost. There is NO activity at all —
+// this adapter references model.ActivityEvent nowhere; the harness's own usage
+// ledger records turns, not calls.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolQwenCode,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(model.ToolQwenCode),
+		Tier:      model.TierLive,
+	}
+}
+
 // root resolves the runtime base directory whose usage/ subdirectory holds the
 // ledger, in the harness's own precedence order:
 //

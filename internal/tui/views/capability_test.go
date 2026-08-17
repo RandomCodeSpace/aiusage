@@ -8,12 +8,32 @@ import (
 	"github.com/RandomCodeSpace/aiusage/store"
 )
 
-// capTestCtx is byEntityTestCtx with a real money formatter and humanizer, so
-// the cost and capability assertions read the numbers the app would render.
+// capTestCtx is byEntityTestCtx with a real money formatter and humanizer plus
+// the injected capability declarations, so the cost and capability assertions
+// read the numbers and the words the app would render.
+//
+// The two declarations are stated HERE rather than read off the adapters: this
+// package may not import adapter, and these are render fixtures, not a second
+// opinion about what copilot and codex do. They only have to differ from each
+// other in the fields the assertions tell apart. The composition root is where
+// the real declarations are checked against the real adapters
+// (internal/cmd/capability_test.go).
 func capTestCtx() Ctx {
 	c := byEntityTestCtx()
 	c.Money = model.FormatCost
 	c.Humanize = func(v int64) string { return humanTest(v) }
+	c.Capabilities = map[string]model.ToolCapability{
+		model.ToolCopilot: {
+			Tool: model.ToolCopilot, Cost: model.CostVendor,
+			Activity: model.ActivityUnattributed, Reasoning: model.ReasoningReportSubset,
+			Tier: model.TierLive,
+		},
+		model.ToolCodex: {
+			Tool: model.ToolCodex, Cost: model.CostComputed,
+			Activity: model.ActivityUnattributed, Reasoning: model.ReasoningReportAdditive,
+			Tier: model.TierLive,
+		},
+	}
 	return c
 }
 
@@ -37,7 +57,7 @@ func TestByToolDetailCardStatesCapabilities(t *testing.T) {
 	for _, w := range []int{80, 100, 120, 200} {
 		lay := ComputeLayout(w, 44)
 		out := ByTool(c, ByToolData{Rows: rows, Grand: 410, Selected: 0, RangeLbl: "7d"}, lay)
-		cap, ok := model.CapabilityFor(model.ToolCopilot)
+		cap, ok := c.Capabilities[model.ToolCopilot]
 		if !ok {
 			t.Fatal("copilot has no capability declaration")
 		}
@@ -69,8 +89,8 @@ func TestCapabilityLinesFollowTheSelection(t *testing.T) {
 	c := capTestCtx()
 	lay := ComputeLayout(160, 44)
 
-	copilot, _ := model.CapabilityFor(model.ToolCopilot)
-	codex, _ := model.CapabilityFor(model.ToolCodex)
+	copilot := c.Capabilities[model.ToolCopilot]
+	codex := c.Capabilities[model.ToolCodex]
 	if copilot.Cost == codex.Cost {
 		t.Fatal("the two fixtures declare the same cost provenance; the test cannot tell them apart")
 	}
@@ -95,8 +115,10 @@ func containsAny(s string, forms []string) bool {
 	return false
 }
 
-// A tool id the table has not been taught about gets ONE honest line, not four
-// plausible defaults under a real tool's name.
+// A tool id nothing declared gets ONE honest line, not four plausible defaults
+// under a real tool's name. The absent case is the ordinary one at the edges: a
+// retired harness the composition root did not know about, or a headless Ctx
+// carrying no declarations at all.
 func TestUnknownToolSaysItHasNoDeclaration(t *testing.T) {
 	c := capTestCtx()
 	rows := []store.Bucket{{Keys: map[string]string{"tool": "not-a-harness"},
@@ -104,6 +126,21 @@ func TestUnknownToolSaysItHasNoDeclaration(t *testing.T) {
 	out := ByTool(c, ByToolData{Rows: rows, Grand: 10, RangeLbl: "7d"}, ComputeLayout(160, 44))
 	if !strings.Contains(out, "no capability declaration") {
 		t.Errorf("an undeclared tool did not say so:\n%s", out)
+	}
+}
+
+// A Ctx carrying NO declarations at all — the headless case, and what a caller
+// that forgot to inject them would produce — says so for a real tool id too. It
+// must never fall back to inventing a row: "computed / none / live" under a real
+// harness's name is four claims nobody made.
+func TestNoInjectedDeclarationsSaysSoForARealTool(t *testing.T) {
+	c := capTestCtx()
+	c.Capabilities = nil
+	rows := []store.Bucket{{Keys: map[string]string{"tool": model.ToolCopilot},
+		OrderedKeys: []string{"tool"}, Events: 1, Total: 10}}
+	out := ByTool(c, ByToolData{Rows: rows, Grand: 10, RangeLbl: "7d"}, ComputeLayout(160, 44))
+	if !strings.Contains(out, "no capability declaration") {
+		t.Errorf("an uninjected Ctx did not say the declaration is missing:\n%s", out)
 	}
 }
 

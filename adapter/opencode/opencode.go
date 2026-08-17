@@ -80,6 +80,21 @@ func (Adapter) ID() string { return model.ToolOpenCode }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "opencode" }
 
+// Capabilities declares what this project can say about opencode.
+//
+// Cost is COMPUTED: nothing here calls SetCost. Activity is an EXACT join —
+// collectActivity joins part.message_id to message.id, the very id the usage
+// dedup key is already built from.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolOpenCode,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityExact,
+		Reasoning: model.ReasoningReportFor(model.ToolOpenCode),
+		Tier:      model.TierLive,
+	}
+}
+
 // dataDirs returns the configured opencode data directories. OPENCODE_DATA_DIR
 // may be a comma-separated list that fully REPLACES the default; otherwise the
 // discovery root (override or ~/.local/share/opencode) is used.

@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2/compat"
 	zone "github.com/lrstanley/bubblezone/v2"
 
+	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
 )
 
@@ -64,6 +65,15 @@ type Ctx struct {
 	// from config and static for the life of the process, which is why the
 	// render memo does not key on it.
 	LeverageFloor int64
+
+	// Capabilities is each tool's capability declaration, keyed by tool id, as
+	// the composition root read it off the adapter registry (package tui may not
+	// import adapter, the same reason the discovery counts arrive that way). A
+	// tool ABSENT from the map has no declaration, which capabilityLines says out
+	// loud; a nil map — every partial headless Ctx — declares nothing at all.
+	// Injected once and static for the life of the process, so the render memo
+	// does not key on it.
+	Capabilities map[string]model.ToolCapability
 
 	// Formatting helpers.
 	Humanize func(int64) string

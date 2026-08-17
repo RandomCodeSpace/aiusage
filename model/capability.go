@@ -1,27 +1,26 @@
 package model
 
-// capability.go declares, per tool, what this project can actually say about it:
+// capability.go carries the VOCABULARY of the per-tool capability declaration:
 // where a cost figure came from, whether a tool call can be joined to the turn
 // that paid for it, how the source reports reasoning tokens, and how well the
 // adapter behind it is verified. It is the "capability declaration" of
 // CONTEXT.md, in machine-readable form.
 //
-// IT LIVES IN model AND NOT IN adapter. The dashboard is what shows it, and
-// internal/tui may not import adapter (layering: model < adapter,
-// store < collect, report, tui). model is the shared floor both sides already
-// stand on, which is the same reason FormatCost and the reasoning modes are
-// here.
+// THE VALUES ARE NOT HERE. Each adapter declares its own through the required
+// adapter.Adapter.Capabilities method (issue #72, decision 1): a table in this
+// package was a SECOND statement of facts whose first statement is the adapter
+// source, and it drifted the moment an adapter learned to read a vendor price
+// without anyone opening it. A sixteenth adapter now fails to COMPILE until it
+// declares itself, which beats a guard test reminding someone to edit a map.
 //
-// The consequence is that this table is a SECOND statement of facts whose first
-// statement is the adapter source, so it can drift. Two things hold it down: the
-// reasoning column is DERIVED from reasoningModes rather than restated (there is
-// one table of reasoning behaviour, not two), and internal/cmd — the composition
-// root, the one package that sees both the registry and this file — fails its
-// build when a registered adapter has no entry here
-// (TestEveryAdapterDeclaresCapabilities).
+// The TYPES stay here because the dashboard is what shows them, and internal/tui
+// may not import adapter (layering: model < adapter, store < collect, report,
+// tui). model is the shared floor both sides already stand on, which is the same
+// reason FormatCost and the reasoning modes are here.
 //
-// Every entry below was read off the adapter source, not off prose. The
-// citations are in the per-field comments.
+// One table remains, and it is deliberately the one no adapter can own:
+// retiredCapabilities, the tools nothing collects any more whose rows are still
+// in the append-only ledger.
 
 // CostProvenance for a whole tool is declared here; PriceProvenance in
 // provenance.go answers the same question for one stored row. A tool declared
@@ -85,51 +84,23 @@ type ToolCapability struct {
 	Tier      VerificationTier
 }
 
-// toolCapabilities is the table. Reasoning is deliberately absent from the
-// literals: CapabilityFor fills it from reasoningModes, so the pricing engine
-// and this display can never disagree about what a tool reports.
+// retiredCapabilities declares the tools NO adapter collects any more. It is
+// what a per-adapter declaration structurally cannot express: there is no
+// adapter left to hold the statement, and usage_events is append-only, so stored
+// rows still carry the id and the dashboard still has to describe where their
+// numbers came from. Reasoning is deliberately absent from the literals, exactly
+// as it was in the table this replaces — RetiredCapabilities fills it from
+// reasoningModes, so the pricing engine and this display can never disagree
+// about what a source reported.
 //
-// Cost: CostVendor is exactly the four adapters that call SetCost —
-// copilot (copilot/cost.go PriceSourceAIU), crush (crush/crush.go
-// PriceSourceReported), goose (goose/goose.go priceSource) and pi's two tools
-// (pi/pi.go, a.tool+"-reported"). Every other adapter leaves CostMicroUSD nil
-// and the row is priced by the ladder in collect, or not at all.
-//
-// Activity: ActivityExact is the adapters that set UsageDedupKey on the rows
-// they emit — claudecode (claudecode.go mintActivity), clinecli
-// (clinecli.go buildActivity), dsh (dsh.go), opencode (opencode.go
-// collectActivity) and pi (pi.go calls). ActivityUnattributed is the three that
-// emit rows and never set it — codex (codex.go parseCallLine), copilot
-// (copilot/activity.go and copilot/events.go) and goose (goose/activity.go,
-// which hardcodes ""). The rest reference model.ActivityEvent nowhere.
-var toolCapabilities = []ToolCapability{
-	{Tool: ToolClaudeCode, Cost: CostComputed, Activity: ActivityExact, Tier: TierLive},
-	{Tool: ToolCodex, Cost: CostComputed, Activity: ActivityUnattributed, Tier: TierLive},
-	{Tool: ToolCopilot, Cost: CostVendor, Activity: ActivityUnattributed, Tier: TierLive},
-	{Tool: ToolOpenCode, Cost: CostComputed, Activity: ActivityExact, Tier: TierLive},
-	// hermes is the weakest "live" claim in this table: no local session has
-	// ever been read on this machine (see the reasoningModes note on issue #28).
-	// It is declared live because the adapter was written against a real
-	// deployment; demote it to TierFixture the moment that stops being true.
-	{Tool: ToolHermes, Cost: CostComputed, Activity: ActivityNone, Tier: TierLive},
+// It is not a place to park a live tool. An entry here is a claim that nothing
+// discovers the tool, which the composition root checks against the registry
+// (TestRetiredToolsHaveNoAdapter).
+var retiredCapabilities = []ToolCapability{
 	// gemini is RETIRED — Antigravity replaced the Gemini CLI and no adapter
-	// collects it (see the ToolGemini comment). The entry stays because
-	// usage_events is append-only and stored rows still carry the id, so the
-	// dashboard still has to describe where their numbers came from.
+	// collects it (see the ToolGemini comment). Its declaration is exactly what
+	// the deleted table stated for it.
 	{Tool: ToolGemini, Cost: CostComputed, Activity: ActivityNone, Tier: TierLive},
-	{Tool: ToolAgy, Cost: CostComputed, Activity: ActivityNone, Tier: TierLive},
-	{Tool: ToolPi, Cost: CostVendor, Activity: ActivityExact, Tier: TierLive},
-	{Tool: ToolOpenClaw, Cost: CostVendor, Activity: ActivityExact, Tier: TierLive},
-	// crush is cost-ONLY: one event per growth of sessions.cost, zero tokens.
-	{Tool: ToolCrush, Cost: CostVendor, Activity: ActivityNone, Tier: TierLive},
-	{Tool: ToolKimiCode, Cost: CostComputed, Activity: ActivityNone, Tier: TierLive},
-	{Tool: ToolReasonix, Cost: CostComputed, Activity: ActivityNone, Tier: TierLive},
-	{Tool: ToolDSH, Cost: CostComputed, Activity: ActivityExact, Tier: TierLive},
-	{Tool: ToolQwenCode, Cost: CostComputed, Activity: ActivityNone, Tier: TierLive},
-	// goose leaves a NULL cost unpriced rather than stamping 0, so a goose row
-	// is either vendor-valued or unpriced and never an estimate.
-	{Tool: ToolGoose, Cost: CostVendor, Activity: ActivityUnattributed, Tier: TierLive},
-	{Tool: ToolCline, Cost: CostComputed, Activity: ActivityExact, Tier: TierLive},
 }
 
 // ReasoningReportFor says how a tool's source reports reasoning tokens. It reads
@@ -150,25 +121,14 @@ func ReasoningReportFor(tool string) ReasoningReport {
 	return ReasoningReportSubset
 }
 
-// CapabilityFor returns a tool's declaration, with Reasoning filled from
-// reasoningModes. ok is false for a tool id this table has not been taught
-// about, which a surface must render as "unknown" rather than inventing a row
-// of plausible defaults.
-func CapabilityFor(tool string) (ToolCapability, bool) {
-	for _, c := range toolCapabilities {
-		if c.Tool == tool {
-			c.Reasoning = ReasoningReportFor(tool)
-			return c, true
-		}
-	}
-	return ToolCapability{}, false
-}
-
-// ToolCapabilities returns every declaration, in table order, each with its
-// Reasoning filled. The slice is a copy.
-func ToolCapabilities() []ToolCapability {
-	out := make([]ToolCapability, 0, len(toolCapabilities))
-	for _, c := range toolCapabilities {
+// RetiredCapabilities returns the declarations of every tool no adapter collects
+// any more, each with its Reasoning filled. The slice is a copy.
+//
+// The composition root merges these UNDER the registry's own declarations, so a
+// tool that comes back to life is described by its adapter and not by this list.
+func RetiredCapabilities() []ToolCapability {
+	out := make([]ToolCapability, 0, len(retiredCapabilities))
+	for _, c := range retiredCapabilities {
 		c.Reasoning = ReasoningReportFor(c.Tool)
 		out = append(out, c)
 	}

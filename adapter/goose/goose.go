@@ -138,6 +138,24 @@ func (Adapter) ID() string { return model.ToolGoose }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Goose" }
 
+// Capabilities declares what this project can say about Goose.
+//
+// Cost is VENDOR-reported: goose.go stamps priceSource from the provider figure
+// the usage_ledger carries, and a NULL cost is left unpriced rather than
+// stamped 0 — so a goose row is either vendor-valued or unpriced, never an
+// estimate. Activity is RECORDED BUT UNATTRIBUTED because usage_ledger rows
+// carry no message id and two of them commonly share one second, so a timestamp
+// match would be a positional guess.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolGoose,
+		Cost:      model.CostVendor,
+		Activity:  model.ActivityUnattributed,
+		Reasoning: model.ReasoningReportFor(model.ToolGoose),
+		Tier:      model.TierLive,
+	}
+}
+
 // dataDirs returns the Goose data directories to search. GOOSE_PATH_ROOT wins
 // when it is ABSOLUTE, exactly as goose itself resolves it — a relative value is
 // ignored by the writer, so honouring one here would point the reader at a

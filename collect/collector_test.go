@@ -457,6 +457,19 @@ type fakeAdapter struct {
 func (a *fakeAdapter) ID() string          { return a.id }
 func (a *fakeAdapter) DisplayName() string { return a.id }
 
+// Capabilities satisfies the interface. The collector never reads it — the
+// declaration is a display fact, not a collection one — so the fake states the
+// most conservative thing it can and nothing here depends on the values.
+func (a *fakeAdapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      a.id,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(a.id),
+		Tier:      model.TierFixture,
+	}
+}
+
 func (a *fakeAdapter) Discover(_ context.Context, _ adapter.DiscoverConfig) ([]adapter.Source, error) {
 	return []adapter.Source{{Tool: a.id, Class: a.class, Path: a.id + "/src", Label: a.id}}, a.discoverErr
 }

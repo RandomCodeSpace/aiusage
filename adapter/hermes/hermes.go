@@ -60,6 +60,25 @@ func (Adapter) ID() string { return model.ToolHermes }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Hermes" }
 
+// Capabilities declares what this project can say about Hermes.
+//
+// Cost is COMPUTED and there is NO activity at all: this adapter references
+// model.ActivityEvent nowhere, so its surface exposes usage and nothing else.
+//
+// The tier is the weakest "live" claim in the project: no local session has
+// ever been read on this machine (see the reasoningModes note on issue #28).
+// It is declared live because the adapter was written against a real
+// deployment; demote it to TierFixture the moment that stops being true.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolHermes,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(model.ToolHermes),
+		Tier:      model.TierLive,
+	}
+}
+
 // homes returns the configured Hermes home directories. HERMES_HOME may be a
 // comma-separated list; otherwise the discovery root (override or ~/.hermes).
 func (a Adapter) homes(cfg adapter.DiscoverConfig) []string {

@@ -60,6 +60,21 @@ func (Adapter) ID() string { return model.ToolAgy }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Antigravity" }
 
+// Capabilities declares what this project can say about Antigravity.
+//
+// Cost is COMPUTED: nothing here calls SetCost. There is NO activity at all —
+// this adapter references model.ActivityEvent nowhere, so its surface exposes
+// usage and nothing else.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolAgy,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(model.ToolAgy),
+		Tier:      model.TierLive,
+	}
+}
+
 // roots returns the Antigravity data directories to scan: an explicit override
 // when present, otherwise the canonical home-relative candidates.
 func (a Adapter) roots(cfg adapter.DiscoverConfig) []string {

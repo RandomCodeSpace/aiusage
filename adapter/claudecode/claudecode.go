@@ -77,6 +77,23 @@ func (Adapter) ID() string { return model.ToolClaudeCode }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Claude Code" }
 
+// Capabilities declares what this project can say about Claude Code.
+//
+// Cost is COMPUTED: nothing here calls SetCost, so every row is valued from the
+// public rate card by collect.stampCost or left unpriced. Activity is an EXACT
+// join because a tool_use block and the .message.usage it was billed under sit
+// in the SAME message, so mintActivity can name the usage row that paid for
+// each call.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolClaudeCode,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityExact,
+		Reasoning: model.ReasoningReportFor(model.ToolClaudeCode),
+		Tier:      model.TierLive,
+	}
+}
+
 // Discover locates Claude Code config roots that contain a projects/ tree.
 //
 // Resolution order:

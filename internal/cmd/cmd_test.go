@@ -15,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/adapter"
 	"github.com/RandomCodeSpace/aiusage/adapter/claudecode"
 	"github.com/RandomCodeSpace/aiusage/collect"
+	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
 )
 
@@ -349,6 +350,19 @@ func (failingAdapter) Discover(context.Context, adapter.DiscoverConfig) ([]adapt
 }
 func (failingAdapter) Collect(context.Context, adapter.Source) (adapter.Observation, error) {
 	return adapter.Observation{}, errors.New("source unreadable")
+}
+
+// Capabilities satisfies the interface. Nothing in this test reads it: the
+// declaration is a display fact, and a fake that fails every read has none worth
+// stating beyond "unverified".
+func (failingAdapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      "failing",
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportNone,
+		Tier:      model.TierFixture,
+	}
 }
 
 // TestOnceFailsFastWhenDaemonHoldsLock: `once` must refuse to run while the

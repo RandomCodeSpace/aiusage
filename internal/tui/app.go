@@ -36,6 +36,13 @@ import (
 // because internal/tui must not import adapter (layering), the same
 // reason CollectInterval arrives from the caller. A tool MISSING from the map
 // is unknown, not zero: an adapter whose discovery failed says nothing.
+// Capabilities carries each tool's capability declaration — where its cost
+// figures came from, whether a tool call can be joined to the turn that paid for
+// it, how its source reports reasoning, how well its adapter is verified. It
+// arrives from the caller for exactly the reason Sources does: the declarations
+// live on the adapters now, and internal/tui must not import adapter. A tool
+// MISSING from the map has no declaration, which the By-Tool card says out loud
+// rather than filling in with four plausible defaults.
 // LeverageFloor is the configured per-bucket input floor for the hero's
 // leverage pivot (config tui.leverage_input_floor); 0 lets the view derive it
 // from the bucket span.
@@ -46,6 +53,7 @@ type Options struct {
 	Until           time.Time
 	CollectInterval time.Duration
 	Sources         map[string]int
+	Capabilities    map[string]model.ToolCapability
 	LeverageFloor   int64
 }
 
@@ -207,7 +215,7 @@ func NewModel(src DataSource, opt Options) Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(th.Accent)
 
-	vctx := buildCtx(th, zm, opt.LeverageFloor)
+	vctx := buildCtx(th, zm, opt.LeverageFloor, opt.Capabilities)
 	b := views.NewBrowse(vctx)
 	// PaddingRight(1) on the per-cell Header/Cell styles gives each column a
 	// 1-cell gutter so values never abut (the column budget in browse.go reserves
@@ -356,10 +364,12 @@ func detectReducedMotion() bool {
 
 // buildCtx assembles the views.Ctx from a theme + the format helpers + the
 // shared zone manager + the injected presentation policy (leverageFloor, 0 =
-// let the view derive it from the bucket span).
-func buildCtx(th Theme, zm *zone.Manager, leverageFloor int64) views.Ctx {
+// let the view derive it from the bucket span) + the per-tool capability
+// declarations the composition root read off the registry.
+func buildCtx(th Theme, zm *zone.Manager, leverageFloor int64, caps map[string]model.ToolCapability) views.Ctx {
 	return views.Ctx{
 		LeverageFloor: leverageFloor,
+		Capabilities:  caps,
 
 		PanelTitle: th.PanelTitle,
 		Stat:       th.Stat,

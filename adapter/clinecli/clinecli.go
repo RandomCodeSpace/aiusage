@@ -190,6 +190,21 @@ func (Adapter) ID() string { return model.ToolCline }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Cline" }
 
+// Capabilities declares what this project can say about Cline.
+//
+// Cost is COMPUTED: nothing here calls SetCost. Activity is an EXACT join —
+// buildActivity names the usage row that paid for each call, because the
+// tool_use block sits in the SAME message as the metrics it was billed under.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolCline,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityExact,
+		Reasoning: model.ReasoningReportFor(model.ToolCline),
+		Tier:      model.TierLive,
+	}
+}
+
 // layout is one resolved Cline installation: where the message documents live
 // and where the discovery index lives.
 type layout struct {

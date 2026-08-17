@@ -39,6 +39,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/adapter/reasonix"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
+	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
 )
 
@@ -140,6 +141,7 @@ func newRootCmd() *cobra.Command {
 				StatePath:       uiStatePath(cfg),
 				CollectInterval: time.Duration(cfg.IntervalSeconds) * time.Second,
 				Sources:         discoveredSources(cmdContext(c), cfg),
+				Capabilities:    toolCapabilities(),
 				LeverageFloor:   cfg.TUI.LeverageInputFloor,
 			})
 		},
@@ -288,6 +290,37 @@ func discoveredSources(ctx context.Context, cfg config.Config) map[string]int {
 		// skills and hooks and never a token (adapter.MetaNoUsage). For every
 		// other adapter this is len(srcs).
 		out[ad.ID()] = adapter.CountUsageSources(srcs)
+	}
+	return out
+}
+
+// toolCapabilities collects every adapter's own capability declaration, keyed by
+// tool id, for the TUI to render in its By-Tool detail card. It is resolved here
+// for the same reason discoveredSources is: cmd is the composition root, and
+// internal/tui must not import adapter.
+//
+// The registry is asked, not a table: each adapter states where its cost figures
+// come from, whether a tool call can be joined to the turn that paid for it and
+// how well it is verified, so the statement cannot drift from the code it
+// describes (issue #72, decision 1).
+//
+// Retired tools go in FIRST and are therefore overwritten by any adapter that
+// claims the same id. usage_events is append-only, so a ledger still holds rows
+// for tools nothing collects any more and the dashboard still has to describe
+// them; a tool that comes back to life is described by its adapter, and the list
+// of the retired stays a claim about what is NOT registered rather than a second
+// opinion about what is (TestRetiredToolsHaveNoAdapter).
+//
+// Keyed by ad.ID() rather than by the declaration's own Tool field: the registry
+// is the authority on which tool an adapter is, and the two agreeing is a
+// property worth testing rather than assuming (TestCapabilityDeclarationsNameTheirOwnTool).
+func toolCapabilities() map[string]model.ToolCapability {
+	out := make(map[string]model.ToolCapability)
+	for _, c := range model.RetiredCapabilities() {
+		out[c.Tool] = c
+	}
+	for _, ad := range defaultRegistry().All() {
+		out[ad.ID()] = ad.Capabilities()
 	}
 	return out
 }

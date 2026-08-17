@@ -465,20 +465,21 @@ func reasoningShareLine(c Ctx, b store.Bucket, inner int) string {
 
 // capabilityLines renders the four per-tool declarations: where a cost figure
 // came from, whether a tool call can be joined to the turn that paid for it, how
-// the source reports reasoning, and how well the adapter is verified
-// (model.CapabilityFor).
+// the source reports reasoning, and how well the adapter is verified. They come
+// from Ctx.Capabilities — each adapter's own declaration, collected off the
+// registry by the composition root, since this package may not import adapter.
 //
 // They are the answer to the question the numbers above raise and cannot
 // answer: a tool showing "-" for cost and one showing "$12.40" differ because of
 // what their SOURCE exposes, not because of what was spent, and without this
-// block the difference reads as a bug. A tool id the table has not been taught
-// about renders one honest line saying so, rather than four plausible defaults.
+// block the difference reads as a bug. A tool id nothing declared renders one
+// honest line saying so, rather than four plausible defaults.
 func capabilityLines(c Ctx, tool string, inner int) []string {
 	if tool == "" {
 		return nil
 	}
 	head := c.Rule(c.StatLabel.Render("SOURCE"), inner)
-	cap, ok := model.CapabilityFor(tool)
+	cap, ok := c.Capabilities[tool]
 	if !ok {
 		return []string{head, c.Faint.Render(truncTo(c, "no capability declaration", inner))}
 	}

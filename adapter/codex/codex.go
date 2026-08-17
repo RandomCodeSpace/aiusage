@@ -52,6 +52,24 @@ func (Adapter) ID() string { return model.ToolCodex }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Codex" }
 
+// Capabilities declares what this project can say about Codex.
+//
+// Cost is COMPUTED: nothing here calls SetCost. Activity is RECORDED BUT
+// UNATTRIBUTED, and that is a property of the source rather than an omission:
+// its token_count records share no identity with its function_call /
+// custom_tool_call records (zero of 261,938 local token_count records carry a
+// turn_id, while every call does), so parseCallLine leaves UsageDedupKey empty
+// rather than making a positional guess.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolCodex,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityUnattributed,
+		Reasoning: model.ReasoningReportFor(model.ToolCodex),
+		Tier:      model.TierLive,
+	}
+}
+
 // homes returns the configured Codex home directories. CODEX_HOME may be a
 // comma-separated list; otherwise the discovery root (override or ~/.codex).
 func (a Adapter) homes(cfg adapter.DiscoverConfig) []string {

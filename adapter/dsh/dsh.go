@@ -132,6 +132,21 @@ func (Adapter) ID() string { return model.ToolDSH }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "DSH" }
 
+// Capabilities declares what this project can say about DSH.
+//
+// Cost is COMPUTED: nothing here calls SetCost. Activity is an EXACT join —
+// the call and the usage object it was billed under come from the same record,
+// so every activity row names the usage row that paid for it.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolDSH,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityExact,
+		Reasoning: model.ReasoningReportFor(model.ToolDSH),
+		Tier:      model.TierLive,
+	}
+}
+
 // homes returns the configured DSH home directories. DSH_HOME may be a
 // comma-separated list; otherwise the discovery root (override or ~/.dsh).
 func (a Adapter) homes(cfg adapter.DiscoverConfig) []string {

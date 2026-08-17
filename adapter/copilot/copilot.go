@@ -137,6 +137,23 @@ func (Adapter) ID() string { return model.ToolCopilot }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "GitHub Copilot" }
 
+// Capabilities declares what this project can say about Copilot.
+//
+// Cost is VENDOR-reported: cost.go stamps PriceSourceAIU from the vendor's own
+// nano-AI-unit valuation, which collect.stampCost is forbidden to overwrite
+// with a rate-card estimate. Activity is RECORDED BUT UNATTRIBUTED because an
+// execute_tool span's parent is the invoke_agent span, which makes it a SIBLING
+// of the chat spans the usage rows are built from rather than their child.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolCopilot,
+		Cost:      model.CostVendor,
+		Activity:  model.ActivityUnattributed,
+		Reasoning: model.ReasoningReportFor(model.ToolCopilot),
+		Tier:      model.TierLive,
+	}
+}
+
 // Discover finds every OTEL JSONL file under <root>/.copilot/otel (recursively)
 // and, additively, the single file named by COPILOT_OTEL_FILE_EXPORTER_PATH,
 // then every <root>/.copilot/session-state/<id>/events.jsonl. Each file becomes

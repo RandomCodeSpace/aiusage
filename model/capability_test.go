@@ -39,77 +39,34 @@ func TestToolsWithNoReasoningCounterSaySo(t *testing.T) {
 	}
 }
 
-// CapabilityFor fills Reasoning; a caller must never receive an entry with an
-// empty one just because the literal in the table omits it.
-func TestCapabilityForFillsReasoning(t *testing.T) {
-	for _, c := range toolCapabilities {
-		got, ok := CapabilityFor(c.Tool)
-		if !ok {
-			t.Fatalf("CapabilityFor(%q) not found in its own table", c.Tool)
-		}
-		if got.Reasoning == "" {
-			t.Errorf("CapabilityFor(%q) left Reasoning empty", c.Tool)
-		}
-		if got.Reasoning != ReasoningReportFor(c.Tool) {
-			t.Errorf("CapabilityFor(%q).Reasoning = %q, want %q", c.Tool, got.Reasoning, ReasoningReportFor(c.Tool))
-		}
+// RetiredCapabilities fills Reasoning; a caller must never receive an entry with
+// an empty one just because the literal in the table omits it. An empty field
+// renders as an empty line in the detail card, which reads as a rendering bug
+// rather than as a missing fact.
+func TestRetiredCapabilitiesAreComplete(t *testing.T) {
+	got := RetiredCapabilities()
+	if len(got) != len(retiredCapabilities) {
+		t.Fatalf("RetiredCapabilities returned %d entries, want %d", len(got), len(retiredCapabilities))
 	}
-}
-
-// An unknown tool is unknown. Answering with a plausible default would put four
-// invented facts on screen under a real tool's name.
-func TestCapabilityForRefusesUnknownTools(t *testing.T) {
-	if got, ok := CapabilityFor("not-a-harness"); ok {
-		t.Errorf("CapabilityFor(unknown) = %+v, ok=true; want no declaration", got)
-	}
-}
-
-// Exactly the four adapters that stamp a cost declare CostVendor. This is the
-// same fact PriceProvenance classifies per row, asserted per tool, so the two
-// halves of the provenance story cannot drift apart.
-func TestVendorCostDeclarationsMatchTheStampingAdapters(t *testing.T) {
-	want := map[string]bool{
-		ToolCopilot:  true,
-		ToolCrush:    true,
-		ToolGoose:    true,
-		ToolPi:       true,
-		ToolOpenClaw: true,
-	}
-	for _, c := range ToolCapabilities() {
-		if got := c.Cost == CostVendor; got != want[c.Tool] {
-			t.Errorf("%q declares Cost=%q; vendor-stamping adapters are %v", c.Tool, c.Cost, keysOf(want))
+	for _, c := range got {
+		if c.Tool == "" || c.Cost == "" || c.Activity == "" || c.Reasoning == "" || c.Tier == "" {
+			t.Errorf("retired declaration is incomplete: %+v", c)
+		}
+		if c.Reasoning != ReasoningReportFor(c.Tool) {
+			t.Errorf("retired %q has Reasoning=%q, want %q", c.Tool, c.Reasoning, ReasoningReportFor(c.Tool))
 		}
 	}
 }
 
-// Exactly the adapters that set UsageDedupKey on their activity rows declare an
-// exact join; exactly those that emit rows without one declare unattributed.
-// Everything else emits no activity at all.
-func TestActivityDeclarationsMatchTheAdapters(t *testing.T) {
-	exact := map[string]bool{
-		ToolClaudeCode: true, ToolCline: true, ToolDSH: true,
-		ToolOpenCode: true, ToolPi: true, ToolOpenClaw: true,
+// The returned slice is a copy: a caller that edits what it got must not be
+// editing the declaration every other caller reads.
+func TestRetiredCapabilitiesReturnsACopy(t *testing.T) {
+	got := RetiredCapabilities()
+	if len(got) == 0 {
+		t.Skip("no retired tools to copy")
 	}
-	unattributed := map[string]bool{ToolCodex: true, ToolCopilot: true, ToolGoose: true}
-
-	for _, c := range ToolCapabilities() {
-		want := ActivityNone
-		switch {
-		case exact[c.Tool]:
-			want = ActivityExact
-		case unattributed[c.Tool]:
-			want = ActivityUnattributed
-		}
-		if c.Activity != want {
-			t.Errorf("%q declares Activity=%q, want %q", c.Tool, c.Activity, want)
-		}
+	got[0].Tier = "tampered"
+	if again := RetiredCapabilities(); again[0].Tier == "tampered" {
+		t.Error("RetiredCapabilities handed out its own backing array")
 	}
-}
-
-func keysOf(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

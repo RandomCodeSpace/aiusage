@@ -108,6 +108,21 @@ func (Adapter) ID() string { return model.ToolKimiCode }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Kimi Code" }
 
+// Capabilities declares what this project can say about Kimi Code.
+//
+// Cost is COMPUTED: nothing here calls SetCost. There is NO activity at all —
+// this adapter references model.ActivityEvent nowhere, so its surface exposes
+// usage and nothing else.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolKimiCode,
+		Cost:      model.CostComputed,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(model.ToolKimiCode),
+		Tier:      model.TierLive,
+	}
+}
+
 // roots returns the Kimi Code data roots to scan, in precedence order. Both
 // environment variables are honoured when both are set: they name directories,
 // and scanning one extra directory is cheaper than silently collecting nothing

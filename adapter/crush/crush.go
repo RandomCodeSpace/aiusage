@@ -176,6 +176,22 @@ func (Adapter) ID() string { return model.ToolCrush }
 // DisplayName returns the human-friendly name.
 func (Adapter) DisplayName() string { return "Crush" }
 
+// Capabilities declares what this project can say about Crush.
+//
+// Cost is VENDOR-reported and it is the ONLY thing this adapter reports: one
+// event per growth of sessions.cost, zero tokens, stamped PriceSourceReported
+// so collect.stampCost cannot overwrite it. There is no activity at all — this
+// adapter references model.ActivityEvent nowhere.
+func (Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      model.ToolCrush,
+		Cost:      model.CostVendor,
+		Activity:  model.ActivityNone,
+		Reasoning: model.ReasoningReportFor(model.ToolCrush),
+		Tier:      model.TierLive,
+	}
+}
+
 // globalDir resolves the directory holding projects.json, following Crush's own
 // order: CRUSH_GLOBAL_DATA verbatim, else $XDG_DATA_HOME/crush, else
 // <home>/.local/share/crush. An explicit aiusage override for this tool

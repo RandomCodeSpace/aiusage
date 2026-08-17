@@ -138,6 +138,27 @@ func (a Adapter) ID() string { return a.tool }
 // DisplayName returns the human-friendly name.
 func (a Adapter) DisplayName() string { return a.label }
 
+// Capabilities declares what this project can say about this adapter's harness.
+//
+// Both harnesses declare the SAME values because they are one package over one
+// byte-identical session format — what the code can observe does not depend on
+// which of the two wrote the file. They remain two declarations under two tool
+// ids because they are two tools, and their rows are never summed.
+//
+// Cost is VENDOR-reported: pi.go stamps a.tool+"-reported" from the figure the
+// harness itself recorded, which collect.stampCost is forbidden to overwrite.
+// Activity is an EXACT join because a toolCall block sits in the SAME record as
+// the usage object it cost.
+func (a Adapter) Capabilities() model.ToolCapability {
+	return model.ToolCapability{
+		Tool:      a.tool,
+		Cost:      model.CostVendor,
+		Activity:  model.ActivityExact,
+		Reasoning: model.ReasoningReportFor(a.tool),
+		Tier:      model.TierLive,
+	}
+}
+
 // Discover locates the session transcripts of this adapter's harness.
 //
 // Both harnesses are scanned by the same rule — every `*.jsonl` under a
