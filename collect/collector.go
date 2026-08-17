@@ -152,7 +152,7 @@ func (s CycleStats) AllFailed() bool {
 // with CycleStats.Canceled set, and the counts in those stats cover only the
 // work done so far. Nothing is lost by the truncation — checkpoints ride the
 // event transactions — but the stats must be reported as partial.
-func RunCycle(ctx context.Context, reg *adapter.Registry, st store.Store, dc adapter.DiscoverConfig, opts ...Option) (CycleStats, error) {
+func RunCycle(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.DiscoverConfig, opts ...Option) (CycleStats, error) {
 	var o cycleOptions
 	for _, fn := range opts {
 		fn(&o)
@@ -302,7 +302,7 @@ func stripRaw(obs *adapter.Observation) {
 // collectSource reads one source, going through the incremental path when the
 // adapter supports it. A checkpoint load failure is non-fatal: collection
 // falls back to a full read, which is always correct.
-func collectSource(ctx context.Context, ad adapter.Adapter, st store.Store, src adapter.Source, stats *CycleStats) (adapter.Observation, error) {
+func collectSource(ctx context.Context, ad adapter.Adapter, st Store, src adapter.Source, stats *CycleStats) (adapter.Observation, error) {
 	inc, ok := ad.(adapter.Incremental)
 	if !ok {
 		return ad.Collect(ctx, src)
@@ -323,7 +323,7 @@ func collectSource(ctx context.Context, ad adapter.Adapter, st store.Store, src 
 // column at all: its cost is derived on read by joining the usage row it names,
 // so there is exactly one stamped cost per turn and no second copy to keep in
 // step with the ladder.
-func storeObservation(ctx context.Context, st store.Store, obs adapter.Observation, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
+func storeObservation(ctx context.Context, st Store, obs adapter.Observation, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
 	events, activity, contexts := obs.Events, obs.Activity, obs.TurnContexts
 	if len(events) == 0 && len(activity) == 0 && len(contexts) == 0 && cp == nil {
 		return store.Applied{}, nil
@@ -394,7 +394,7 @@ func stampCost(p Pricer, e *model.UsageEvent) {
 // Returns the number of new dedup keys inserted (0 or 1) and whether the
 // state actually advanced (false on a collision — the caller must then hold
 // the source checkpoint back so the delta stays re-derivable).
-func storeSnapshot(ctx context.Context, st store.Store, s model.AggregateSnapshot, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (int, bool, error) {
+func storeSnapshot(ctx context.Context, st Store, s model.AggregateSnapshot, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (int, bool, error) {
 	last, err := st.LastState(ctx, s.Tool, s.Key)
 	if err != nil {
 		return 0, false, fmt.Errorf("last state: %w", err)

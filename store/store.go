@@ -34,26 +34,39 @@
 // contexts and the checkpoint together, because a checkpoint that outran its
 // data would skip that data forever.
 //
-// # TWO HANDLES
+// # TWO HANDLES, AND THE ABSENCE THAT SEPARATES THEM
 //
-// Open is the full handle: it creates the file if absent, applies WAL,
-// synchronous=NORMAL, busy_timeout=5000 and foreign_keys=ON, migrates an older
-// schema, refuses a newer one (an older binary must never stamp a version
-// backwards), and chmods the database and its WAL/SHM sidecars to 0600 because
-// the raw column can hold transcript content. It is what the collector holds.
+// Open returns a *Ledger: the full handle. It creates the file if absent,
+// applies WAL, synchronous=NORMAL, busy_timeout=5000 and foreign_keys=ON,
+// migrates an older schema, refuses a newer one (an older binary must never
+// stamp a version backwards), and chmods the database and its
+// WAL/SHM sidecars to 0600 because the raw column can hold transcript content.
+// It is what the collector holds.
 //
-// OpenReadOnly is the read handle: an EXISTING database, opened mode=ro, with
-// no schema creation, no migration and no file mode touched. Its schema version
-// must equal this binary's EXACTLY and is refused in either direction -
-// migrating would be a write, and a reader that quietly serves a schema it does
-// not understand is worse than one that will not start. Every write path of
-// such a handle returns this package's own error, so a read-only consumer fails
-// on the method it called instead of on a driver error three layers down. That
-// refusal is a runtime one: both handles are the same concrete type today, and
-// a caller that wants the absence at compile time declares its own narrow
-// interface over the methods it actually calls, which is also the cheapest way
-// to fake this package in a test. EnsureRollup and RebuildRollup are writes and
-// are refused there; RollupStale is a read and is not.
+// OpenReadOnly returns a *Reader: an EXISTING database, opened mode=ro plus
+// query_only(1), with no schema creation, no migration and no file mode
+// touched. Its schema version must equal this binary's EXACTLY and is refused
+// in either direction - migrating would be a write, and a reader that quietly
+// serves a schema it does not understand is worse than one that will not start.
+//
+// A Reader HAS NO WRITE METHOD. That is the whole design (issue #72,
+// decisions 2 and 8): the append-only guarantee used to be defended by a flag
+// this package checked at the top of each write, on a handle whose type still
+// advertised InsertEvents to whoever held it, so "a serving process cannot
+// write the ledger" was a promise kept at runtime. It is now a property of the
+// type - a program that calls a write through a read handle does not compile,
+// and there is no test to write about it. Ledger EMBEDS *Reader, so the
+// collector holds one handle carrying both halves and hands l.Reader to
+// anything that only queries. EnsureRollup and RebuildRollup are writes and
+// live on Ledger; RollupStale is a read and lives on Reader, since a serving
+// process still has to know that the summary it would answer from covers
+// nothing.
+//
+// This package exports NO fat store interface. A consumer that wants a fake
+// declares its own interface over the methods it actually calls (collect.Store
+// and tui.DataSource are the two in this repository), which keeps the seam
+// beside the code that depends on it and lets a method be added here without
+// breaking an implementation nobody in this module wrote.
 //
 // # A READ HANDLE IS SAFE AGAINST A LIVE COLLECTOR
 //
@@ -122,7 +135,6 @@
 package store
 
 import (
-	"context"
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/model"
@@ -331,168 +343,4 @@ type DBStats struct {
 	EarliestEvent time.Time
 	LatestEvent   time.Time
 	SchemaVersion int // version recorded in the database, not the binary's
-}
-
-// Store is the persistence interface used by the collector and reporting.
-type Store interface {
-	// InsertEvents appends usage events idempotently (INSERT .. ON
-	// CONFLICT(dedup_key) DO NOTHING — a blanket OR IGNORE would also swallow
-	// CHECK violations) in a single transaction. Returns the count actually
-	// inserted (i.e. new dedup keys). Never updates or deletes existing rows.
-	// A row whose own insert fails (CHECK violation, empty dedup key) is
-	// skipped and reported via the returned error while the rest of the batch
-	// commits, so the count is meaningful even when the error is non-nil.
-	InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error)
-
-	// LastState returns the most recent observed counters for an aggregate
-	// accumulator cell (tool, key), or nil if none exists yet. Drives the
-	// monotonic-with-reset delta. This is mutable accumulator STATE, not
-	// history — the immutable history lives in usage_events as the deltas.
-	LastState(ctx context.Context, tool, key string) (*model.AggregateSnapshot, error)
-
-	// UpsertState records the latest observed counters for (tool, key),
-	// replacing any previous value (one row per cell).
-	UpsertState(ctx context.Context, s model.AggregateSnapshot) error
-
-	// ApplySnapshot atomically appends an aggregate cell's delta events and
-	// records its new accumulator state in ONE transaction, so a crash can
-	// never persist the events without the state (the next cycle would
-	// re-derive the same delta under a fresh dedup key — a permanent double
-	// count). When events is non-empty but every dedup key already exists,
-	// the state write is skipped: an unchanged baseline lets the next poll
-	// re-derive the colliding delta instead of dropping it. A non-nil cp is
-	// upserted under the same condition and in the same transaction, so a
-	// checkpoint can never claim data whose state write was skipped or
-	// rolled back. Returns the number of events actually inserted.
-	ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error)
-
-	// Checkpoint returns the stored incremental-collection state for a
-	// (tool, source path), or nil when none exists.
-	Checkpoint(ctx context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error)
-
-	// ApplyEvents appends usage events (same idempotent semantics as
-	// InsertEvents) and upserts the source checkpoint in ONE transaction. A
-	// checkpoint persisted outside the event transaction could outrun the
-	// events it claims — a crash between the two commits would then skip
-	// data forever. A nil cp degrades to a plain event insert; empty events
-	// with a non-nil cp writes just the checkpoint.
-	ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error)
-
-	// ApplyObservation appends usage events, appends agent activity rows, and
-	// upserts the source checkpoint — all in ONE transaction. It is what a
-	// collection cycle calls; ApplyEvents is the events-only shorthand for it.
-	//
-	// The single transaction is the point. Activity rows reference usage rows
-	// by dedup key, and the checkpoint gates the re-read of both: splitting
-	// them across transactions would let a crash advance the checkpoint past
-	// activity that never landed, losing it permanently, or leave a call
-	// pointing at a usage row that rolled back. Activity is appended AFTER the
-	// events so the row it names already exists.
-	//
-	// Activity has the same idempotence as events (ON CONFLICT(dedup_key) DO
-	// NOTHING) and the same per-row skip behaviour, so the returned counts stay
-	// meaningful when the error is non-nil.
-	ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error)
-
-	// ApplyBatch is ApplyObservation plus the turn contexts, and is what a
-	// collection cycle actually calls; ApplyObservation is the shorthand that
-	// omits them. Same single transaction, same ordering (events first, so the
-	// rows naming them by dedup key find them present), same idempotence: a turn
-	// context conflicts on (usage dedup key, dimension) and does nothing, which
-	// is what stops a re-read serving a turn's cost twice.
-	ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error)
-
-	// Summarize aggregates usage matching Filter, grouped per Filter.GroupBy.
-	Summarize(ctx context.Context, f Filter) (*Summary, error)
-
-	// UnpricedGroups returns the token totals of the matching rows that have
-	// NO stamped cost, grouped by Filter.GroupBy plus (tool, model, provider,
-	// service_tier). It exists so cost surfaces can value historical and
-	// unpriceable rows from the CURRENT price table without materialising one
-	// bucket per event. An empty result means every matching row is stamped.
-	UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error)
-
-	// SummarizeRollup answers the same question as Summarize from the derived
-	// rollup: identical numbers, without scanning the ledger. It cannot serve
-	// session or provider dimensions, distinct-session counts, or ranges finer
-	// than its 15-minute bucket - those stay with Summarize. See
-	// SQLite.SummarizeRollup for the exact differences.
-	SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary, error)
-
-	// EnsureRollup rebuilds the derived rollup when it disagrees with the
-	// ledger (an empty one just created by migration, or one that missed a
-	// write), and reports whether it rebuilt. The collector calls it before a
-	// pass; it is cheap when the rollup is in step.
-	EnsureRollup(ctx context.Context) (bool, error)
-
-	// RebuildRollup rebuilds the derived rollup from usage_events
-	// unconditionally, in one transaction. The rollup is derived data: this is
-	// always a safe repair, and it is the only direction a disagreement is
-	// ever resolved in.
-	RebuildRollup(ctx context.Context) error
-
-	// ListEvents returns events matching Filter, ordered by event_time then
-	// row id. The projection names its columns and EXCLUDES raw; pass WithRaw
-	// to include it (export --include-raw only). Used by export.
-	ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error)
-
-	// SummarizeActivity aggregates agent activity (tool calls, skill
-	// invocations, hook firings) matching ActivityFilter, grouped per its
-	// GroupBy, with tokens and cost ATTRIBUTED from the ledger: each call takes
-	// its joined usage row's counts divided by the number of calls that shared
-	// that turn. The division is integer and every operand non-negative, so the
-	// attributed total over any window is at most the same window's
-	// usage_events total — the split can understate, never inflate.
-	SummarizeActivity(ctx context.Context, f ActivityFilter) (*ActivitySummary, error)
-
-	// TopActivity ranks SummarizeActivity's buckets by one metric and caps them
-	// at limit (0 = uncapped), ordering and limiting in SQL. It answers "which
-	// skill is expensive" in one query. It needs at least one GroupBy
-	// dimension: ranking a single grand-total bucket is not a ranking.
-	TopActivity(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]ActivityBucket, error)
-
-	// SummarizeTurnContext aggregates what the turns that ran UNDER each value of
-	// ONE dimension actually cost, grouped per ActivityFilter.GroupBy (which
-	// accepts "value" and the queried dimension's own name, and refuses the
-	// call-level "kind"/"name"). This is the real answer to "which skill/agent
-	// is expensive": TopActivity ranks the turn that INVOKED a skill, which is
-	// one call, while the skill's own work is every turn that followed under it,
-	// and for a subagent there is no invoking call in the ledger at all.
-	//
-	// Unlike the activity queries it does NOT divide. Within one dimension each
-	// usage event has at most one context and the join is 1:1, so a bucket's
-	// cost is the full ledger cost of its turns and the buckets partition the
-	// window without overlap. It also counts turns that called no tool at all,
-	// which the activity ledger has no row for.
-	//
-	// THE DIMENSION IS A REQUIRED ARGUMENT, NOT A FILTER. The five dimensions
-	// plus activity_events' tool-call attribution are SIX PARTITIONS OF THE SAME
-	// DOLLARS: a turn commonly carries three or four contexts at once, each
-	// naming its full cost, so a query spanning two of them reports the same
-	// tokens twice. An unknown dimension is refused, grouping by "dimension" is
-	// refused, and grouping by a dimension OTHER than the queried one is
-	// refused — the mixing is unexpressible rather than discouraged.
-	SummarizeTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter) (*TurnContextSummary, error)
-
-	// TopTurnContext ranks SummarizeTurnContext's buckets by one metric and caps
-	// them at limit (0 = uncapped), ordering and limiting in SQL. It needs at
-	// least one GroupBy dimension. ActivityByCalls ranks by turns here.
-	TopTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter, by ActivityOrder, limit int) ([]TurnContextBucket, error)
-
-	// SummarizeSkillCost and TopSkillCost are the skill dimension's pre-existing
-	// spellings, delegating to the two above with model.DimensionSkill. They are
-	// kept because they read better at a call site that only wants skills; they
-	// are delegations rather than implementations, so there remains exactly one
-	// query builder and one table behind every per-skill number.
-	SummarizeSkillCost(ctx context.Context, f ActivityFilter) (*SkillCostSummary, error)
-	TopSkillCost(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]SkillCostBucket, error)
-
-	// SourceStats returns per-tool stored stats.
-	SourceStats(ctx context.Context) ([]SourceStat, error)
-
-	// Stats returns whole-database diagnostics.
-	Stats(ctx context.Context) (DBStats, error)
-
-	// Close releases the database handle.
-	Close() error
 }

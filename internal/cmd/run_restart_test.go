@@ -8,7 +8,6 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
 	"github.com/RandomCodeSpace/aiusage/collect"
-	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // stubDaemon replaces the collection loop and the exec syscall for the duration
@@ -21,7 +20,7 @@ func stubDaemon(t *testing.T, result error) (*collect.DaemonOptions, *string) {
 
 	var opts collect.DaemonOptions
 	var execed string
-	runDaemon = func(_ context.Context, _ *adapter.Registry, _ store.Store, _ adapter.DiscoverConfig, o collect.DaemonOptions) error {
+	runDaemon = func(_ context.Context, _ *adapter.Registry, _ collect.Store, _ adapter.DiscoverConfig, o collect.DaemonOptions) error {
 		opts = o
 		return result
 	}

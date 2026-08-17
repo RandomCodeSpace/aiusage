@@ -69,7 +69,7 @@ func run() error {
 		return err
 	}
 
-	return printTotals(ctx, st)
+	return printTotals(ctx, st.Reader)
 }
 
 func printStats(s collect.CycleStats) {
@@ -96,7 +96,11 @@ func printStats(s collect.CycleStats) {
 // printTotals reads back what the pass appended. Per-source errors are
 // non-fatal by design, so a cycle that reports some of them still has data worth
 // showing.
-func printTotals(ctx context.Context, st store.Store) error {
+//
+// It takes the READ half of the handle (*store.Reader, which *store.Ledger
+// embeds), because reading back is all it does: a function that cannot append
+// cannot append by accident either.
+func printTotals(ctx context.Context, st *store.Reader) error {
 	sum, err := st.Summarize(ctx, store.Filter{GroupBy: []string{"tool"}})
 	if err != nil {
 		return err

@@ -49,7 +49,7 @@ func turnCtx(usageKey string, dim model.TurnDimension, value string, et time.Tim
 //	mcp_server ruflo 300 / 3000                       (1 turn)
 //	plugin     mattpocock 300 / 3000                  (1 turn)
 //	tool calls 1500 / 15000 (divided shares)          (4 calls)
-func turnFixture(t *testing.T, st *SQLite, base time.Time) {
+func turnFixture(t *testing.T, st *Ledger, base time.Time) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -751,7 +751,7 @@ func TestTurnContextTableMatchesFreshSchema(t *testing.T) {
 
 // turnColumnSpec renders usage_turn_context's column names, types, NOT NULL
 // flags and primary-key positions as one comparable string.
-func turnColumnSpec(t *testing.T, st *SQLite) string {
+func turnColumnSpec(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(
 		`SELECT name, type, "notnull", pk FROM pragma_table_info('usage_turn_context') ORDER BY cid`)
@@ -788,7 +788,7 @@ func turnColumnSpec(t *testing.T, st *SQLite) string {
 
 // turnObjectSpec renders the names of every index and trigger attached to
 // usage_turn_context.
-func turnObjectSpec(t *testing.T, st *SQLite) string {
+func turnObjectSpec(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(
 		`SELECT type, name FROM sqlite_master WHERE tbl_name='usage_turn_context'

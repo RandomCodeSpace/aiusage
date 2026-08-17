@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/adapter"
-	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // DaemonOptions configures RunDaemon.
@@ -44,7 +43,7 @@ const minInterval = time.Second
 // Lifecycle: acquire lock -> write pid -> run one cycle immediately -> tick every
 // Interval. On ctx cancellation the in-flight cycle is allowed to finish, the
 // pidfile is removed, and the lock released. Per-cycle stats are logged.
-func RunDaemon(ctx context.Context, reg *adapter.Registry, st store.Store, dc adapter.DiscoverConfig, opt DaemonOptions) error {
+func RunDaemon(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.DiscoverConfig, opt DaemonOptions) error {
 	logger := opt.Logger
 	if logger == nil {
 		logger = log.Default()

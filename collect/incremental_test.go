@@ -22,7 +22,7 @@ import (
 // store, so tests and benchmarks drive the exact production read path.
 type incrementalFixture struct {
 	reg *adapter.Registry
-	st  *store.SQLite
+	st  *store.Ledger
 	dc  adapter.DiscoverConfig
 
 	codexSession string
@@ -159,7 +159,7 @@ func setupIncrementalFixture(t testing.TB) *incrementalFixture {
 	return fx
 }
 
-func storedTotal(t testing.TB, st store.Store) int64 {
+func storedTotal(t testing.TB, st *store.Ledger) int64 {
 	t.Helper()
 	sum, err := st.Summarize(context.Background(), store.Filter{})
 	if err != nil {

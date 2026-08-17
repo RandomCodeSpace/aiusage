@@ -48,7 +48,7 @@ func overrideRates(in map[string]config.ModelRates) map[string]pricing.Rates {
 // A failure to read the unpriced rows is not fatal — the table still renders,
 // showing only the stamped costs, which is an understatement rather than a
 // wrong number.
-func resolveCosts(ctx context.Context, st store.Store, cfg config.Config, sum *store.Summary, filter store.Filter) *report.Costs {
+func resolveCosts(ctx context.Context, st *store.Reader, cfg config.Config, sum *store.Summary, filter store.Filter) *report.Costs {
 	if sum == nil {
 		return nil
 	}

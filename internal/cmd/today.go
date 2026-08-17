@@ -51,7 +51,7 @@ func renderSummary(c *cobra.Command, filter store.Filter, asJSON bool) error {
 
 	// The JSON and table surfaces answer the same question: resolve the display
 	// costs once, before choosing how to render them.
-	costs := resolveCosts(ctx, st, cfg, sum, filter)
+	costs := resolveCosts(ctx, st.Reader, cfg, sum, filter)
 	if asJSON {
 		return report.WriteSummaryJSON(c.OutOrStdout(), sum, costs)
 	}

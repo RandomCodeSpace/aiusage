@@ -232,9 +232,12 @@ type Crumb struct {
 }
 
 // DataSource is the read-only query surface the TUI needs from a store. It is an
-// interface (not *store.SQLite) so tests can substitute a fake. It is aggregates
-// only: the dashboard renders summaries exclusively, never raw event lists —
-// which is why ListEvents / ListActivity are absent from both ledgers' halves.
+// interface declared HERE rather than one exported by package store (issue #72,
+// decision 8): it names the five methods the dashboard actually calls, so a test
+// fake is five methods and a query added to the store cannot break one. It is
+// aggregates only — the dashboard renders summaries exclusively, never raw event
+// lists — which is why ListEvents / ListActivity are absent from both ledgers'
+// halves.
 type DataSource interface {
 	Summarize(ctx context.Context, f store.Filter) (*store.Summary, error)
 
@@ -255,8 +258,10 @@ type DataSource interface {
 	TopTurnContext(ctx context.Context, dim model.TurnDimension, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.TurnContextBucket, error)
 }
 
-// compile-time guarantee that a *store.Store satisfies DataSource.
-var _ DataSource = (store.Store)(nil)
+// compile-time guarantee that the store's READ handle satisfies DataSource. The
+// full handle does too, by embedding it — but the reader is what the dashboard
+// is entitled to, and naming it here is what says so.
+var _ DataSource = (*store.Reader)(nil)
 
 // summaryCacheCap bounds the query cache (issue #4, 1g — it grew without bound
 // as quantized windows rolled over and drill paths accumulated). FLOOR: the

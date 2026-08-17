@@ -226,11 +226,8 @@ func rollupWatermark(ctx context.Context, q rowQuerier) (int64, error) {
 // transaction, so a reader never sees a half-built summary. It is the
 // definition of the table's contents: any disagreement between the rollup and
 // the ledger is resolved by running it, never by correcting the ledger.
-func (s *SQLite) RebuildRollup(ctx context.Context) error {
-	if err := s.writable(); err != nil {
-		return err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+func (l *Ledger) RebuildRollup(ctx context.Context) error {
+	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin rollup rebuild: %w", err)
 	}
@@ -285,18 +282,15 @@ func (s *SQLite) RebuildRollup(ctx context.Context) error {
 // and any write that skipped the delta. The event count catches the rollup that
 // tracked the newest ids but lost older ones - a rollup filled from a partial
 // ledger would otherwise pass the watermark check forever.
-func (s *SQLite) EnsureRollup(ctx context.Context) (bool, error) {
-	if err := s.writable(); err != nil {
-		return false, err
-	}
-	stale, err := s.RollupStale(ctx)
+func (l *Ledger) EnsureRollup(ctx context.Context) (bool, error) {
+	stale, err := l.RollupStale(ctx)
 	if err != nil {
 		return false, err
 	}
 	if !stale {
 		return false, nil
 	}
-	if err := s.RebuildRollup(ctx); err != nil {
+	if err := l.RebuildRollup(ctx); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -312,7 +306,7 @@ func (s *SQLite) EnsureRollup(ctx context.Context) (bool, error) {
 // Cheap in the common case and cheapest when the answer is yes: a watermark
 // that disagrees with MAX(id) returns before the two aggregate queries run. The
 // caller is still expected to cache the verdict rather than ask per request.
-func (s *SQLite) RollupStale(ctx context.Context) (bool, error) {
+func (s *Reader) RollupStale(ctx context.Context) (bool, error) {
 	mark, err := rollupWatermark(ctx, s.db)
 	if err != nil {
 		return false, err
@@ -358,7 +352,7 @@ func (s *SQLite) RollupStale(ctx context.Context) (bool, error) {
 //     a bucket is the finest thing the table knows. The snapped bounds come back
 //     in the result so a caller can label what it actually got instead of
 //     implying it asked for it.
-func (s *SQLite) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary, error) {
+func (s *Reader) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary, error) {
 	if len(f.Sessions) > 0 {
 		return nil, fmt.Errorf("store: rollup keeps no session dimension; filter sessions against the ledger")
 	}

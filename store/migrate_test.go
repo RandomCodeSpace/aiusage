@@ -207,7 +207,7 @@ func TestMigrateV2ToV3AddsCostColumns(t *testing.T) {
 // assertV3Columns checks the post-migration behaviour of the cost columns: the
 // pre-existing legacy row is unpriced (NULL, not zero) with empty provider and
 // tier, and a freshly stamped event round-trips its cost.
-func assertV3Columns(t *testing.T, st *SQLite) {
+func assertV3Columns(t *testing.T, st *Ledger) {
 	t.Helper()
 	ctx := context.Background()
 

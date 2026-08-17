@@ -13,7 +13,7 @@ var providerRef = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 // seedProviders inserts events across two named providers plus rows whose
 // source never named one, so a provider grouping has both cases to bucket.
-func seedProviders(t *testing.T, st *SQLite) {
+func seedProviders(t *testing.T, st *Ledger) {
 	t.Helper()
 	mk := func(key, provider string, total int64) model.UsageEvent {
 		e := ev(key, model.ToolOpenCode, providerRef, total)

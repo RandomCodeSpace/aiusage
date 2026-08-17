@@ -350,10 +350,14 @@ func activityGroupExprs(f ActivityFilter) ([]string, error) {
 	return out, nil
 }
 
-// SummarizeActivity aggregates activity matching the filter, grouped per
-// GroupBy, with attributed tokens and cost derived from the ledger. See
-// Store.SummarizeActivity.
-func (s *SQLite) SummarizeActivity(ctx context.Context, f ActivityFilter) (*ActivitySummary, error) {
+// SummarizeActivity aggregates agent activity (tool calls, skill invocations,
+// hook firings) matching ActivityFilter, grouped per its GroupBy, with tokens
+// and cost ATTRIBUTED from the ledger: each call takes its joined usage row's
+// counts divided by the number of calls that shared that turn. The division is
+// integer and every operand non-negative, so the attributed total over any
+// window is at most the same window's usage_events total — the split can
+// understate, never inflate.
+func (s *Reader) SummarizeActivity(ctx context.Context, f ActivityFilter) (*ActivitySummary, error) {
 	groupExprs, err := activityGroupExprs(f)
 	if err != nil {
 		return nil, err
@@ -410,11 +414,12 @@ func (s *SQLite) SummarizeActivity(ctx context.Context, f ActivityFilter) (*Acti
 	return sum, nil
 }
 
-// TopActivity ranks the grouped buckets by one metric and returns at most limit
-// of them — the "which skill is expensive" query, ordered and capped in SQL so
-// a caller never materialises the whole vocabulary to show ten rows. See
-// Store.TopActivity.
-func (s *SQLite) TopActivity(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]ActivityBucket, error) {
+// TopActivity ranks SummarizeActivity's grouped buckets by one metric and
+// returns at most limit of them (0 = uncapped) — the "which skill is expensive"
+// query, ordered and capped in SQL so a caller never materialises the whole
+// vocabulary to show ten rows. It needs at least one GroupBy dimension: ranking
+// a single grand-total bucket is not a ranking.
+func (s *Reader) TopActivity(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]ActivityBucket, error) {
 	groupExprs, err := activityGroupExprs(f)
 	if err != nil {
 		return nil, err
@@ -443,7 +448,7 @@ func (s *SQLite) TopActivity(ctx context.Context, f ActivityFilter, by ActivityO
 
 // queryActivityBuckets runs a built activity query and scans its rows. Both
 // public queries share it so their projections cannot drift apart.
-func (s *SQLite) queryActivityBuckets(ctx context.Context, q string, args []any, groupBy []string) ([]ActivityBucket, error) {
+func (s *Reader) queryActivityBuckets(ctx context.Context, q string, args []any, groupBy []string) ([]ActivityBucket, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: summarize activity: %w", err)
@@ -482,7 +487,7 @@ func (s *SQLite) queryActivityBuckets(ctx context.Context, q string, args []any,
 
 // distinctActivitySessions counts distinct non-empty session ids over the
 // filtered activity set.
-func (s *SQLite) distinctActivitySessions(ctx context.Context, where string, args []any) (int64, error) {
+func (s *Reader) distinctActivitySessions(ctx context.Context, where string, args []any) (int64, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT CASE WHEN a.session_id <> '' THEN a.session_id END)`+
 		activityFromSQL+where, args...)
@@ -571,7 +576,7 @@ func activityObservedUnix(a model.ActivityEvent) int64 {
 // ListActivity returns activity rows matching the filter, ordered by event time
 // then row id. It exists for tests and for a future export; the reporting
 // surfaces group instead of listing.
-func (s *SQLite) ListActivity(ctx context.Context, f ActivityFilter) ([]model.ActivityEvent, error) {
+func (s *Reader) ListActivity(ctx context.Context, f ActivityFilter) ([]model.ActivityEvent, error) {
 	where, args := buildActivityWhere(f)
 	// The alias is kept so buildActivityWhere's qualified columns resolve; no
 	// join is needed to list.

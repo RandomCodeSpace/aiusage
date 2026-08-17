@@ -14,7 +14,7 @@ import (
 // realStore opens a SQLite store in a temp dir, so these tests drive the
 // production write path rather than the in-memory fake. The rollup only exists
 // in the real store: the fake has no derived table to fall out of step.
-func realStore(t *testing.T) *store.SQLite {
+func realStore(t *testing.T) *store.Ledger {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.db"))
 	if err != nil {
@@ -28,7 +28,7 @@ func realStore(t *testing.T) *store.SQLite {
 // on both sides, so SQLite does the local bucketing for the ledger and the
 // rollup alike. Events are placed on exact UTC hour starts, which makes the
 // comparison independent of the system zone (see store/rollup_test.go).
-func assertCycleRollupMatchesLedger(t *testing.T, st *store.SQLite, dims ...string) {
+func assertCycleRollupMatchesLedger(t *testing.T, st *store.Ledger, dims ...string) {
 	t.Helper()
 	ctx := context.Background()
 	f := store.Filter{GroupBy: dims}
@@ -193,7 +193,7 @@ func TestCycleRebuildsRollupThatFellBehind(t *testing.T) {
 // for the empty table the v4 migration creates. It goes through a second raw
 // handle because the store offers no way to damage its own rollup - which is
 // the correct API and an inconvenient test.
-func clearRollup(t *testing.T, st *store.SQLite) {
+func clearRollup(t *testing.T, st *store.Ledger) {
 	t.Helper()
 	stats, err := st.Stats(context.Background())
 	if err != nil {

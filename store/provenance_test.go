@@ -14,7 +14,7 @@ var provRef = time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)
 // seedProvenance inserts one row per price source plus one unpriced row, and
 // returns the store. The mix is the real one: a vendor stamp, a vendor FAMILY
 // stamp, two ladder rungs and a row nothing could price.
-func seedProvenance(t *testing.T) (*SQLite, context.Context) {
+func seedProvenance(t *testing.T) (*Ledger, context.Context) {
 	t.Helper()
 	st := openTemp(t)
 	ctx := context.Background()

@@ -535,7 +535,7 @@ func TestActivityTableMatchesFreshSchema(t *testing.T) {
 
 // activityColumnSpec renders activity_events' column names, types, NOT NULL
 // flags and primary-key positions as one comparable string.
-func activityColumnSpec(t *testing.T, st *SQLite) string {
+func activityColumnSpec(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(
 		`SELECT name, type, "notnull", pk FROM pragma_table_info('activity_events') ORDER BY cid`)
@@ -566,7 +566,7 @@ func activityColumnSpec(t *testing.T, st *SQLite) string {
 // the two paths creates is a query plan that only one of them gets, and a
 // trigger only one of them creates is a table that is append-only on one
 // machine and not on the other.
-func activityObjectSpec(t *testing.T, st *SQLite) string {
+func activityObjectSpec(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(
 		`SELECT type, name FROM sqlite_master

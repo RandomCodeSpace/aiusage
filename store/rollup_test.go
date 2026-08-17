@@ -36,7 +36,7 @@ import (
 
 // utcOffsetSeconds asks SQLite (not Go) for the system zone's offset at an
 // instant, so the answer is the one the bucket expressions will use.
-func utcOffsetSeconds(t *testing.T, st *SQLite, at time.Time) int64 {
+func utcOffsetSeconds(t *testing.T, st *Ledger, at time.Time) int64 {
 	t.Helper()
 	var local int64
 	err := st.db.QueryRow(
@@ -74,7 +74,7 @@ func rollupEvent(key, tool, mdl, project string, at time.Time, cost int64) model
 // seedLedger fills a store with events spread over hours, days, weeks and
 // months, across three tools / models / projects, half of them unpriced. Every
 // event sits on an exact UTC hour start (see the file header).
-func seedLedger(t *testing.T, st *SQLite) {
+func seedLedger(t *testing.T, st *Ledger) {
 	t.Helper()
 	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	tools := []string{model.ToolClaudeCode, model.ToolCodex, model.ToolOpenCode}
@@ -103,7 +103,7 @@ func seedLedger(t *testing.T, st *SQLite) {
 // compares bucket for bucket. Both sides are produced by store queries, so the
 // local fold is SQLite's on both sides and a mismatch means the rollup really
 // disagrees with the ledger rather than that Go and SQLite disagree.
-func assertRollupMatchesLedger(t *testing.T, st *SQLite, f Filter) {
+func assertRollupMatchesLedger(t *testing.T, st *Ledger, f Filter) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -212,7 +212,7 @@ var subHourFoldBase = time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
 // compares every time granularity the rollup serves against the ledger. It is
 // the case a coarser bucket key gets wrong: an event at 00:20 UTC belongs to a
 // different local hour than one at 00:50 in a zone offset by half an hour.
-func assertSubHourFoldMatchesLedger(t *testing.T, st *SQLite) {
+func assertSubHourFoldMatchesLedger(t *testing.T, st *Ledger) {
 	t.Helper()
 	var evs []model.UsageEvent
 	for i := 0; i < 48; i++ {
@@ -511,7 +511,7 @@ func TestRollupTableMatchesFreshSchema(t *testing.T) {
 
 // rollupColumnSpec renders the rollup table's column names, types, NOT NULL
 // flags and primary-key positions as one comparable string.
-func rollupColumnSpec(t *testing.T, st *SQLite) string {
+func rollupColumnSpec(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(
 		`SELECT name, type, "notnull", pk FROM pragma_table_info('usage_rollup') ORDER BY cid`)
@@ -666,7 +666,7 @@ func TestRebuildIsIdempotent(t *testing.T) {
 }
 
 // rollupDump renders the whole rollup as one comparable string.
-func rollupDump(t *testing.T, st *SQLite) string {
+func rollupDump(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(`
 		SELECT bucket_start_unix, tool, model, project, input_tokens, output_tokens,

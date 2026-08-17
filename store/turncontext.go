@@ -515,9 +515,28 @@ func buildTurnContextWhere(dim model.TurnDimension, f ActivityFilter) (string, [
 	return " WHERE " + strings.Join(conds, " AND "), args
 }
 
-// SummarizeTurnContext aggregates the cost of the turns that ran under each
-// value of ONE dimension, grouped per GroupBy. See Store.SummarizeTurnContext.
-func (s *SQLite) SummarizeTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter) (*TurnContextSummary, error) {
+// SummarizeTurnContext aggregates what the turns that ran UNDER each value of
+// ONE dimension actually cost, grouped per ActivityFilter.GroupBy (which accepts
+// "value" and the queried dimension's own name, and refuses the call-level
+// "kind"/"name"). This is the real answer to "which skill/agent is expensive":
+// TopActivity ranks the turn that INVOKED a skill, which is one call, while the
+// skill's own work is every turn that followed under it, and for a subagent
+// there is no invoking call in the ledger at all.
+//
+// Unlike the activity queries it does NOT divide. Within one dimension each
+// usage event has at most one context and the join is 1:1, so a bucket's cost is
+// the full ledger cost of its turns and the buckets partition the window without
+// overlap. It also counts turns that called no tool at all, which the activity
+// ledger has no row for.
+//
+// THE DIMENSION IS A REQUIRED ARGUMENT, NOT A FILTER. The five dimensions plus
+// activity_events' tool-call attribution are SIX PARTITIONS OF THE SAME DOLLARS:
+// a turn commonly carries three or four contexts at once, each naming its full
+// cost, so a query spanning two of them reports the same tokens twice. An
+// unknown dimension is refused, grouping by "dimension" is refused, and grouping
+// by a dimension OTHER than the queried one is refused — the mixing is
+// unexpressible rather than discouraged.
+func (s *Reader) SummarizeTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter) (*TurnContextSummary, error) {
 	if err := checkTurnContextFilter(dim, f); err != nil {
 		return nil, err
 	}
@@ -581,10 +600,12 @@ func (s *SQLite) SummarizeTurnContext(ctx context.Context, dim model.TurnDimensi
 	return sum, nil
 }
 
-// TopTurnContext ranks one dimension's grouped buckets by one metric and returns
-// at most limit of them — the real "which skill/agent/server is expensive"
-// query. See Store.TopTurnContext.
-func (s *SQLite) TopTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter, by ActivityOrder, limit int) ([]TurnContextBucket, error) {
+// TopTurnContext ranks SummarizeTurnContext's buckets by one metric and caps them
+// at limit (0 = uncapped), ordering and limiting in SQL — the real "which
+// skill/agent/server is expensive" query. It needs at least one GroupBy
+// dimension, takes the dimension on the same required-argument terms
+// SummarizeTurnContext does, and ActivityByCalls ranks by turns here.
+func (s *Reader) TopTurnContext(ctx context.Context, dim model.TurnDimension, f ActivityFilter, by ActivityOrder, limit int) ([]TurnContextBucket, error) {
 	if err := checkTurnContextFilter(dim, f); err != nil {
 		return nil, err
 	}
@@ -618,19 +639,19 @@ func (s *SQLite) TopTurnContext(ctx context.Context, dim model.TurnDimension, f 
 // is a delegation and not a second implementation: the skill partition is not a
 // special case of anything, it is one of five, and giving it its own SQL would
 // be the two-tables mistake wearing a function signature.
-func (s *SQLite) SummarizeSkillCost(ctx context.Context, f ActivityFilter) (*SkillCostSummary, error) {
+func (s *Reader) SummarizeSkillCost(ctx context.Context, f ActivityFilter) (*SkillCostSummary, error) {
 	return s.SummarizeTurnContext(ctx, model.DimensionSkill, f)
 }
 
 // TopSkillCost is TopTurnContext pinned to the skill dimension. See
 // SummarizeSkillCost.
-func (s *SQLite) TopSkillCost(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]SkillCostBucket, error) {
+func (s *Reader) TopSkillCost(ctx context.Context, f ActivityFilter, by ActivityOrder, limit int) ([]SkillCostBucket, error) {
 	return s.TopTurnContext(ctx, model.DimensionSkill, f, by, limit)
 }
 
 // queryTurnContextBuckets runs a built turn-context query and scans its rows.
 // Both public queries share it so their projections cannot drift apart.
-func (s *SQLite) queryTurnContextBuckets(ctx context.Context, q string, args []any, groupBy []string) ([]TurnContextBucket, error) {
+func (s *Reader) queryTurnContextBuckets(ctx context.Context, q string, args []any, groupBy []string) ([]TurnContextBucket, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: summarize turn context: %w", err)
@@ -668,7 +689,7 @@ func (s *SQLite) queryTurnContextBuckets(ctx context.Context, q string, args []a
 
 // distinctTurnContextSessions counts distinct non-empty session ids over the
 // filtered context set.
-func (s *SQLite) distinctTurnContextSessions(ctx context.Context, where string, args []any) (int64, error) {
+func (s *Reader) distinctTurnContextSessions(ctx context.Context, where string, args []any) (int64, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT CASE WHEN c.session_id <> '' THEN c.session_id END)`+
 		turnContextFromSQL+where, args...)

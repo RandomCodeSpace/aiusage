@@ -13,7 +13,7 @@ import (
 // transcript line, not a usage object.
 const rawPayload = `{"usage":{"input_tokens":11},"content":"a whole transcript line"}`
 
-func seedWithRaw(t *testing.T, st *SQLite) {
+func seedWithRaw(t *testing.T, st *Ledger) {
 	t.Helper()
 	at := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
 	evs := []model.UsageEvent{

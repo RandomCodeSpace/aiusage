@@ -1,12 +1,14 @@
 // Command report-totals prints per-tool token totals for the last seven days
 // from an existing aiusage ledger. It is the smallest useful read-only
-// consumer: store.OpenReadOnly gives it the handle a serving process gets - a
-// mode=ro connection that creates no schema, runs no migration and touches no
-// file mode - and store.Summarize answers the whole question in one call, one
-// bucket per tool. The last thing it does is the point of the example: an
-// InsertEvents on that handle is refused by the store in its own name, so "this
-// process cannot write the ledger" holds by construction rather than by the
-// append-only triggers being the last line of defence.
+// consumer: store.OpenReadOnly hands back a *store.Reader - a mode=ro
+// connection that creates no schema, runs no migration and touches no file mode
+// - and Summarize answers the whole question in one call, one bucket per tool.
+//
+// The last thing it does is the point of the example. A *store.Reader has NO
+// WRITE METHOD, so `st.InsertEvents(...)` here is not a call that gets refused
+// at runtime - it is a program that does not build. "This process cannot write
+// the ledger" is a property of the type the consumer was handed, not a promise
+// checked somewhere below it.
 package main
 
 import (
@@ -65,7 +67,7 @@ func run() error {
 	fmt.Printf("%-14s %10d %14d %12s\n", "TOTAL",
 		sum.Totals.Events, sum.Totals.Total, cost(sum.Totals))
 
-	return refuseWrite(ctx, st)
+	return writesAreAbsent(st)
 }
 
 // cost renders a bucket's stamped cost with the two marks every aiusage surface
@@ -83,27 +85,25 @@ func cost(b store.Bucket) string {
 	return model.FormatCost(b.CostMicroUSD, b.UnpricedEvents > 0, known)
 }
 
-// refuseWrite proves the handle is read-only by using it wrongly on purpose.
+// ledgerWriter is a narrow interface declared the way a consumer of this module
+// is meant to declare one: at the point of use, naming only the method this
+// file cares about. Package store exports no fat interface to implement, so
+// this is also how a consumer fakes the store in its own tests.
 //
-// Two details make the proof mean something. The batch is NON-EMPTY, because
-// InsertEvents returns (0, nil) for an empty slice before it ever consults the
-// guard - a caller demonstrating the refusal with a zero-length batch
-// demonstrates nothing. And the event is well-formed (non-empty dedup key,
-// non-negative counts), so the only thing that can reject it is the read-only
-// guard rather than a CHECK violation that would look the same from here.
-func refuseWrite(ctx context.Context, st store.Store) error {
-	now := time.Now().UTC()
-	n, err := st.InsertEvents(ctx, []model.UsageEvent{{
-		Tool:         "example",
-		Model:        "example-model",
-		DedupKey:     "example|read-only-demo",
-		EventTime:    now,
-		ObservedTime: now,
-		Kind:         model.KindUsage,
-	}})
-	if err == nil {
-		return fmt.Errorf("the read-only handle accepted %d row(s); it must not", n)
+// It exists here to make the absence VISIBLE. The obvious demonstration -
+// calling InsertEvents on the read handle and printing the refusal - cannot be
+// written any more, because the compiler rejects it before the program runs.
+// Asking whether the handle satisfies the writer at all is the closest a
+// running program can get to showing you the same fact.
+type ledgerWriter interface {
+	InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error)
+}
+
+// writesAreAbsent reports that the read handle carries no write method.
+func writesAreAbsent(st *store.Reader) error {
+	if _, ok := any(st).(ledgerWriter); ok {
+		return errors.New("the read handle satisfies ledgerWriter; a serving process must not be able to append")
 	}
-	fmt.Printf("\nwrite refused by the read-only handle: %v\n", err)
+	fmt.Printf("\nthe read handle has no InsertEvents: a write through it does not compile\n")
 	return nil
 }

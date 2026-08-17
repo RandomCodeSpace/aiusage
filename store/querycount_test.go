@@ -108,7 +108,7 @@ func init() {
 
 // openCounting opens a fresh store whose statements are counted via the
 // wrapped driver, mirroring Open's DSN pragmas and schema setup.
-func openCounting(t *testing.T) *SQLite {
+func openCounting(t *testing.T) *Ledger {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "usage.db")
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
@@ -120,7 +120,7 @@ func openCounting(t *testing.T) *SQLite {
 		db.Close()
 		t.Fatalf("ensure schema: %v", err)
 	}
-	st := &SQLite{db: db, path: path}
+	st := &Ledger{Reader: &Reader{db: db, path: path}}
 	t.Cleanup(func() { st.Close() })
 	return st
 }
@@ -134,7 +134,7 @@ func statementsDuring(fn func()) int64 {
 
 // seedTools inserts events across three tools with models and sessions so the
 // read paths under test have multiple groups to aggregate.
-func seedTools(t *testing.T, st *SQLite) {
+func seedTools(t *testing.T, st *Ledger) {
 	t.Helper()
 	at := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	var evs []model.UsageEvent

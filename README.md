@@ -30,8 +30,11 @@ usually wants from them:
 While the module is at v0.x, breaking changes land only at MINOR version bumps
 and are named in that release's notes; a patch release never breaks a consumer.
 Inside a minor line the two surfaces an out-of-tree consumer builds against grow
-rather than change shape: `adapter.Adapter` and the `store.Store` handle gain
-methods, and the methods already there keep their signatures and their meaning.
+rather than change shape: `adapter.Adapter` and the store handles (`store.Reader`
+for queries, `store.Ledger` for the appends) gain methods, and the methods
+already there keep their signatures and their meaning. The handles are concrete
+types on purpose, so a method added to one breaks nobody; a consumer that wants
+a fake declares its own interface over the methods it calls.
 Growth of the Adapter interface itself is still a break - `Capabilities` was one,
 since every out-of-tree implementation stops compiling until it declares itself -
 so it arrives at a minor bump like any other, while behaviour that is genuinely

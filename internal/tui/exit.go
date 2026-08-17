@@ -7,8 +7,6 @@ import (
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // exit.go is the TUI's exit hygiene (issue #20): whatever kills the process,
@@ -45,7 +43,7 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 // tiles clickable; wheel scrolls/scrubs) are declared on the tea.View in View();
 // the program runs under a signal-aware context so a SIGHUP tears them back
 // down instead of dumping escape sequences into the user's shell.
-func Run(st store.Store, opt Options) error {
+func Run(st DataSource, opt Options) error {
 	ctx, stop := signalContext(context.Background())
 	defer stop()
 

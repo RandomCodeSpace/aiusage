@@ -24,12 +24,16 @@ import (
 //
 // The real SQLite-backed store (store.Open) is assembled in a sibling package
 // during integration. To keep this leaf package self-checkable, the tests use a
-// faithful in-memory implementation of store.Store that reproduces the two
+// faithful in-memory implementation of collect.Store that reproduces the two
 // behaviours the collector depends on:
 //   - InsertEvents is INSERT OR IGNORE on DedupKey (append-only, idempotent).
 //   - LastState / UpsertState keep exactly one row per (tool, key) accumulator.
+//
 // Integration swaps this for store.Open(tmpfile); the collector code is store-
-// agnostic via the store.Store interface.
+// agnostic via the Store interface this package declares for itself (issue #72,
+// decision 8), which is why the fake is six methods of real behaviour rather
+// than thirty methods of which most return nil. The rest of what it carries is
+// read-back the assertions use, not surface the collector can reach.
 // ---------------------------------------------------------------------------
 
 type fakeStore struct {
@@ -46,7 +50,7 @@ type fakeStore struct {
 	ensureCalls   int                                // EnsureRollup calls (one per cycle)
 }
 
-var _ store.Store = (*fakeStore)(nil)
+var _ Store = (*fakeStore)(nil)
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
@@ -184,9 +188,10 @@ func (s *fakeStore) ApplyBatch(_ context.Context, b store.ObservationBatch) (sto
 
 // SummarizeActivity reproduces the real store's attribution: each call takes
 // its joined usage row's counts divided by the calls that shared the turn, so a
-// multi-call turn is never counted more than once. The collector never calls
-// it; it exists so the fake still satisfies store.Store, and so a collect-level
-// test can assert the non-inflation invariant without SQLite.
+// multi-call turn is never counted more than once. The collector cannot reach
+// it — it is not on the Store interface this package declares — and it is here
+// so a collect-level test can assert the non-inflation invariant without
+// SQLite.
 func (s *fakeStore) SummarizeActivity(_ context.Context, f store.ActivityFilter) (*store.ActivitySummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -225,12 +230,6 @@ func (s *fakeStore) SummarizeActivity(_ context.Context, f store.ActivityFilter)
 	return &store.ActivitySummary{GroupBy: f.GroupBy, Totals: b}, nil
 }
 
-// TopActivity is unreachable through the collector; the fake does no ranking.
-// It exists so the fake still satisfies store.Store.
-func (s *fakeStore) TopActivity(context.Context, store.ActivityFilter, store.ActivityOrder, int) ([]store.ActivityBucket, error) {
-	return nil, nil
-}
-
 // SummarizeTurnContext reproduces the real store's turn attribution, which is
 // the interesting half: NO division, and ONE dimension per query. Each context
 // names one usage row and each usage row has at most one value per dimension
@@ -241,9 +240,8 @@ func (s *fakeStore) TopActivity(context.Context, store.ActivityFilter, store.Act
 // carrying four contexts would be counted four times, which is the mistake the
 // required argument exists to prevent.
 //
-// The collector never calls it; it exists so the fake satisfies store.Store and
-// so a collect-level test can assert that every attribution stays inside the
-// real total.
+// The collector cannot reach it either; it is here so a collect-level test can
+// assert that every attribution stays inside the real total.
 func (s *fakeStore) SummarizeTurnContext(_ context.Context, dim model.TurnDimension, f store.ActivityFilter) (*store.TurnContextSummary, error) {
 	if !dim.Valid() {
 		return nil, fmt.Errorf("unknown turn-context dimension %q", dim)
@@ -296,21 +294,6 @@ func (s *fakeStore) SummarizeTurnContext(_ context.Context, dim model.TurnDimens
 	return &store.TurnContextSummary{Dimension: dim, GroupBy: f.GroupBy, Totals: b}, nil
 }
 
-// TopTurnContext is unreachable through the collector; the fake does no ranking.
-func (s *fakeStore) TopTurnContext(context.Context, model.TurnDimension, store.ActivityFilter, store.ActivityOrder, int) ([]store.TurnContextBucket, error) {
-	return nil, nil
-}
-
-// SummarizeSkillCost and TopSkillCost delegate exactly as the real store does,
-// so the fake cannot accidentally offer a second answer to the skill question.
-func (s *fakeStore) SummarizeSkillCost(ctx context.Context, f store.ActivityFilter) (*store.SkillCostSummary, error) {
-	return s.SummarizeTurnContext(ctx, model.DimensionSkill, f)
-}
-
-func (s *fakeStore) TopSkillCost(ctx context.Context, f store.ActivityFilter, by store.ActivityOrder, limit int) ([]store.SkillCostBucket, error) {
-	return s.TopTurnContext(ctx, model.DimensionSkill, f, by, limit)
-}
-
 func containsStr(hay []string, needle string) bool {
 	for _, v := range hay {
 		if v == needle {
@@ -355,39 +338,6 @@ func (s *fakeStore) Summarize(_ context.Context, f store.Filter) (*store.Summary
 	return &store.Summary{GroupBy: f.GroupBy, Totals: b}, nil
 }
 
-// UnpricedGroups aggregates the stored events with no stamped cost, grouped by
-// the attributes a display-time price lookup needs. The collector never calls
-// it; it exists so the fake still satisfies store.Store.
-func (s *fakeStore) UnpricedGroups(_ context.Context, _ store.Filter) ([]store.UnpricedGroup, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	byKey := map[string]*store.UnpricedGroup{}
-	var order []string
-	for _, e := range s.events {
-		if _, priced := e.Cost(); priced {
-			continue
-		}
-		k := e.Tool + "|" + e.Model + "|" + e.Provider + "|" + e.ServiceTier
-		g, ok := byKey[k]
-		if !ok {
-			g = &store.UnpricedGroup{Tool: e.Tool, Model: e.Model, Provider: e.Provider, ServiceTier: e.ServiceTier}
-			byKey[k] = g
-			order = append(order, k)
-		}
-		g.Events++
-		g.Input += e.InputTokens
-		g.Output += e.OutputTokens
-		g.CacheCreation += e.CacheCreationTokens
-		g.CacheRead += e.CacheReadTokens
-		g.Reasoning += e.ReasoningTokens
-	}
-	out := make([]store.UnpricedGroup, 0, len(order))
-	for _, k := range order {
-		out = append(out, *byKey[k])
-	}
-	return out, nil
-}
-
 func (s *fakeStore) ListEvents(_ context.Context, _ store.Filter, _ ...store.ListOption) ([]model.UsageEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -397,8 +347,8 @@ func (s *fakeStore) ListEvents(_ context.Context, _ store.Filter, _ ...store.Lis
 }
 
 // SummarizeRollup is unreachable through the collector; the fake keeps no
-// rollup, so it answers from the same events Summarize reads. It exists so the
-// fake still satisfies store.Store.
+// rollup, so it answers from the same events Summarize reads. It is here for the
+// tests that read a rollup-served answer back.
 func (s *fakeStore) SummarizeRollup(ctx context.Context, f store.Filter) (*store.RollupSummary, error) {
 	sum, err := s.Summarize(ctx, f)
 	if err != nil {
@@ -423,11 +373,7 @@ func (s *fakeStore) EnsureRollup(context.Context) (bool, error) {
 	return false, nil
 }
 
-func (s *fakeStore) RebuildRollup(context.Context) error { return nil }
-
-func (s *fakeStore) SourceStats(context.Context) ([]store.SourceStat, error) { return nil, nil }
-func (s *fakeStore) Stats(context.Context) (store.DBStats, error)            { return store.DBStats{}, nil }
-func (s *fakeStore) Close() error                                            { return nil }
+func (s *fakeStore) Close() error { return nil }
 
 func windowTotal(t *testing.T, st *fakeStore, since, until time.Time) int64 {
 	t.Helper()

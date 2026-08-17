@@ -6,7 +6,6 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
 	"github.com/RandomCodeSpace/aiusage/model"
-	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // capability_test.go is the seam that keeps the capability declarations honest.
@@ -159,7 +158,7 @@ func TestRootHandsCapabilitiesToTheTUI(t *testing.T) {
 	var got tui.Options
 	var launched bool
 	isTTY = func() bool { return true }
-	runTUI = func(_ store.Store, opt tui.Options) error {
+	runTUI = func(_ tui.DataSource, opt tui.Options) error {
 		got, launched = opt, true
 		return nil
 	}

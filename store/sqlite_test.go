@@ -14,7 +14,7 @@ import (
 )
 
 // openTemp opens a fresh SQLite store in a temp dir.
-func openTemp(t *testing.T) *SQLite {
+func openTemp(t *testing.T) *Ledger {
 	t.Helper()
 	db := filepath.Join(t.TempDir(), "usage.db")
 	st, err := Open(db)
@@ -138,7 +138,7 @@ func TestDurabilitySurvivesReopenAndCompaction(t *testing.T) {
 	}
 }
 
-func windowTot(t *testing.T, st *SQLite, since, until time.Time) int64 {
+func windowTot(t *testing.T, st *Ledger, since, until time.Time) int64 {
 	t.Helper()
 	sum, err := st.Summarize(context.Background(), Filter{Since: since, Until: until})
 	if err != nil {

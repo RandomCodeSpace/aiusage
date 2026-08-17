@@ -138,7 +138,7 @@ func seedBenchLedger() (string, error) {
 
 // benchLedgerStore opens the shared synthetic ledger read-only, seeding it on
 // first use.
-func benchLedgerStore(b *testing.B) *store.SQLite {
+func benchLedgerStore(b *testing.B) *store.Reader {
 	b.Helper()
 	benchLedgerOnce.Do(func() { benchLedgerPath, benchLedgerErr = seedBenchLedger() })
 	if benchLedgerErr != nil {

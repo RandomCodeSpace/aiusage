@@ -10,7 +10,6 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
-	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // A discovery sweep that never gets to run must report every tool as unknown -
@@ -88,7 +87,7 @@ func TestRootHandsDiscoveredSourcesToTheTUI(t *testing.T) {
 	var got tui.Options
 	var launched bool
 	isTTY = func() bool { return true }
-	runTUI = func(_ store.Store, opt tui.Options) error {
+	runTUI = func(_ tui.DataSource, opt tui.Options) error {
 		got, launched = opt, true
 		return nil
 	}

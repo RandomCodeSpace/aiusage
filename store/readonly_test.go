@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -76,43 +77,92 @@ func TestOpenReadOnlyServesReads(t *testing.T) {
 	}
 }
 
-// TestOpenReadOnlyRefusesEveryWrite pins the guarantee a serving process is
-// given: the handle cannot write the ledger, and it says so itself rather than
-// surfacing a driver error from three layers down.
-func TestOpenReadOnlyRefusesEveryWrite(t *testing.T) {
-	path := seedForReadOnly(t)
-	ctx := context.Background()
+// ledgerWrites is every write this package offers, spelled as one interface so
+// a test can ask whether a handle has them. It is the shape a consumer would
+// have to declare to call a write through an interface, which is exactly what
+// the read handle must never satisfy.
+type ledgerWrites interface {
+	InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error)
+	ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error)
+	ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error)
+	ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error)
+	ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error)
+	UpsertState(ctx context.Context, s model.AggregateSnapshot) error
+	RebuildRollup(ctx context.Context) error
+	EnsureRollup(ctx context.Context) (bool, error)
+}
 
+// The full handle has all of them. Stated here rather than in the source
+// because it is a claim about the SPLIT, not about either type alone: a write
+// that quietly moved onto Reader would still satisfy this, which is what the
+// next test is for.
+var _ ledgerWrites = (*Ledger)(nil)
+
+// TestReadHandleHasNoWrites is the guarantee a serving process is given, and it
+// is now a property of the TYPE rather than a runtime refusal: a *Reader carries
+// no write method, so a program that calls one does not compile and there is no
+// error path to test.
+//
+// What is left to check is that the split has not silently leaked - a write
+// added to Reader instead of Ledger, or Reader growing a method that satisfies
+// the writer interface some other way. The assertion is therefore inverted: the
+// read handle must NOT satisfy ledgerWrites, method by method, so a failure
+// names the method that leaked instead of reporting that "something" changed.
+func TestReadHandleHasNoWrites(t *testing.T) {
+	var handle any = (*Reader)(nil)
+	if _, ok := handle.(ledgerWrites); ok {
+		t.Fatalf("*Reader satisfies ledgerWrites; a read-only handle must carry no write method")
+	}
+	for _, w := range []struct {
+		name  string
+		probe any
+	}{
+		{"InsertEvents", (*interface {
+			InsertEvents(context.Context, []model.UsageEvent) (int, error)
+		})(nil)},
+		{"ApplyEvents", (*interface {
+			ApplyEvents(context.Context, []model.UsageEvent, *model.SourceCheckpoint) (int, error)
+		})(nil)},
+		{"ApplyObservation", (*interface {
+			ApplyObservation(context.Context, []model.UsageEvent, []model.ActivityEvent, *model.SourceCheckpoint) (Applied, error)
+		})(nil)},
+		{"ApplyBatch", (*interface {
+			ApplyBatch(context.Context, ObservationBatch) (Applied, error)
+		})(nil)},
+		{"ApplySnapshot", (*interface {
+			ApplySnapshot(context.Context, []model.UsageEvent, model.AggregateSnapshot, *model.SourceCheckpoint) (int, error)
+		})(nil)},
+		{"UpsertState", (*interface {
+			UpsertState(context.Context, model.AggregateSnapshot) error
+		})(nil)},
+		{"RebuildRollup", (*interface{ RebuildRollup(context.Context) error })(nil)},
+		{"EnsureRollup", (*interface {
+			EnsureRollup(context.Context) (bool, error)
+		})(nil)},
+	} {
+		if reflect.TypeOf((*Reader)(nil)).Implements(reflect.TypeOf(w.probe).Elem()) {
+			t.Errorf("*Reader has %s; it belongs on Ledger", w.name)
+		}
+	}
+}
+
+// TestReadOnlyDSNRefusesAWrite is the defence in depth behind the type. The
+// compile-time absence covers callers of this package; the DSN covers a
+// statement issued from INSIDE it, which is the only place a write could now
+// come from. mode=ro cannot create, write or lock the file and query_only(1)
+// makes the connection refuse a write statement outright, so the guarantee does
+// not rest on this package never making a mistake.
+func TestReadOnlyDSNRefusesAWrite(t *testing.T) {
+	path := seedForReadOnly(t)
 	st, err := OpenReadOnly(path)
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
 	defer st.Close()
 
-	at := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
-	ev := rollupEvent("ro-write", model.ToolCodex, "gpt-5", "/w/alpha", at, 1)
-	snap := model.AggregateSnapshot{Tool: model.ToolHermes, Key: "k", ObservedTime: at}
-	cp := model.SourceCheckpoint{Tool: model.ToolCodex, SourcePath: "/src/a"}
-
-	writes := []struct {
-		name string
-		err  error
-	}{
-		{"InsertEvents", func() error { _, e := st.InsertEvents(ctx, []model.UsageEvent{ev}); return e }()},
-		{"ApplyEvents", func() error { _, e := st.ApplyEvents(ctx, []model.UsageEvent{ev}, &cp); return e }()},
-		{"ApplySnapshot", func() error { _, e := st.ApplySnapshot(ctx, []model.UsageEvent{ev}, snap, nil); return e }()},
-		{"UpsertState", st.UpsertState(ctx, snap)},
-		{"RebuildRollup", st.RebuildRollup(ctx)},
-		{"EnsureRollup", func() error { _, e := st.EnsureRollup(ctx); return e }()},
-	}
-	for _, w := range writes {
-		if w.err == nil {
-			t.Errorf("%s succeeded on a read-only handle", w.name)
-			continue
-		}
-		if !strings.Contains(w.err.Error(), "read-only") {
-			t.Errorf("%s failed with %v; the refusal must name the read-only handle", w.name, w.err)
-		}
+	if _, err := st.db.ExecContext(context.Background(),
+		`INSERT INTO schema_meta(key, value) VALUES('probe','1')`); err == nil {
+		t.Fatalf("a read-only connection accepted a write statement")
 	}
 
 	// Nothing reached the file.
@@ -121,7 +171,7 @@ func TestOpenReadOnlyRefusesEveryWrite(t *testing.T) {
 		t.Fatalf("reopen read-write: %v", err)
 	}
 	defer rw.Close()
-	evs, err := rw.ListEvents(ctx, Filter{})
+	evs, err := rw.ListEvents(context.Background(), Filter{})
 	if err != nil || len(evs) != 2 {
 		t.Fatalf("post-refusal events=%d err=%v want 2,nil", len(evs), err)
 	}

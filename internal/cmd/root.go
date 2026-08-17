@@ -238,10 +238,13 @@ func uiStatePath(cfg config.Config) string {
 	return filepath.Join(filepath.Dir(cfg.PIDPath), "ui-state.json")
 }
 
-// openStore opens the configured database. The collector (run/once) needs a
-// writable handle; everything else is read-only over the data but the store's
-// Open is the single entry point either way.
-func openStore(cfg config.Config) (store.Store, error) {
+// openStore opens the configured database and returns the FULL handle. The
+// collector (run/once) needs the writes; every reporting command holds the same
+// handle and only reads through it, since store.Open is what creates the file
+// and migrates it - a CLI whose first ever command is `report` must still end up
+// with a database. A path that only queries takes st.Reader, which carries no
+// write method at all.
+func openStore(cfg config.Config) (*store.Ledger, error) {
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("open store %s: %w", cfg.DBPath, err)

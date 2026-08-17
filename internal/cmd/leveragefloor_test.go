@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
-	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // The hero's leverage floor is configurable (issue #39), which is only true if
@@ -30,7 +29,7 @@ func TestRootHandsConfiguredLeverageFloorToTheTUI(t *testing.T) {
 	var got tui.Options
 	var launched bool
 	isTTY = func() bool { return true }
-	runTUI = func(_ store.Store, opt tui.Options) error {
+	runTUI = func(_ tui.DataSource, opt tui.Options) error {
 		got, launched = opt, true
 		return nil
 	}

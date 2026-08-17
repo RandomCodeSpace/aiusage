@@ -1,4 +1,4 @@
-// SQLite-backed implementation of the Store interface. Pure Go via
+// SQLite-backed implementation of the two handles. Pure Go via
 // modernc.org/sqlite (CGO_ENABLED=0). The append-only guarantee is enforced by
 // schema.sql (UNIQUE(dedup_key) + no-UPDATE/no-DELETE triggers); this file only
 // ever appends to usage_events (INSERT .. ON CONFLICT(dedup_key) DO NOTHING)
@@ -9,7 +9,6 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -28,18 +27,34 @@ var schemaSQL string
 // full latest schema, and add the matching step to migrations (migrate.go).
 const SchemaVersion = 7
 
-// SQLite is the concrete append-only store backed by modernc.org/sqlite.
-type SQLite struct {
+// Reader is the READ handle: every query, summary, listing and ranking this
+// package answers, and NOT ONE METHOD THAT WRITES. That absence is the point.
+// The append-only ledger used to be defended at three depths - the schema's
+// no-UPDATE/no-DELETE triggers, the mode=ro connection, and a flag this package
+// checked at the top of each write method - all three of them at RUNTIME, on a
+// handle whose type advertised InsertEvents to anyone holding it. A consumer
+// given one of these cannot call a write, cannot compile a program that calls a
+// write, and needs no test to prove it did not (issue #72, decision 2 and 8).
+//
+// It is returned by OpenReadOnly and embedded in Ledger, so the collector holds
+// one handle carrying both halves while every reporting surface can be handed
+// the read half alone. Consumers that want a fake declare their own narrow
+// interface over the methods they actually call - this package exports no fat
+// one to implement.
+type Reader struct {
 	db   *sql.DB
 	path string
-	// readOnly marks a handle opened by OpenReadOnly. SQLite would refuse the
-	// writes anyway (mode=ro); the flag makes the refusal this package's own,
-	// so a read-only consumer fails on the method it called rather than on a
-	// driver error three layers down.
-	readOnly bool
 }
 
-var _ Store = (*SQLite)(nil)
+// Ledger is the FULL handle: a Reader plus the appends. It is what Open returns
+// and what the collector holds, and it is the only type in this package that
+// can add a row to any of the three append-only tables, upsert accumulator
+// state or rebuild the derived rollup.
+//
+// The Reader is embedded by pointer so a caller that only reads can be handed
+// l.Reader by name rather than by an interface conversion, and so the two
+// handles are never two connections to one file.
+type Ledger struct{ *Reader }
 
 // Open opens (creating if absent) the database at path with WAL and
 // busy_timeout=5000 pragmas, then reads the recorded schema version before
@@ -47,7 +62,7 @@ var _ Store = (*SQLite)(nil)
 // migrations (migrate.go), and a newer version is refused so an older binary
 // can never stamp it backwards. The handle is read/write because the collector
 // appends to it; all reporting paths only issue SELECTs.
-func Open(path string) (*SQLite, error) {
+func Open(path string) (*Ledger, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store: empty database path")
 	}
@@ -76,26 +91,32 @@ func Open(path string) (*SQLite, error) {
 	// directly. Best-effort: doctor surfaces perms that could not be repaired.
 	restrictPerms(path)
 
-	return &SQLite{db: db, path: path}, nil
+	return &Ledger{Reader: &Reader{db: db, path: path}}, nil
 }
 
 // OpenReadOnly opens an EXISTING database for reading only (issue #60): the
 // connection is mode=ro, no schema is created, no migration is run, and no file
-// mode is touched. It is what a serving process gets, so "this process cannot
-// write the ledger" is true by construction rather than by the append-only
-// triggers being the last line of defence.
+// mode is touched. It returns a Reader, which HAS NO WRITE METHOD, so "this
+// process cannot write the ledger" is a property of the type its caller holds
+// rather than a promise checked somewhere further down.
+//
+// The connection is still opened mode=ro plus query_only(1) - defence in depth,
+// the same DSN every adapter uses over an agent's own database. The compile-time
+// absence covers this package's own API; the pragmas cover a future statement
+// issued from inside this package, which is where a write would have to come
+// from now that no caller can ask for one.
 //
 // A schema version that differs from this binary's in EITHER direction is
 // refused. Migrating would be a write, and a reader that quietly serves a
 // schema it does not understand is worse than one that will not start.
-func OpenReadOnly(path string) (*SQLite, error) {
+func OpenReadOnly(path string) (*Reader, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store: empty database path")
 	}
 	// No journal_mode pragma: WAL is a property of the file, and setting it on
 	// a read-only connection fails. busy_timeout still matters - readers wait
 	// out a writer's commit instead of erroring.
-	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	dsn := "file:" + path + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s read-only: %w", path, err)
@@ -122,19 +143,7 @@ func OpenReadOnly(path string) (*SQLite, error) {
 			path, version, SchemaVersion)
 	}
 
-	return &SQLite{db: db, path: path, readOnly: true}, nil
-}
-
-// errReadOnly is returned by every write path of a handle from OpenReadOnly.
-var errReadOnly = errors.New("store: this database handle is read-only")
-
-// writable guards the write paths. It is the whole reason SQLite carries the
-// flag: the refusal names the store, not the driver.
-func (s *SQLite) writable() error {
-	if s.readOnly {
-		return errReadOnly
-	}
-	return nil
+	return &Reader{db: db, path: path}, nil
 }
 
 // restrictPerms chmods the DB and its WAL/SHM sidecars to 0600. Missing
@@ -167,7 +176,7 @@ func dirOf(path string) string {
 }
 
 // Close releases the database handle.
-func (s *SQLite) Close() error { return s.db.Close() }
+func (s *Reader) Close() error { return s.db.Close() }
 
 // InsertEvents appends events idempotently in a single transaction. Returns the
 // count of rows actually inserted (new dedup keys). Existing dedup keys are
@@ -175,14 +184,11 @@ func (s *SQLite) Close() error { return s.db.Close() }
 // (CHECK violation, empty dedup key) is skipped and reported in the returned
 // error while the rest of the batch still commits — one poison row must not
 // abort a batch that is re-read and retried every cycle.
-func (s *SQLite) InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error) {
+func (l *Ledger) InsertEvents(ctx context.Context, events []model.UsageEvent) (int, error) {
 	if len(events) == 0 {
 		return 0, nil
 	}
-	if err := s.writable(); err != nil {
-		return 0, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("store: begin tx: %w", err)
 	}
@@ -291,16 +297,20 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 // crash in the window that used to double count (events committed, state not).
 var applySnapshotFault func() error
 
-// ApplySnapshot atomically appends the delta events and records the new
-// accumulator state in one transaction — see Store.ApplySnapshot for the
-// contract, including the skipped state write on a fully-collided insert.
-// The checkpoint upsert shares the state write's condition: a collided delta
-// stays re-derivable only while neither baseline nor checkpoint advances.
-func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
-	if err := s.writable(); err != nil {
-		return 0, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+// ApplySnapshot atomically appends an aggregate cell's delta events and records
+// its new accumulator state in ONE transaction, so a crash can never persist the
+// events without the state (the next cycle would re-derive the same delta under
+// a fresh dedup key — a permanent double count).
+//
+// When events is non-empty but every dedup key already exists, the state write
+// is SKIPPED: an unchanged baseline lets the next poll re-derive the colliding
+// delta instead of dropping it. A non-nil cp is upserted under the same
+// condition and in the same transaction, so a checkpoint can never claim data
+// whose state write was skipped or rolled back — a collided delta stays
+// re-derivable only while neither baseline nor checkpoint advances. Returns the
+// number of events actually inserted.
+func (l *Ledger) ApplySnapshot(ctx context.Context, events []model.UsageEvent, state model.AggregateSnapshot, cp *model.SourceCheckpoint) (int, error) {
+	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("store: begin tx: %w", err)
 	}
@@ -336,37 +346,50 @@ func (s *SQLite) ApplySnapshot(ctx context.Context, events []model.UsageEvent, s
 	return inserted, nil
 }
 
-// ApplyEvents appends events and upserts the source checkpoint in one
-// transaction — see Store.ApplyEvents. Per-row skips (poison rows) still
-// commit alongside the checkpoint: they are permanent CHECK violations a
-// re-read cannot fix, so holding the checkpoint back would only re-parse
-// them forever.
-func (s *SQLite) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
-	res, err := s.ApplyObservation(ctx, events, nil, cp)
+// ApplyEvents appends usage events (same idempotent semantics as InsertEvents)
+// and upserts the source checkpoint in ONE transaction. A checkpoint persisted
+// outside the event transaction could outrun the events it claims — a crash
+// between the two commits would then skip data forever. A nil cp degrades to a
+// plain event insert; empty events with a non-nil cp writes just the checkpoint.
+//
+// It is the events-only shorthand for ApplyBatch. Per-row skips (poison rows)
+// still commit alongside the checkpoint: they are permanent CHECK violations a
+// re-read cannot fix, so holding the checkpoint back would only re-parse them
+// forever.
+func (l *Ledger) ApplyEvents(ctx context.Context, events []model.UsageEvent, cp *model.SourceCheckpoint) (int, error) {
+	res, err := l.ApplyObservation(ctx, events, nil, cp)
 	return res.Events, err
 }
 
-// ApplyObservation appends usage events AND activity rows and upserts the
-// source checkpoint in ONE transaction — see Store.ApplyObservation. Events go
-// in first so an activity row's usage_dedup_key names a row that is already
-// present in the same transaction.
-func (s *SQLite) ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error) {
-	return s.ApplyBatch(ctx, ObservationBatch{Events: events, Activity: activity, Checkpoint: cp})
+// ApplyObservation appends usage events, appends agent activity rows, and
+// upserts the source checkpoint — all in ONE transaction. It is ApplyBatch
+// without the turn contexts.
+//
+// The single transaction is the point. Activity rows reference usage rows by
+// dedup key, and the checkpoint gates the re-read of both: splitting them across
+// transactions would let a crash advance the checkpoint past activity that never
+// landed, losing it permanently, or leave a call pointing at a usage row that
+// rolled back. Activity is appended AFTER the events so the row it names already
+// exists.
+//
+// Activity has the same idempotence as events (ON CONFLICT(dedup_key) DO
+// NOTHING) and the same per-row skip behaviour, so the returned counts stay
+// meaningful when the error is non-nil.
+func (l *Ledger) ApplyObservation(ctx context.Context, events []model.UsageEvent, activity []model.ActivityEvent, cp *model.SourceCheckpoint) (Applied, error) {
+	return l.ApplyBatch(ctx, ObservationBatch{Events: events, Activity: activity, Checkpoint: cp})
 }
 
-// ApplyBatch appends usage events, activity rows AND turn contexts and upserts
-// the source checkpoint in ONE transaction — see Store.ApplyBatch. Events go in
-// first so the rows that name them by dedup key find them already present in the
-// same transaction.
-func (s *SQLite) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error) {
+// ApplyBatch is ApplyObservation plus the turn contexts, and is what a collection
+// cycle actually calls. Same single transaction, same ordering (events first, so
+// the rows naming them by dedup key find them present), same idempotence: a turn
+// context conflicts on (usage dedup key, dimension) and does nothing, which is
+// what stops a re-read serving a turn's cost twice.
+func (l *Ledger) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error) {
 	events, activity, ctxs, cp := b.Events, b.Activity, b.TurnContexts, b.Checkpoint
 	if len(events) == 0 && len(activity) == 0 && len(ctxs) == 0 && cp == nil {
 		return Applied{}, nil
 	}
-	if err := s.writable(); err != nil {
-		return Applied{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Applied{}, fmt.Errorf("store: begin tx: %w", err)
 	}
@@ -411,7 +434,7 @@ func (s *SQLite) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, e
 
 // Checkpoint returns the stored incremental state for (tool, sourcePath), or
 // nil when none has been recorded.
-func (s *SQLite) Checkpoint(ctx context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error) {
+func (s *Reader) Checkpoint(ctx context.Context, tool, sourcePath string) (*model.SourceCheckpoint, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT tool, source_path, size_bytes, mtime_ns, read_offset, watermark, COALESCE(state,'')
 		FROM source_checkpoints WHERE tool=? AND source_path=?`, tool, sourcePath)
@@ -474,7 +497,7 @@ func nullCost(e model.UsageEvent) any {
 
 // LastState returns the latest observed counters for the (tool, key) accumulator
 // cell, or nil if none has been recorded.
-func (s *SQLite) LastState(ctx context.Context, tool, key string) (*model.AggregateSnapshot, error) {
+func (s *Reader) LastState(ctx context.Context, tool, key string) (*model.AggregateSnapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT tool, acc_key, model, session_id, project, observed_time_unix,
 		       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
@@ -502,11 +525,8 @@ func (s *SQLite) LastState(ctx context.Context, tool, key string) (*model.Aggreg
 
 // UpsertState records the latest observed counters for (tool, key), replacing
 // any previous value. This is mutable accumulator state, not history.
-func (s *SQLite) UpsertState(ctx context.Context, st model.AggregateSnapshot) error {
-	if err := s.writable(); err != nil {
-		return err
-	}
-	return upsertState(ctx, s.db, st)
+func (l *Ledger) UpsertState(ctx context.Context, st model.AggregateSnapshot) error {
+	return upsertState(ctx, l.db, st)
 }
 
 // execer is the ExecContext subset shared by *sql.DB and *sql.Tx, so the state
@@ -543,7 +563,7 @@ func upsertState(ctx context.Context, db execer, st model.AggregateSnapshot) err
 // Summarize aggregates usage matching Filter, grouped per Filter.GroupBy. Time
 // dimensions (hour/day/week/month) are bucketed in the local timezone so "today"
 // matches the wall clock; categorical dimensions group by their stored value.
-func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
+func (s *Reader) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 	where, args := buildWhere(f)
 
 	groupExprs := make([]string, 0, len(f.GroupBy))
@@ -642,11 +662,15 @@ func (s *SQLite) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 	return sum, nil
 }
 
-// UnpricedGroups aggregates the matching rows with a NULL cost, grouped by the
-// filter's dimensions plus the attributes a price lookup needs. See
-// Store.UnpricedGroups. The grouping columns are appended AFTER the caller's
-// dimensions so the returned Keys align one-to-one with Summarize's buckets.
-func (s *SQLite) UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error) {
+// UnpricedGroups returns the token totals of the matching rows that have NO
+// stamped cost, grouped by Filter.GroupBy plus (tool, model, provider,
+// service_tier). It exists so cost surfaces can value historical and
+// unpriceable rows from the CURRENT price table without materialising one bucket
+// per event; an empty result means every matching row is stamped.
+//
+// The grouping columns are appended AFTER the caller's dimensions so the
+// returned Keys align one-to-one with Summarize's buckets.
+func (s *Reader) UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error) {
 	where, args := buildWhere(f)
 	if where == "" {
 		where = " WHERE cost_micro_usd IS NULL"
@@ -708,7 +732,7 @@ func (s *SQLite) UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup,
 }
 
 // distinctSessions counts distinct non-empty session ids over the filtered set.
-func (s *SQLite) distinctSessions(ctx context.Context, where string, args []any) (int64, error) {
+func (s *Reader) distinctSessions(ctx context.Context, where string, args []any) (int64, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END)
 		FROM usage_events`+where, args...)
@@ -731,10 +755,10 @@ const eventColumnsNoRaw = `id, tool, model, session_id, project, event_time_unix
 	dedup_key, provider, service_tier, cost_micro_usd, price_source`
 
 // ListEvents returns events matching Filter, ordered by event_time then row id
-// (a total order, which keyset pagination will need). Raw is excluded unless
-// WithRaw is passed - see Store.ListEvents. WithKeyset switches it to one page
-// of an id-ordered walk.
-func (s *SQLite) ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error) {
+// (a total order, which keyset pagination will need). The projection names its
+// columns and EXCLUDES raw; pass WithRaw to include it (export --include-raw
+// only). WithKeyset switches it to one page of an id-ordered walk.
+func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error) {
 	var lo listOptions
 	for _, fn := range opts {
 		fn(&lo)
@@ -819,7 +843,7 @@ func (s *SQLite) ListEvents(ctx context.Context, f Filter, opts ...ListOption) (
 //
 // This is deliberately NOT on the Store interface: it serves the read-only web
 // surface, and the collector has no use for it.
-func (s *SQLite) IngestWatermark(ctx context.Context) (time.Time, error) {
+func (s *Reader) IngestWatermark(ctx context.Context) (time.Time, error) {
 	var observed sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT observed_time_unix FROM usage_events ORDER BY id DESC LIMIT 1`).Scan(&observed)
@@ -836,7 +860,7 @@ func (s *SQLite) IngestWatermark(ctx context.Context) (time.Time, error) {
 }
 
 // SourceStats returns per-tool stored stats for the `sources` command.
-func (s *SQLite) SourceStats(ctx context.Context) ([]SourceStat, error) {
+func (s *Reader) SourceStats(ctx context.Context) ([]SourceStat, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tool,
 			COUNT(*) AS events,
@@ -887,7 +911,7 @@ func (s *SQLite) SourceStats(ctx context.Context) ([]SourceStat, error) {
 
 // modelsByTool returns the sorted distinct non-empty model ids per tool in one
 // query, replacing the previous per-tool round trip.
-func (s *SQLite) modelsByTool(ctx context.Context) (map[string][]string, error) {
+func (s *Reader) modelsByTool(ctx context.Context) (map[string][]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT tool, model FROM usage_events
 		WHERE model <> '' ORDER BY tool, model`)
@@ -907,7 +931,7 @@ func (s *SQLite) modelsByTool(ctx context.Context) (map[string][]string, error) 
 }
 
 // Stats returns whole-database diagnostics for the `doctor` command.
-func (s *SQLite) Stats(ctx context.Context) (DBStats, error) {
+func (s *Reader) Stats(ctx context.Context) (DBStats, error) {
 	st := DBStats{Path: s.path, SchemaVersion: SchemaVersion}
 
 	var (
