@@ -1,5 +1,44 @@
 // Package model holds the core domain types shared by adapters, storage,
 // the collector and reporting. It depends on nothing else in the project.
+//
+// The core types model the ledger's shape: UsageEvent is one immutable observed
+// record (deduplicated on DedupKey, stored append-only); AggregateSnapshot is
+// one observation of a source's cumulative counters, materialized by the
+// collector into synthetic usage events via monotonic-with-reset deltas;
+// SourceCheckpoint is the incremental-collection state for a source (per-source
+// seam so a source can skip unchanged reads).
+//
+// SourceClass partitions adapters by how they expose usage: EventLevel sources
+// emit discrete records (one per request/message) and deduplicate cleanly;
+// Aggregate sources expose only running counters, snapshots of which the
+// collector turns into synthetic delta events.
+//
+// Dimensioning (Tool, Provider, ServiceTier) marks each usage record for
+// categorization and pricing. Tool is the agent CLI (ToolClaudeCode,
+// ToolCopilot, etc.). Provider is the billing vendor whose rate card applies
+// (ProviderAnthropic, etc.), taken from source data when named or stamped for
+// the vendor an adapter always talks to. ServiceTier names the requested
+// priority or batch mode ("standard", "batch", etc.). ReasoningMode describes
+// how a tool's reasoning tokens relate to output tokens (subset: already
+// contained; additive: billed on top), and the pricing engine reads it to avoid
+// double-charging.
+//
+// Token counting: Adapters normalize provider counts into disjoint buckets
+// (InputTokens, OutputTokens, CacheCreationTokens, CacheReadTokens,
+// ReasoningTokens), and must set TotalTokens as the provider's own authorized
+// total, which varies by vendor (cache tokens additive for Anthropic, subset of
+// input for OpenAI). The collector compares both and the cost engine prices
+// according to ReasoningMode and the long-context tier crossed by the whole
+// prompt. Cost is stamped at collect time (CostMicroUSD) or left nil when
+// unpriced; 0 never appears (unpriced and free are distinguishable).
+//
+// Raw is the provider payload kept for audit, built by adapters from an
+// explicit allow-list of usage/model/identity fields — never stripped from a
+// whole record. It is an audit payload, not a backfill source (schema columns
+// carry everything cost and reporting need), and it is not marshalled by
+// default (export gates it behind --include-raw; history predates the
+// allow-list and still holds whole transcript lines). config privacy.no_raw
+// drops it entirely via the collector.
 package model
 
 import "time"

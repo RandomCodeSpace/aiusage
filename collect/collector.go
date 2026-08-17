@@ -5,6 +5,38 @@
 // synthetic immutable events via a monotonic-with-reset delta against the last
 // stored accumulator state, so a source that later shrinks (compaction,
 // deletion, reset) can never reduce a previously-reported total.
+//
+// INJECTION SEAMS: RunCycle accepts a Pricer interface to price each new event
+// at ingest time, and an optional Refresher to update the price table before
+// stamping. A Pricer implementation returns microUSD, source, and ok; ok=false
+// leaves the event unpriced (CostMicroUSD = nil). Cost stamped by an adapter
+// (attached to the event before collection) is never overwritten by the ladder:
+// the Pricer is consulted only for events that arrive UNPRICED. WithPricer() /
+// WithoutRaw() are Options that configure a cycle; Options are composable and
+// independent.
+//
+// INCREMENTAL COLLECTION: adapters that implement adapter.Incremental can
+// supply a checkpoint (SourceCheckpoint) to skip unchanged sources — a seam for
+// efficiency, not correctness. The checkpoint rides the same transaction as its
+// events, so a crash cannot advance a checkpoint past the rows it accounts for.
+// A checkpoint load failure falls back to a full read, which is always correct.
+//
+// SINGLE-TRANSACTION OBSERVATION: events, activity records, and turn contexts
+// from one source observation land in ONE transaction per source, alongside the
+// source checkpoint (for append-only sources; for aggregate snapshots the
+// checkpoint lands on the final snapshot). A crashed or collided cell re-reads
+// the whole source. This transaction boundary is the unit of consistency: an
+// observer cannot see one part of an observation without the others.
+//
+// ACTIVITY and TURN CONTEXT: The collector records which tool was called
+// (activity_events) and which subagent/skill/MCP tool/server/plugin each turn
+// ran under (usage_turn_context). Activity rows carry no cost column — cost is
+// derived on read by joining the usage event the activity names, so one turn's
+// tokens are not multiplied by the number of calls it made. Turn contexts carry
+// no token information — they are a property of the turn (dimension attribute),
+// and a turn commonly carries several (subagent AND skill AND MCP tool, etc.),
+// so a dimension-blind query would overstate cost by summing the same turn
+// multiple times.
 package collect
 
 import (
