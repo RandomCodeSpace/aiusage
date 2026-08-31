@@ -41,7 +41,7 @@ func newOnceCmd() *cobra.Command {
 			}
 			defer release()
 
-			st, err := openStore(cfg)
+			st, err := openCollectionStoreLocked(cfg)
 			if err != nil {
 				return err
 			}

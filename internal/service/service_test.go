@@ -162,6 +162,52 @@ func testOptions(t *testing.T) Options {
 	}
 }
 
+func TestStopAndStartCollectionPreserveEnabledState(t *testing.T) {
+	m, fake := testManager(t)
+	if err := os.MkdirAll(m.UnitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.UnitDir, CollectUnit), []byte(unitStamp+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake.active[CollectUnit] = true
+	fake.enabled[CollectUnit] = true
+
+	stopped, err := m.StopCollection(context.Background())
+	if err != nil || !stopped {
+		t.Fatalf("StopCollection = %t, %v", stopped, err)
+	}
+	if fake.active[CollectUnit] {
+		t.Fatal("StopCollection left the unit active")
+	}
+	if !fake.enabled[CollectUnit] {
+		t.Fatal("StopCollection disabled a persistently enabled unit")
+	}
+	if err := m.StartCollection(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.active[CollectUnit] {
+		t.Fatal("StartCollection did not restore the active state")
+	}
+}
+
+func TestStopCollectionLeavesInactiveUnitAlone(t *testing.T) {
+	m, fake := testManager(t)
+	if err := os.MkdirAll(m.UnitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.UnitDir, CollectUnit), []byte(unitStamp+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := m.StopCollection(context.Background())
+	if err != nil || stopped {
+		t.Fatalf("StopCollection inactive = %t, %v", stopped, err)
+	}
+	if fake.ran("stop " + CollectUnit) {
+		t.Fatal("StopCollection issued stop for an inactive unit")
+	}
+}
+
 // TestRenderedUnitCarriesTheHardening pins the directives that make a generated
 // unit equivalent to the hand-written one it replaces. A sandbox that quietly
 // stopped being applied would never show up in behaviour: the daemon would keep

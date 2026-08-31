@@ -493,6 +493,10 @@ func TestPersistentPreRunSkipsDaemon(t *testing.T) {
 		{name: "run skips", target: "run", wantSpawn: false},
 		{name: "once skips", target: "once", wantSpawn: false},
 		{name: "doctor skips", target: "doctor", wantSpawn: false},
+		{name: "database backup skips", target: "backup", wantSpawn: false},
+		{name: "database verify skips", target: "verify", wantSpawn: false},
+		{name: "database restore skips", target: "restore", wantSpawn: false},
+		{name: "database reset skips", target: "reset", wantSpawn: false},
 		{name: "help skips", target: "help", wantSpawn: false},
 		{name: "no-daemon flag skips", target: "today", noDaemon: true, wantSpawn: false},
 	}

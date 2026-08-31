@@ -251,6 +251,43 @@ func (m *Manager) Restart(ctx context.Context) (Result, error) {
 	return r, nil
 }
 
+// StopCollection stops an active generated collection unit without disabling
+// it. The returned bool records whether this call stopped a running unit so a
+// database maintenance command can restore exactly the prior lifecycle state.
+func (m *Manager) StopCollection(ctx context.Context) (bool, error) {
+	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) {
+		return false, nil
+	}
+	out, stateErr := m.systemctl(ctx, "is-active", CollectUnit)
+	if stateErr != nil {
+		for _, inactive := range []string{"inactive", "failed", "deactivating"} {
+			if hasStateLine(out, inactive) {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("read %s active state: %w", CollectUnit, stateErr)
+	}
+	if !hasStateLine(out, "active") {
+		return false, fmt.Errorf("read %s active state: unrecognized response %q", CollectUnit, strings.TrimSpace(out))
+	}
+	if _, err := m.systemctl(ctx, "stop", CollectUnit); err != nil {
+		return false, fmt.Errorf("stop %s: %w", CollectUnit, err)
+	}
+	return true, nil
+}
+
+// StartCollection starts an installed collection unit that maintenance stopped.
+// It does not enable or install anything.
+func (m *Manager) StartCollection(ctx context.Context) error {
+	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) {
+		return fmt.Errorf("start %s: unit is not installed", CollectUnit)
+	}
+	if _, err := m.systemctl(ctx, "start", CollectUnit); err != nil {
+		return fmt.Errorf("start %s: %w", CollectUnit, err)
+	}
+	return nil
+}
+
 // Remove stops, disables and deletes the unit. It is the honest counterpart of
 // an install that happens by itself: whatever aiusage wrote, aiusage can take
 // back.

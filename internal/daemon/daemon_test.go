@@ -277,6 +277,26 @@ func TestAcquireCollectionLockContention(t *testing.T) {
 	lock.release(log.New(discard{}, "", 0))
 }
 
+func TestRunWithCollectionLockDoesNotReacquire(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "aiusage.pid")
+	release, err := AcquireCollectionLock(pidPath, "v-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = RunWithCollectionLock(ctx, adapter.NewRegistry(), newFakeStore(), adapter.DiscoverConfig{}, Options{
+		PIDPath: pidPath,
+		Version: "v-test",
+		Logger:  log.New(discard{}, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("RunWithCollectionLock tried to reacquire the caller's lock: %v", err)
+	}
+}
+
 // TestAcquireCollectionLockStampsIdentity: while a one-shot holds the
 // collection lock it is indistinguishable from a running daemon (same flock),
 // so it must stamp its own pid + build identity — otherwise a concurrent

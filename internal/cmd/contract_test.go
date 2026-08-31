@@ -42,6 +42,13 @@ func cliContract(root *cobra.Command) string {
 		path := "aiusage " + command.Name()
 		lines = append(lines, "command "+path+" use="+command.Use)
 		appendFlags(path, command.LocalNonPersistentFlags())
+		if command.Name() == "db" {
+			for _, subcommand := range command.Commands() {
+				subpath := path + " " + subcommand.Name()
+				lines = append(lines, "command "+subpath+" use="+subcommand.Use)
+				appendFlags(subpath, subcommand.LocalNonPersistentFlags())
+			}
+		}
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
@@ -49,6 +56,11 @@ func cliContract(root *cobra.Command) string {
 
 const version1CLIContract = `
 command aiusage completion use=completion
+command aiusage db backup use=backup
+command aiusage db reset use=reset
+command aiusage db restore use=restore <backup>
+command aiusage db use=db
+command aiusage db verify use=verify [path]
 command aiusage doctor use=doctor
 command aiusage export use=export
 command aiusage help use=help [command]
@@ -66,6 +78,13 @@ flag aiusage --db type=string default=
 flag aiusage --home type=string default=
 flag aiusage --interval type=int default=0
 flag aiusage --no-daemon type=bool default=false
+flag aiusage db backup --json type=bool default=false
+flag aiusage db backup --out type=string default=
+flag aiusage db reset --json type=bool default=false
+flag aiusage db reset --quarantine type=bool default=false
+flag aiusage db restore --json type=bool default=false
+flag aiusage db restore --replace type=bool default=false
+flag aiusage db verify --json type=bool default=false
 flag aiusage export --format type=string default=json
 flag aiusage export --include-raw type=bool default=false
 flag aiusage export --out type=string default=

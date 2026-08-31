@@ -69,7 +69,7 @@ var execSelf = func(path string) error {
 
 // runDaemon is the collection loop, as a package-level var so the restart path
 // can be driven in a test without replacing the test binary on disk.
-var runDaemon = daemon.Run
+var runDaemon = daemon.RunWithCollectionLock
 
 // cycleOptions builds the RunOnce options for cfg, so a one-shot cycle honours
 // exactly the same pricing and privacy settings the daemon does.
@@ -96,9 +96,18 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
+			// Take collection ownership before store.Open can inspect or migrate an
+			// older schema. The daemon loop keeps using this same lock; there is no
+			// release/reacquire window for an old collector to enter.
+			release, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			repairPrivatePerms(cfg)
 
-			st, err := openStore(cfg)
+			st, err := openCollectionStoreLocked(cfg)
 			if err != nil {
 				return err
 			}

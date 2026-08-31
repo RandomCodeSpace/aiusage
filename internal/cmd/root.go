@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,7 +38,9 @@ import (
 	"github.com/RandomCodeSpace/aiusage/adapter/pi"
 	"github.com/RandomCodeSpace/aiusage/adapter/qwencode"
 	"github.com/RandomCodeSpace/aiusage/adapter/reasonix"
+	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
 	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
@@ -57,8 +60,10 @@ var flags globalFlags
 // daemonSkip lists the subcommands whose PersistentPreRunE must NOT auto-start
 // the daemon: run *becomes* the daemon, once is an explicit single cycle, and
 // doctor/completion/help/version are diagnostics that should never have a side
-// effect. Everything else (the root TUI default plus today/last/summary/
-// sources/export) is data-facing and triggers ensureDaemon.
+// effect. Database maintenance also skips auto-start so verification does not
+// mutate process state and backup does not unexpectedly start collection.
+// Everything else (the root TUI default plus today/last/summary/sources/export)
+// is data-facing and triggers ensureDaemon.
 //
 // setup is skipped for the plain reason that it is the command that does the
 // installing.
@@ -67,6 +72,10 @@ var daemonSkip = map[string]bool{
 	"once":       true,
 	"setup":      true,
 	"doctor":     true,
+	"backup":     true,
+	"verify":     true,
+	"restore":    true,
+	"reset":      true,
 	"completion": true,
 	"help":       true,
 	"version":    true,
@@ -165,6 +174,7 @@ func newRootCmd() *cobra.Command {
 		newSourcesCmd(),
 		newDoctorCmd(),
 		newExportCmd(),
+		newDBCmd(),
 		newSetupCmd(),
 		newVersionCmd(),
 	)
@@ -245,11 +255,102 @@ func uiStatePath(cfg config.Config) string {
 // with a database. A path that only queries takes st.Reader, which carries no
 // write method at all.
 func openStore(cfg config.Config) (*store.Ledger, error) {
+	if info, err := os.Stat(cfg.DBPath); err == nil && info.Size() > 0 {
+		version, err := store.RecordedSchemaVersion(context.Background(), cfg.DBPath)
+		if err != nil {
+			return nil, err
+		}
+		if version > 0 && version < store.SchemaVersion {
+			release, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
+			if err != nil {
+				return nil, fmt.Errorf("migration requires exclusive collection ownership: %w", err)
+			}
+			defer release()
+			return openStoreLocked(cfg)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect store %s: %w", cfg.DBPath, err)
+	}
+	return openStoreLocked(cfg)
+}
+
+// openStoreLocked opens the database when the caller already owns collection
+// or after openStore established that no migration can run.
+func openStoreLocked(cfg config.Config) (*store.Ledger, error) {
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("open store %s: %w", cfg.DBPath, err)
 	}
 	return st, nil
+}
+
+// openCollectionStoreLocked performs the read-only health gate required before
+// a collector opens a current database for writes. Recognized older schemas go
+// through store.Open's verified migration path; current repairable rollup drift
+// is allowed because collection rebuilds that derived state.
+func openCollectionStoreLocked(cfg config.Config) (*store.Ledger, error) {
+	if info, err := os.Stat(cfg.DBPath); err == nil && info.Size() > 0 {
+		verification, err := store.Verify(context.Background(), cfg.DBPath)
+		if err != nil {
+			return nil, fmt.Errorf("verify store %s before collection: %w", cfg.DBPath, err)
+		}
+		if verification.State == store.VerificationCorrupt ||
+			(verification.State == store.VerificationIncompatible &&
+				(verification.SchemaVersion < 1 || verification.SchemaVersion > store.SchemaVersion)) {
+			return nil, fmt.Errorf("refusing collection into %s: %w%s", cfg.DBPath, verification.StateError(), collectionRecoveryAdvice(context.Background(), cfg.DBPath))
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect store %s before collection: %w", cfg.DBPath, err)
+	}
+	st, err := openStoreLocked(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%w; collection remains stopped", err)
+	}
+	return st, nil
+}
+
+type backupCandidate struct {
+	path    string
+	modTime time.Time
+}
+
+func collectionRecoveryAdvice(ctx context.Context, database string) string {
+	directory := filepath.Join(filepath.Dir(database), "backups")
+	entries, err := os.ReadDir(directory)
+	if err == nil {
+		candidates := make([]backupCandidate, 0, len(entries))
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".db") {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			candidates = append(candidates, backupCandidate{
+				path:    filepath.Join(directory, entry.Name()),
+				modTime: info.ModTime(),
+			})
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].modTime.Equal(candidates[j].modTime) {
+				return candidates[i].path > candidates[j].path
+			}
+			return candidates[i].modTime.After(candidates[j].modTime)
+		})
+		for _, candidate := range candidates {
+			verification, verifyErr := store.Verify(ctx, candidate.path)
+			if verifyErr == nil && verification.State != store.VerificationCorrupt &&
+				verification.SchemaVersion >= 1 && verification.SchemaVersion <= store.SchemaVersion {
+				return fmt.Sprintf(
+					"; newest verified backup: %s; restore with `aiusage --db %q db restore %q --replace`",
+					candidate.path, database, candidate.path)
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"; no restorable verified backup found under %s; inspect with `aiusage db verify %q`, then preserve the SQLite bundle with `aiusage --db %q db reset --quarantine`",
+		directory, database, database)
 }
 
 // discoverConfig builds the adapter DiscoverConfig from the resolved config.

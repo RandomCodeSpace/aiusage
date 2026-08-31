@@ -70,6 +70,10 @@ func Open(path string) (*Ledger, error) {
 	if err := ensureParentDir(path); err != nil {
 		return nil, err
 	}
+	preMigrationBackup, err := prepareMigration(context.Background(), path)
+	if err != nil {
+		return nil, err
+	}
 
 	// modernc driver name is "sqlite". Pragmas applied via the DSN run on every
 	// pooled connection; the schema is managed once by ensureSchema below.
@@ -82,8 +86,17 @@ func Open(path string) (*Ledger, error) {
 	}
 
 	if err := ensureSchema(context.Background(), db, path); err != nil {
+		if preMigrationBackup != "" {
+			err = migrationFailure(context.Background(), db, path, preMigrationBackup, err)
+		}
 		db.Close()
 		return nil, err
+	}
+	if preMigrationBackup != "" {
+		if err := verifyCompletedMigration(context.Background(), path, preMigrationBackup); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 
 	// The raw column holds transcript content, so the DB must be owner-only.

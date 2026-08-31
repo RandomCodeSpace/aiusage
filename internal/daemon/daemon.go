@@ -62,6 +62,19 @@ const minInterval = time.Second
 // Interval. On ctx cancellation the in-flight cycle is allowed to finish, the
 // pidfile is removed, and the lock released. Per-cycle stats are logged.
 func Run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapter.DiscoverConfig, opt Options) error {
+	return run(ctx, reg, st, dc, opt, false)
+}
+
+// RunWithCollectionLock runs the same daemon loop when the caller already
+// holds the lock returned by AcquireCollectionLock. It exists so a new binary
+// can take exclusive collection ownership before opening and possibly
+// migrating the database, without releasing the lock between migration and the
+// first collection cycle.
+func RunWithCollectionLock(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapter.DiscoverConfig, opt Options) error {
+	return run(ctx, reg, st, dc, opt, true)
+}
+
+func run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapter.DiscoverConfig, opt Options, lockHeld bool) error {
 	logger := opt.Logger
 	if logger == nil {
 		logger = log.Default()
@@ -71,11 +84,13 @@ func Run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapte
 		interval = minInterval
 	}
 
-	lock, err := acquireLock(opt.PIDPath)
-	if err != nil {
-		return err
+	if !lockHeld {
+		lock, err := acquireLock(opt.PIDPath)
+		if err != nil {
+			return err
+		}
+		defer lock.release(logger)
 	}
-	defer lock.release(logger)
 
 	if err := writePID(opt.PIDPath); err != nil {
 		return fmt.Errorf("write pidfile %s: %w", opt.PIDPath, err)

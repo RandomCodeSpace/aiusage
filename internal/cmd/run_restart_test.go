@@ -85,3 +85,26 @@ func TestRunReturnsOrdinaryDaemonErrors(t *testing.T) {
 		t.Errorf("restarted into %q on an ordinary error", *execed)
 	}
 }
+
+func TestRunOwnsCollectionBeforeOpeningDaemonLoop(t *testing.T) {
+	isolateState(t)
+	db := filepath.Join(t.TempDir(), "usage.db")
+	originalRun, originalExec := runDaemon, execSelf
+	t.Cleanup(func() { runDaemon, execSelf = originalRun, originalExec })
+
+	lockWasHeld := false
+	runDaemon = func(_ context.Context, _ *adapter.Registry, _ collect.Store, _ adapter.DiscoverConfig, o daemon.Options) error {
+		if release, err := daemon.AcquireCollectionLock(o.PIDPath, "contender"); err != nil {
+			lockWasHeld = true
+		} else {
+			release()
+		}
+		return nil
+	}
+	if out, err := runCmd(t, "--db", db, "--config", offlineConfig(t), "run"); err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if !lockWasHeld {
+		t.Fatal("run entered the daemon loop without already owning the collection lock")
+	}
+}
