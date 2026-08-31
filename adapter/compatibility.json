@@ -454,12 +454,16 @@
       "tool": "goose",
       "harness": "Goose",
       "version": "1.46.0",
-      "captured_at": "",
-      "goos": "unrecorded",
-      "goarch": "unrecorded",
-      "status": "pending",
-      "recipe": [],
-      "sanitization": "Session names, prompts, replies, tool arguments, and tool output were replaced; live schema, real ledger counters, timestamps, models, stable IDs, and table relationships were retained.",
+      "captured_at": "2026-08-31T15:10:23Z",
+      "goos": "linux",
+      "goarch": "amd64",
+      "status": "ready",
+      "recipe": [
+        "goose --version",
+        "Create an empty mode-700 temporary working directory and an empty temporary XDG data home; retain the existing Goose configuration directory only for its provider selection.",
+        "From the empty working directory, run XDG_DATA_HOME='<temporary data home>' goose run --text '<bounded arithmetic prompt that explicitly forbids tools>' --no-profile --max-turns 1 --output-format json"
+      ],
+      "sanitization": "The 1.46.0 fixture replaces session names, all message text, message identifiers, model configuration, and the workspace path; unrelated provider-inventory tables were omitted. Schema version 16, the relevant writer table definitions, row relationships, timestamps, model/provider identity, counters, and NULL vendor cost were retained. The earlier fixture retains its existing replacements and unattributed-tool shape. No provider credential or configuration file is present in either fixture.",
       "surfaces": [
         {
           "name": "sessions SQLite database schema 16",
@@ -477,6 +481,23 @@
             "turn_context": false,
             "reasoning": false
           }
+        },
+        {
+          "name": "bounded sessions SQLite database (1.46.0)",
+          "origin": "live",
+          "fixture": "adapter/goose/testdata/live-1.46.0.sql",
+          "package": "./adapter/goose",
+          "oracle": "TestLive146FixtureExactEvent",
+          "discriminator": "usage_ledger table at schema_version 16 from an isolated one-turn run",
+          "required_anchors": ["usage_ledger.id", "usage_ledger.session_id", "usage_ledger.total_tokens", "usage_ledger.cost"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
         }
       ],
       "traps": [
@@ -484,10 +505,7 @@
         {"name": "cumulative-vs-event", "package": "./adapter/goose", "test": "TestSessionAccumulatorsAreNeverSummed"},
         {"name": "assigned-not-accumulated", "package": "./adapter/goose", "test": "TestQueriesReadNoSessionCounters"}
       ],
-      "gaps": [
-        "exact UTC capture time and platform were not recorded",
-        "the bounded capture recipe was not recorded"
-      ]
+      "gaps": []
     },
     {
       "tool": "kimi-code",

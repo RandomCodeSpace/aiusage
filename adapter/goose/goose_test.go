@@ -181,6 +181,43 @@ func TestLedgerMappingIsExact(t *testing.T) {
 	}
 }
 
+// TestLive146FixtureExactEvent replays the usage ledger written by a bounded
+// Goose 1.46.0 run in an isolated XDG data root. Human/model text, message
+// identifiers, and the workspace path were sanitized; schema version 16,
+// timestamps, model/provider identity, token counters, and NULL cost remain as
+// written.
+func TestLive146FixtureExactEvent(t *testing.T) {
+	dir := t.TempDir()
+	path := buildDBFrom(t, dir, filepath.Join("testdata", "live-1.46.0.sql"))
+	obs := collect(t, adapter.Source{Tool: model.ToolGoose, Class: model.EventLevel, Path: path})
+	if len(obs.Events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(obs.Events), obs.Events)
+	}
+	e := obs.Events[0]
+	if e.Model != "gemma4:31b" || e.Provider != "ollama" ||
+		e.SessionID != "20260831_1" || e.Project != "/workspace/capture" {
+		t.Errorf("identity = model %q provider %q session %q project %q",
+			e.Model, e.Provider, e.SessionID, e.Project)
+	}
+	if !e.EventTime.Equal(time.Unix(1788189025, 0).UTC()) {
+		t.Errorf("event time = %v, want %v", e.EventTime, time.Unix(1788189025, 0).UTC())
+	}
+	if e.InputTokens != 359 || e.OutputTokens != 2 || e.TotalTokens != 361 ||
+		e.CacheReadTokens != 0 || e.CacheCreationTokens != 0 {
+		t.Errorf("usage = in %d out %d read %d write %d total %d",
+			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheCreationTokens, e.TotalTokens)
+	}
+	if e.DedupKey != "goose|20260831_1|1|1788189025" {
+		t.Errorf("dedup key = %q", e.DedupKey)
+	}
+	if _, known := e.Cost(); known || e.PriceSource != "" {
+		t.Errorf("cost = %v source %q, want unpriced", e.CostMicroUSD, e.PriceSource)
+	}
+	if len(obs.Activity) != 0 || len(obs.TurnContexts) != 0 {
+		t.Fatalf("activity/turn context = %d/%d, want 0/0", len(obs.Activity), len(obs.TurnContexts))
+	}
+}
+
 // TestCacheTokensComeOutOfInput is the accounting trap goose's own source
 // documents: "input_tokens is the total input including cache read/write
 // tokens; the cache fields are breakdown subsets of it" (token_usage.rs). The

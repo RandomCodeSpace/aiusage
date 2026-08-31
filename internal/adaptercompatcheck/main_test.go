@@ -67,8 +67,8 @@ func TestRepositoryManifestCoversRegistryWithoutPretendingPendingEvidenceIsReady
 	if got.Registered != 15 || len(m.Entries) != got.Registered {
 		t.Fatalf("registered/manifest entries = %d/%d, want 15/15", got.Registered, len(m.Entries))
 	}
-	if got.Ready != 3 || len(got.Pending) != 12 || got.Complete {
-		t.Fatalf("ready/pending/complete = %d/%d/%v, want 3/12/false",
+	if got.Ready != 4 || len(got.Pending) != 11 || got.Complete {
+		t.Fatalf("ready/pending/complete = %d/%d/%v, want 4/11/false",
 			got.Ready, len(got.Pending), got.Complete)
 	}
 
