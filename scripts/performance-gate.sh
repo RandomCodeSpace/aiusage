@@ -7,6 +7,8 @@ readonly candidate_sha="$(git rev-parse HEAD)"
 readonly artifact_dir="${AIUSAGE_PERF_OUT:-$repo_root/performance}"
 readonly scale="${AIUSAGE_PERF_SCALE:-1}"
 readonly skip_exports="${AIUSAGE_PERF_SKIP_EXPORTS:-0}"
+readonly sample_set="${AIUSAGE_PERF_SAMPLE_SET:-standalone}"
+readonly perf_version_xflag="-X=github.com/RandomCodeSpace/aiusage/internal/buildinfo.Version=v0.0.0-performance"
 
 if ! [[ "$scale" =~ ^[1-9][0-9]*$ ]]; then
 	echo "AIUSAGE_PERF_SCALE must be a positive integer divisor" >&2
@@ -16,6 +18,22 @@ if [[ "$skip_exports" != "0" && "$skip_exports" != "1" ]]; then
 	echo "AIUSAGE_PERF_SKIP_EXPORTS must be 0 or 1" >&2
 	exit 2
 fi
+
+case "$sample_set" in
+standalone | primary)
+	sample_start=1
+	sample_end=10
+	;;
+retry)
+	sample_start=11
+	sample_end=20
+	;;
+*)
+	echo "AIUSAGE_PERF_SAMPLE_SET must be standalone, primary, or retry" >&2
+	exit 2
+	;;
+esac
+warmup_sample="$sample_start"
 
 baseline_sha="$first_baseline"
 if git rev-parse -q --verify refs/tags/v0.5.0 >/dev/null; then
@@ -76,7 +94,7 @@ small_context=$((small_context > 10 ? small_context : 10))
 export CGO_ENABLED=0
 export GOMAXPROCS=2
 export TZ=UTC
-export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false -ldflags=$perf_version_xflag"
 readonly go_bin="$(command -v go)"
 
 (cd "$baseline_tree" && go build -o "$perf_root/baseline-aiusage" .)
@@ -142,7 +160,7 @@ paired_process_metric() {
 	local sample warmups
 	for sample in $(seq "$start" "$end"); do
 		warmups=0
-		if [[ "$sample" == "1" ]]; then warmups=1; fi
+		if [[ "$sample" == "$warmup_sample" ]]; then warmups=1; fi
 		if ((sample % 2 == 1)); then
 			observe_sample baseline "$perf_root/baseline-driver" "$perf_root/baseline-aiusage" "$baseline_db" "$name" "$command" timed "$sample" "$warmups"
 			observe_sample candidate "$perf_root/candidate-driver" "$perf_root/candidate-aiusage" "$candidate_db" "$name" "$command" timed "$sample" "$warmups"
@@ -167,7 +185,7 @@ paired_source_farm_metric() {
 	local sample warmups
 	for sample in $(seq "$start" "$end"); do
 		warmups=0
-		if [[ "$sample" == "1" ]]; then warmups=1; fi
+		if [[ "$sample" == "$warmup_sample" ]]; then warmups=1; fi
 		if ((sample % 2 == 1)); then
 			observe_source_farm_sample baseline "$perf_root/baseline-driver" "$baseline_db" "$name" "$command" "$sample" "$warmups"
 			observe_source_farm_sample candidate "$perf_root/candidate-driver" "$candidate_db" "$name" "$command" "$sample" "$warmups"
@@ -182,7 +200,7 @@ paired_query_samples() {
 	local start="$1" end="$2" sample warmups
 	for sample in $(seq "$start" "$end"); do
 		warmups=0
-		if [[ "$sample" == "1" ]]; then warmups=1; fi
+		if [[ "$sample" == "$warmup_sample" ]]; then warmups=1; fi
 		if ((sample % 2 == 1)); then
 			"$perf_root/baseline-driver" query-suite --db "$perf_root/baseline-1m.db" --matrix timed --samples 1 --warmups "$warmups" >"$artifact_dir/baseline/query/timed-$sample.json"
 			"$perf_root/candidate-driver" query-suite --db "$perf_root/candidate-1m.db" --matrix timed --samples 1 --warmups "$warmups" >"$artifact_dir/candidate/query/timed-$sample.json"
@@ -193,12 +211,18 @@ paired_query_samples() {
 	done
 }
 
-readonly micro_bench='^(BenchmarkReload|BenchmarkScrubStep|BenchmarkView|BenchmarkProductionRender120x40|BenchmarkProductionRender200x60|BenchmarkProductionUIThread)$'
+readonly micro_bench='^(BenchmarkReload|BenchmarkScrubStep|BenchmarkView|BenchmarkProductionRender120x40|BenchmarkProductionRender200x60)$'
+readonly ui_bench='^BenchmarkProductionUIThread$'
 readonly cold_bench='^(BenchmarkProductionColdLoad|BenchmarkRangeCycleBurst|BenchmarkRangeCyclePaced|BenchmarkRangeCycleRevisit)$'
 
 bench_sample() {
 	local side="$1" binary="$2" db="$3" sample="$4"
 	AIUSAGE_PERF_DB="$db" "$binary" -test.run '^$' -test.bench "$micro_bench" -test.benchmem -test.benchtime 10x -test.count 1 \
+		>>"$artifact_dir/benchmarks/$side.txt"
+	# UI-thread handlers are tens of microseconds and a 10-iteration sample is
+	# dominated by the one 50 KiB Model result allocation and GC scheduling.
+	# More iterations stabilize the same workload without changing its limit.
+	AIUSAGE_PERF_DB="$db" "$binary" -test.run '^$' -test.bench "$ui_bench" -test.benchmem -test.benchtime 1000x -test.count 1 \
 		>>"$artifact_dir/benchmarks/$side.txt"
 	AIUSAGE_PERF_DB="$db" "$binary" -test.run '^$' -test.bench "$cold_bench" -test.benchmem -test.benchtime 1x -test.count 1 \
 		>>"$artifact_dir/benchmarks/$side.txt"
@@ -248,7 +272,7 @@ run_timed_set() {
 	paired_bench_samples "$start" "$end"
 }
 
-run_timed_set 1 10
+run_timed_set "$sample_start" "$sample_end"
 
 if [[ "$skip_exports" == "0" ]]; then
 	for command in export-json export-csv export-json-raw export-csv-raw; do
@@ -270,16 +294,31 @@ run_checker() {
 		--out "$artifact_dir/result.json" | tee "$artifact_dir/report.md"
 }
 
+write_run_manifest() {
+	local retry_used="$1"
+	cat >"$artifact_dir/run.json" <<EOF
+{"schema":"production-performance-run-v1","baseline":"$baseline_sha","candidate":"$candidate_sha","scale_divisor":$scale,"runner":"ubuntu-24.04","cgo_enabled":false,"gomaxprocs":2,"exports_included":$([[ "$skip_exports" == "0" ]] && echo true || echo false),"sample_set":"$sample_set","sample_start":$sample_start,"sample_end":$sample_end,"retry_used":$retry_used}
+EOF
+}
+
+# CI runs primary and retry sets as separate 20-minute jobs. The finalizer first
+# evaluates primary and consumes retry only for a relative timing-only failure.
+# Keeping the standalone path makes the script useful outside Actions.
+if [[ "$sample_set" != "standalone" ]]; then
+	write_run_manifest false
+	exit 0
+fi
+
 if ! run_checker; then
 	if jq -e '[.results[] | select(.status == "FAIL")] as $f | ($f|length) > 0 and all($f[]; .category == "regression" and (.detail | startswith("median ratio")))' "$artifact_dir/result.json" >/dev/null; then
 		echo "relative timing regression only; collecting the one permitted retry" >&2
+		warmup_sample=11
 		run_timed_set 11 20
 		run_checker
+		write_run_manifest true
 	else
 		exit 1
 	fi
+else
+	write_run_manifest false
 fi
-
-cat >"$artifact_dir/run.json" <<EOF
-{"schema":"production-performance-run-v1","baseline":"$baseline_sha","candidate":"$candidate_sha","scale_divisor":$scale,"runner":"ubuntu-24.04","cgo_enabled":false,"gomaxprocs":2,"exports_included":$([[ "$skip_exports" == "0" ]] && echo true || echo false)}
-EOF

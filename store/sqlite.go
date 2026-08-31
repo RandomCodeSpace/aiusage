@@ -811,14 +811,17 @@ func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) (
 	limit := ""
 	if lo.eventTimeKeyset {
 		if lo.afterID > 0 {
-			cursor := "(event_time_unix > ? OR (event_time_unix = ? AND id > ?))"
+			// SQLite indexes carry the rowid after the declared columns, so the
+			// existing event_time index can seek this row-value cursor directly.
+			// The equivalent OR form forced extra scans on every export page.
+			cursor := "(event_time_unix, id) > (?, ?)"
 			if where == "" {
 				where = " WHERE " + cursor
 			} else {
 				where += " AND " + cursor
 			}
 			afterUnix := lo.afterEventTime.UTC().Unix()
-			args = append(args, afterUnix, afterUnix, lo.afterID)
+			args = append(args, afterUnix, lo.afterID)
 		}
 		if lo.limit > 0 {
 			limit = " LIMIT ?"

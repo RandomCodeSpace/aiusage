@@ -205,6 +205,29 @@ func TestListEventsEventTimeKeysetPreservesDefaultOrder(t *testing.T) {
 	}
 }
 
+// TestEventTimeKeysetUsesCompositeSeek pins the query shape behind bounded
+// export memory. The logically equivalent OR predicate makes SQLite rescan
+// event-time ranges on every page and regressed 100k CSV export by 13-15%.
+func TestEventTimeKeysetUsesCompositeSeek(t *testing.T) {
+	st := openCounting(t)
+	ctx := context.Background()
+	queries := queriesDuring(func() {
+		if _, err := st.ListEvents(ctx, Filter{},
+			WithEventTimeKeyset(time.Unix(1, 0).UTC(), 1, 10)); err != nil {
+			t.Fatalf("list keyset page: %v", err)
+		}
+	})
+	if len(queries) != 1 {
+		t.Fatalf("prepared %d statements, want 1: %v", len(queries), queries)
+	}
+	if !strings.Contains(queries[0], "(event_time_unix, id) > (?, ?)") {
+		t.Fatalf("event-time keyset is not a composite seek:\n%s", queries[0])
+	}
+	if strings.Contains(queries[0], " OR ") {
+		t.Fatalf("event-time keyset restored the range-rescanning OR predicate:\n%s", queries[0])
+	}
+}
+
 func eventKeys(events []model.UsageEvent) []string {
 	out := make([]string, len(events))
 	for i := range events {
