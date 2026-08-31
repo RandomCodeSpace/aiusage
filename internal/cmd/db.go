@@ -385,6 +385,7 @@ func writeRestore(out io.Writer, result restoreCommandResult) error {
 	fmt.Fprintf(w, "Snapshot:\t%s\n", result.SourcePath)
 	fmt.Fprintf(w, "Snapshot time:\t%s\n", result.SnapshotTime.UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "Safety backup:\t%s\n", valueOrNone(result.SafetyBackupPath))
+	fmt.Fprintf(w, "Corrupt target quarantine:\t%s\n", valueOrNone(result.CorruptQuarantinePath))
 	fmt.Fprintf(w, "State:\t%s\n", result.Verification.State)
 	fmt.Fprintf(w, "Collector restarted:\t%t\n", result.CollectorRestarted)
 	writeRowCounts(w, result.Verification.RowCounts)

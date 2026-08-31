@@ -175,6 +175,118 @@ func TestVerifyDistinguishesRecoveryStates(t *testing.T) {
 	})
 }
 
+func TestVerifyDetectsAuthoritativeSchemaDamage(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{name: "missing table", sql: `DROP TABLE source_checkpoints`, want: "missing table source_checkpoints"},
+		{name: "missing index", sql: `DROP INDEX idx_activity_event_time`, want: "missing index idx_activity_event_time"},
+		{
+			name: "wrong index columns",
+			sql: `DROP INDEX idx_activity_tool_name;
+				CREATE INDEX idx_activity_tool_name ON activity_events(name, tool)`,
+			want: "idx_activity_tool_name has columns",
+		},
+		{
+			name: "conditional append-only trigger",
+			sql: `DROP TRIGGER trg_events_no_update;
+				CREATE TRIGGER trg_events_no_update BEFORE UPDATE ON usage_events WHEN 0
+				BEGIN SELECT RAISE(ABORT, 'append-only'); END`,
+			want: "does not enforce UPDATE",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := closedFreshStore(t)
+			db := rawDB(t, path)
+			if _, err := db.Exec(tt.sql); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := Verify(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != VerificationCorrupt || !strings.Contains(got.Reason, tt.want) {
+				t.Fatalf("verification = %+v, want corruption containing %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsInvalidPathsWithoutCreatingThem(t *testing.T) {
+	directory := t.TempDir()
+	missing := filepath.Join(directory, "missing.db")
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "empty", path: ""},
+		{name: "missing", path: missing},
+		{name: "directory", path: directory},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Verify(context.Background(), tt.path); err == nil {
+				t.Fatalf("Verify(%q) succeeded", tt.path)
+			}
+		})
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Verify created missing path: %v", err)
+	}
+
+	path := closedFreshStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Verify(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Verify cancelled error = %v", err)
+	}
+}
+
+func TestVerificationStateErrorsAndMalformedMetadata(t *testing.T) {
+	if err := (Verification{State: VerificationOK}).StateError(); err != nil {
+		t.Fatalf("ok StateError = %v", err)
+	}
+	if err := (Verification{State: VerificationRepairable, Reason: "rollup drift"}).StateError(); err == nil {
+		t.Fatal("repairable StateError returned nil")
+	}
+
+	t.Run("invalid version value", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "invalid-version.db")
+		db := rawDB(t, path)
+		if _, err := db.Exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+			INSERT INTO schema_meta(key, value) VALUES ('schema_version', 'not-a-version')`); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Verify(context.Background(), path)
+		if err != nil || got.State != VerificationIncompatible || !strings.Contains(got.Reason, "not recognized") {
+			t.Fatalf("invalid version verification = %+v err=%v", got, err)
+		}
+	})
+
+	t.Run("unreadable metadata shape", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "unreadable-metadata.db")
+		db := rawDB(t, path)
+		if _, err := db.Exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Verify(context.Background(), path)
+		if err != nil || got.State != VerificationCorrupt || !strings.Contains(got.Reason, "metadata is unreadable") {
+			t.Fatalf("unreadable metadata verification = %+v err=%v", got, err)
+		}
+	})
+}
+
 func TestBackupIncludesLiveWALAndPublishesStandalone(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -322,6 +434,80 @@ func TestBackupRefusalsPublishNoFinal(t *testing.T) {
 			t.Fatalf("busy backup left partials %v: %v", partials, err)
 		}
 	})
+
+	t.Run("cancellation before publish", func(t *testing.T) {
+		destination := filepath.Join(t.TempDir(), "cancel-before-publish.db")
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := backupWithHooks(ctx, source, destination, nil, backupHooks{
+			syncFile: func(string) error {
+				cancel()
+				return nil
+			},
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Backup late cancellation error = %v", err)
+		}
+		if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("late cancellation published final: %v", err)
+		}
+	})
+
+	t.Run("destination race", func(t *testing.T) {
+		destination := filepath.Join(t.TempDir(), "raced.db")
+		_, err := backupWithHooks(context.Background(), source, destination, nil, backupHooks{
+			syncFile: func(path string) error {
+				if err := syncFile(path); err != nil {
+					return err
+				}
+				return os.WriteFile(destination, []byte("winner"), 0o600)
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("Backup destination race error = %v", err)
+		}
+		contents, readErr := os.ReadFile(destination)
+		if readErr != nil || string(contents) != "winner" {
+			t.Fatalf("Backup changed raced destination: %q err=%v", contents, readErr)
+		}
+	})
+}
+
+func TestBackupRejectsInvalidPaths(t *testing.T) {
+	source := closedFreshStore(t)
+	directory := t.TempDir()
+	missing := filepath.Join(directory, "missing.db")
+	for _, tt := range []struct {
+		name        string
+		source      string
+		destination string
+	}{
+		{name: "empty source", source: "", destination: filepath.Join(directory, "empty-source.db")},
+		{name: "empty destination", source: source, destination: ""},
+		{name: "missing source", source: missing, destination: filepath.Join(directory, "missing-source.db")},
+		{name: "directory source", source: directory, destination: filepath.Join(directory, "directory-source.db")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Backup(context.Background(), tt.source, tt.destination); err == nil {
+				t.Fatal("Backup succeeded")
+			}
+		})
+	}
+
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("block"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Backup(context.Background(), source, filepath.Join(blockedParent, "backup.db")); err == nil {
+		t.Fatal("Backup succeeded with a file as destination directory")
+	}
+
+	hardlink := filepath.Join(t.TempDir(), "source-link.db")
+	if err := os.Link(source, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Backup(context.Background(), source, hardlink); err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Fatalf("Backup hard-link refusal = %v", err)
+	}
 }
 
 func TestBackupReportsProgress(t *testing.T) {
@@ -424,6 +610,48 @@ func TestOnlineTransferBusyPolicy(t *testing.T) {
 		}, nil, onlineTransferPolicy{pagesPerStep: 1, maxBusyRetries: 2, retryDelay: time.Hour})
 		if !errors.Is(err, context.Canceled) || finished != 1 {
 			t.Fatalf("cancelled retry error=%v finish=%d, want context cancellation and one finish", err, finished)
+		}
+	})
+}
+
+func TestOnlineTransferCompletionAndErrors(t *testing.T) {
+	t.Run("multiple batches", func(t *testing.T) {
+		steps := 0
+		batches := 0
+		finished := 0
+		stepper := onlineStepperFunc(func(pages int32) (bool, error) {
+			if pages != 7 {
+				t.Fatalf("pages = %d, want 7", pages)
+			}
+			steps++
+			return steps == 1, nil
+		})
+		err := stepOnlineTransferWithPolicy(context.Background(), stepper, func() error {
+			finished++
+			return nil
+		}, func() { batches++ }, onlineTransferPolicy{pagesPerStep: 7, maxBusyRetries: 1, retryDelay: time.Nanosecond})
+		if err != nil || steps != 2 || batches != 2 || finished != 1 {
+			t.Fatalf("transfer err=%v steps=%d batches=%d finish=%d", err, steps, batches, finished)
+		}
+	})
+
+	t.Run("finish error", func(t *testing.T) {
+		want := errors.New("injected finish failure")
+		err := stepOnlineTransferWithPolicy(context.Background(), onlineStepperFunc(func(int32) (bool, error) {
+			return false, nil
+		}), func() error { return want }, nil, onlineTransferPolicy{pagesPerStep: 1})
+		if !errors.Is(err, want) {
+			t.Fatalf("finish error = %v", err)
+		}
+	})
+
+	t.Run("non-busy step error wins", func(t *testing.T) {
+		want := errors.New("injected step failure")
+		err := stepOnlineTransferWithPolicy(context.Background(), onlineStepperFunc(func(int32) (bool, error) {
+			return false, want
+		}), func() error { return errors.New("secondary finish failure") }, nil, onlineTransferPolicy{pagesPerStep: 1})
+		if !errors.Is(err, want) {
+			t.Fatalf("step error = %v", err)
 		}
 	})
 }
@@ -586,6 +814,87 @@ func TestFailedMigrationRetainsCommittedStampAndRestorableSnapshot(t *testing.T)
 	result, err := ApplyRestore(context.Background(), plan, restored, false)
 	if err != nil || !result.TargetUsable || result.Verification.State != VerificationOK {
 		t.Fatalf("restore retained snapshot = %+v err=%v", result, err)
+	}
+}
+
+func TestMigrationVerificationDiagnostics(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.db")
+	if err := verifyCompletedMigration(context.Background(), missing, "snapshot.db"); err == nil || !strings.Contains(err.Error(), "post-migration verification failed") {
+		t.Fatalf("missing migrated database error = %v", err)
+	}
+
+	newer := closedFreshStore(t)
+	db := rawDB(t, newer)
+	if _, err := db.Exec(`UPDATE schema_meta SET value=? WHERE key='schema_version'`, SchemaVersion+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCompletedMigration(context.Background(), newer, "snapshot.db"); err == nil || !strings.Contains(err.Error(), "post-migration verification is incompatible") {
+		t.Fatalf("incompatible migrated database error = %v", err)
+	}
+}
+
+func TestRecoveryFilesystemHelperFailures(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	if _, err := RecordedSchemaVersion(context.Background(), missing); err == nil {
+		t.Fatal("RecordedSchemaVersion accepted missing path")
+	}
+	if err := makeBackupStandalone(context.Background(), missing); err == nil {
+		t.Fatal("makeBackupStandalone accepted missing path")
+	}
+	if err := syncFile(missing); err == nil {
+		t.Fatal("syncFile accepted missing path")
+	}
+	if err := syncDirectory(missing); err == nil {
+		t.Fatal("syncDirectory accepted missing path")
+	}
+	if _, _, err := fileIdentity(context.Background(), missing); err == nil {
+		t.Fatal("fileIdentity accepted missing path")
+	}
+
+	standalone := filepath.Join(dir, "standalone.db")
+	if err := os.WriteFile(standalone, []byte("main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(standalone+"-wal", []byte("sidecar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStandaloneBackup(standalone); err == nil || !strings.Contains(err.Error(), "unexpected sidecar") {
+		t.Fatalf("ensureStandaloneBackup sidecar error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := fileIdentity(ctx, standalone); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled fileIdentity error = %v", err)
+	}
+	if _, err := resolvedPathsEqual(missing, filepath.Join(dir, "destination.db")); err == nil {
+		t.Fatal("resolvedPathsEqual accepted missing source")
+	}
+	if got := sqliteReadOnlyURI("relative database.db"); !strings.HasPrefix(got, "file:/") || !strings.Contains(got, "mode=ro") {
+		t.Fatalf("relative SQLite URI = %s", got)
+	}
+}
+
+func TestPreMigrationBackupPathAvoidsCollision(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "usage.db")
+	now := time.Date(2026, 8, 31, 8, 0, 0, 0, time.UTC)
+	first, err := nextPreMigrationBackupPath(database, 3, SchemaVersion, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(first), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(first, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := nextPreMigrationBackupPath(database, 3, SchemaVersion, now)
+	if err != nil || second != strings.TrimSuffix(first, ".db")+"-2.db" {
+		t.Fatalf("second pre-migration path = %s err=%v", second, err)
 	}
 }
 

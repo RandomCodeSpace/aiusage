@@ -32,14 +32,15 @@ func (p *PreparedRestore) Cleanup() {
 
 // RestoreResult reports the result of applying a prepared full snapshot.
 type RestoreResult struct {
-	SourcePath        string       `json:"source_path"`
-	TargetPath        string       `json:"target_path"`
-	SafetyBackupPath  string       `json:"safety_backup_path,omitempty"`
-	SnapshotTime      time.Time    `json:"snapshot_time"`
-	Verification      Verification `json:"verification"`
-	TargetUsable      bool         `json:"target_usable"`
-	RolledBack        bool         `json:"rolled_back"`
-	EventsMayBeAbsent bool         `json:"events_may_be_absent"`
+	SourcePath            string       `json:"source_path"`
+	TargetPath            string       `json:"target_path"`
+	SafetyBackupPath      string       `json:"safety_backup_path,omitempty"`
+	CorruptQuarantinePath string       `json:"corrupt_quarantine_path,omitempty"`
+	SnapshotTime          time.Time    `json:"snapshot_time"`
+	Verification          Verification `json:"verification"`
+	TargetUsable          bool         `json:"target_usable"`
+	RolledBack            bool         `json:"rolled_back"`
+	EventsMayBeAbsent     bool         `json:"events_may_be_absent"`
 }
 
 // PrepareRestore copies the input into a staging database beside the target,
@@ -204,12 +205,20 @@ func applyRestore(ctx context.Context, plan *PreparedRestore, targetPath string,
 		return result, fmt.Errorf("store: restore target exists; pass --replace to replace %s", targetAbsolute)
 	}
 
+	corruptQuarantine := ""
 	if targetExists {
 		liveVerification, verifyErr := Verify(ctx, targetAbsolute)
 		if verifyErr != nil {
 			return result, fmt.Errorf("store: verify live target before restore: %w", verifyErr)
 		}
-		if liveVerification.State != VerificationCorrupt {
+		if liveVerification.State == VerificationCorrupt {
+			quarantined, quarantineErr := Quarantine(ctx, targetAbsolute)
+			if quarantineErr != nil {
+				return result, fmt.Errorf("store: quarantine corrupt target before restore: %w", quarantineErr)
+			}
+			corruptQuarantine = quarantined.QuarantinePath
+			result.CorruptQuarantinePath = corruptQuarantine
+		} else {
 			safetyPath, pathErr := nextSafetyBackupPath(targetAbsolute, liveVerification.SchemaVersion, time.Now().UTC())
 			if pathErr != nil {
 				result.TargetUsable = liveVerification.Compatible
@@ -228,26 +237,26 @@ func applyRestore(ctx context.Context, plan *PreparedRestore, targetPath string,
 		hooks.transfer = restoreOnline
 	}
 	if err := hooks.transfer(ctx, plan.StagePath, targetAbsolute); err != nil {
-		return assessFailedRestore(ctx, result, targetAbsolute, targetExists,
+		return failAppliedRestore(ctx, result, targetAbsolute, targetExists, corruptQuarantine,
 			fmt.Errorf("store: copy prepared restore into target: %w", err))
 	}
 	if err := makeBackupStandalone(ctx, targetAbsolute); err != nil {
-		return rollbackFailedRestore(ctx, result, targetAbsolute, targetExists, err)
+		return failAppliedRestore(ctx, result, targetAbsolute, targetExists, corruptQuarantine, err)
 	}
 	if hooks.postVerify == nil {
 		hooks.postVerify = Verify
 	}
 	verification, err := hooks.postVerify(ctx, targetAbsolute)
 	if err != nil {
-		return rollbackFailedRestore(ctx, result, targetAbsolute, targetExists,
+		return failAppliedRestore(ctx, result, targetAbsolute, targetExists, corruptQuarantine,
 			fmt.Errorf("store: post-restore verification failed: %w", err))
 	}
 	if verification.State != VerificationOK {
-		return rollbackFailedRestore(ctx, result, targetAbsolute, targetExists,
+		return failAppliedRestore(ctx, result, targetAbsolute, targetExists, corruptQuarantine,
 			fmt.Errorf("store: post-restore verification is %s: %s", verification.State, verification.Reason))
 	}
 	if err := representativeRestoreReads(ctx, targetAbsolute); err != nil {
-		return rollbackFailedRestore(ctx, result, targetAbsolute, targetExists, err)
+		return failAppliedRestore(ctx, result, targetAbsolute, targetExists, corruptQuarantine, err)
 	}
 	result.Verification = verification
 	result.TargetUsable = true
@@ -356,6 +365,37 @@ func assessFailedRestore(ctx context.Context, result RestoreResult, target strin
 		result.Verification = verification
 	}
 	return result, cause
+}
+
+func failAppliedRestore(ctx context.Context, result RestoreResult, target string, targetExisted bool, corruptQuarantine string, cause error) (RestoreResult, error) {
+	if corruptQuarantine == "" {
+		return rollbackFailedRestore(ctx, result, target, targetExisted, cause)
+	}
+	if err := restoreQuarantinedBundle(target, corruptQuarantine); err != nil {
+		return result, fmt.Errorf("%v; restoring the original corrupt SQLite bundle from %s also failed: %w", cause, corruptQuarantine, err)
+	}
+	result.CorruptQuarantinePath = ""
+	return result, fmt.Errorf("%v; restored the original corrupt SQLite bundle and left collection stopped", cause)
+}
+
+func restoreQuarantinedBundle(target, quarantinePath string) error {
+	var originals []string
+	for _, original := range []string{target, target + "-wal", target + "-shm"} {
+		moved := filepath.Join(quarantinePath, filepath.Base(original))
+		if _, err := os.Lstat(moved); err == nil {
+			originals = append(originals, original)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect quarantined bundle member %s: %w", moved, err)
+		}
+	}
+	if len(originals) == 0 {
+		return fmt.Errorf("quarantine %s contains no SQLite bundle", quarantinePath)
+	}
+	removeBackupPartial(target)
+	if err := rollbackQuarantineMoves(originals, quarantinePath, os.Rename); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(target))
 }
 
 func rollbackFailedRestore(ctx context.Context, result RestoreResult, target string, targetExisted bool, cause error) (RestoreResult, error) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -90,6 +91,22 @@ func TestDBBackupHumanOutputReportsProgress(t *testing.T) {
 	}
 }
 
+func TestDBBackupUsesVersionedDefaultPath(t *testing.T) {
+	source := seedRecoveryDB(t)
+	out, err := runCmd(t, "--db", source, "--config", offlineConfig(t), "db", "backup", "--json")
+	if err != nil {
+		t.Fatalf("db backup default: %v\n%s", err, out)
+	}
+	var result store.BackupResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	wantDirectory := filepath.Join(filepath.Dir(source), "backups")
+	if filepath.Dir(result.Path) != wantDirectory || !strings.Contains(filepath.Base(result.Path), fmt.Sprintf("-v%d-", store.SchemaVersion)) {
+		t.Fatalf("default backup path = %s", result.Path)
+	}
+}
+
 func TestDBRestoreJSON(t *testing.T) {
 	isolateState(t)
 	dir := t.TempDir()
@@ -164,6 +181,33 @@ func TestDBRestorePreservesSummaryAndExportOutput(t *testing.T) {
 	}
 	if gotSummary != wantSummary || gotJSON != wantJSON || gotCSV != wantCSV {
 		t.Fatalf("restore changed outputs\nsummary equal=%t JSON equal=%t CSV equal=%t", gotSummary == wantSummary, gotJSON == wantJSON, gotCSV == wantCSV)
+	}
+}
+
+func TestDBRestoreHumanOutputExplainsSnapshotConsequences(t *testing.T) {
+	isolateState(t)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	seedRecoveryDBAt(t, source, "from-snapshot")
+	backup := filepath.Join(dir, "snapshot.db")
+	if _, err := store.Backup(context.Background(), source, backup); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "new-live.db")
+	out, err := runCmd(t, "--db", target, "--config", offlineConfig(t), "db", "restore", backup)
+	if err != nil {
+		t.Fatalf("human restore: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"Restored:", target,
+		"Snapshot:", backup,
+		"Safety backup:", "none",
+		"Collector restarted:", "false",
+		"events newer than this snapshot may be absent",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("restore output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -295,6 +339,70 @@ func TestDBRestoreUnusableFailureRetainsStagingAndLeavesCollectorStopped(t *test
 	storePlan.Cleanup()
 }
 
+func TestDBRestorePauseFailureCleansStaging(t *testing.T) {
+	isolateState(t)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	seedRecoveryDBAt(t, source, "from-snapshot")
+	backup := filepath.Join(dir, "snapshot.db")
+	if _, err := store.Backup(context.Background(), source, backup); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "live.db")
+	seedRecoveryDBAt(t, target, "live-before")
+
+	originalPause := pauseCollectionForMaintenance
+	t.Cleanup(func() { pauseCollectionForMaintenance = originalPause })
+	pauseCollectionForMaintenance = func(context.Context, config.Config) (maintenanceCollectionState, error) {
+		return maintenanceCollectionState{}, errors.New("injected pause failure")
+	}
+	out, err := runCmd(t, "--db", target, "--config", offlineConfig(t), "db", "restore", backup, "--replace")
+	if err == nil || !strings.Contains(err.Error(), "stop collection") {
+		t.Fatalf("restore pause failure = %v\n%s", err, out)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(dir, ".restore-stage-*.db"))
+	if globErr != nil || len(stages) != 0 {
+		t.Fatalf("pause failure stages = %v err=%v", stages, globErr)
+	}
+}
+
+func TestDBRestoreRestartFailureReportsCompletedRestore(t *testing.T) {
+	isolateState(t)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	seedRecoveryDBAt(t, source, "from-snapshot")
+	backup := filepath.Join(dir, "snapshot.db")
+	if _, err := store.Backup(context.Background(), source, backup); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "live.db")
+	seedRecoveryDBAt(t, target, "live-before")
+
+	originalPause := pauseCollectionForMaintenance
+	originalResume := resumeCollectionAfterMaintenance
+	t.Cleanup(func() {
+		pauseCollectionForMaintenance = originalPause
+		resumeCollectionAfterMaintenance = originalResume
+	})
+	pauseCollectionForMaintenance = func(context.Context, config.Config) (maintenanceCollectionState, error) {
+		return maintenanceCollectionState{wasRunning: true}, nil
+	}
+	resumeCollectionAfterMaintenance = func(context.Context, config.Config, maintenanceCollectionState, io.Writer) error {
+		return errors.New("injected restart failure")
+	}
+	out, err := runCmd(t, "--db", target, "--config", offlineConfig(t), "db", "restore", backup, "--replace", "--json")
+	if err == nil || !strings.Contains(err.Error(), "injected restart failure") {
+		t.Fatalf("restore restart failure = %v\n%s", err, out)
+	}
+	var result restoreCommandResult
+	if decodeErr := json.Unmarshal([]byte(out), &result); decodeErr != nil {
+		t.Fatalf("decode completed restore: %v\n%s", decodeErr, out)
+	}
+	if !result.TargetUsable || result.CollectorRestarted {
+		t.Fatalf("completed restore result = %+v", result)
+	}
+}
+
 func TestDBRestoreRequiresReplaceBeforeLifecyclePause(t *testing.T) {
 	isolateState(t)
 	dir := t.TempDir()
@@ -358,6 +466,57 @@ func TestDBResetQuarantineJSON(t *testing.T) {
 	}
 	assertRecoveryCLIKeys(t, target, nil)
 	assertRecoveryCLIKeys(t, filepath.Join(result.QuarantinePath, "usage.db"), []string{"history"})
+}
+
+func TestDBResetHumanOutputExplainsHistoryLimit(t *testing.T) {
+	isolateState(t)
+	target := filepath.Join(t.TempDir(), "usage.db")
+	seedRecoveryDBAt(t, target, "history")
+	out, err := runCmd(t, "--db", target, "--config", offlineConfig(t), "db", "reset", "--quarantine")
+	if err != nil {
+		t.Fatalf("human reset: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"Fresh database:", target,
+		"Quarantine:",
+		"Collector restarted:", "false",
+		"historical completeness is unknown",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("reset output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDBResetRestartsPreviouslyRunningCollector(t *testing.T) {
+	isolateState(t)
+	target := filepath.Join(t.TempDir(), "usage.db")
+	seedRecoveryDBAt(t, target, "history")
+	originalPause := pauseCollectionForMaintenance
+	originalResume := resumeCollectionAfterMaintenance
+	t.Cleanup(func() {
+		pauseCollectionForMaintenance = originalPause
+		resumeCollectionAfterMaintenance = originalResume
+	})
+	pauseCollectionForMaintenance = func(context.Context, config.Config) (maintenanceCollectionState, error) {
+		return maintenanceCollectionState{wasRunning: true, detached: true}, nil
+	}
+	resumeCalls := 0
+	resumeCollectionAfterMaintenance = func(context.Context, config.Config, maintenanceCollectionState, io.Writer) error {
+		resumeCalls++
+		return nil
+	}
+	out, err := runCmd(t, "--db", target, "--config", offlineConfig(t), "db", "reset", "--quarantine", "--json")
+	if err != nil {
+		t.Fatalf("reset lifecycle: %v\n%s", err, out)
+	}
+	var result resetCommandResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.CollectorWasRunning || !result.CollectorRestarted || resumeCalls != 1 {
+		t.Fatalf("reset lifecycle = %+v resume calls=%d", result, resumeCalls)
+	}
 }
 
 func TestNextDefaultBackupPathIncludesVersionAndAvoidsCollision(t *testing.T) {

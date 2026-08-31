@@ -643,7 +643,7 @@ func verifyRecognizedSchema(ctx context.Context, db *sql.DB, version int) ([]str
 		}
 		normalized := strings.ToUpper(strings.Join(strings.Fields(ddl), " "))
 		guard := "BEFORE " + required.event + " ON " + strings.ToUpper(required.table)
-		if !strings.Contains(normalized, guard) || !strings.Contains(normalized, "RAISE(ABORT") {
+		if !strings.Contains(normalized, guard) || !strings.Contains(normalized, "RAISE(ABORT") || strings.Contains(normalized, " WHEN ") {
 			failures = append(failures, "append-only trigger "+required.name+" does not enforce "+required.event)
 		}
 	}
