@@ -40,7 +40,7 @@ func (s *scrubData) Summarize(ctx context.Context, f store.Filter) (*store.Summa
 		s.summarizeCalls.Add(1)
 		days := scrubDays()
 		if len(f.GroupBy) == 1 {
-			return &store.Summary{GroupBy: f.GroupBy, Buckets: days}, nil
+			return &store.Summary{GroupBy: f.GroupBy, Buckets: days, Totals: fakeUsageTotals()}, nil
 		}
 		// [day, tool]: split each day between the two canned tools, index-
 		// aligned dominance as in fakeCross.
@@ -60,7 +60,7 @@ func (s *scrubData) Summarize(ctx context.Context, f store.Filter) (*store.Summa
 				})
 			}
 		}
-		return &store.Summary{GroupBy: f.GroupBy, Buckets: out}, nil
+		return &store.Summary{GroupBy: f.GroupBy, Buckets: out, Totals: fakeUsageTotals()}, nil
 	}
 	return s.fakeData.Summarize(ctx, f)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -100,6 +101,36 @@ func TestWarmNavigationZeroQueries(t *testing.T) {
 	})
 	if n != 0 {
 		t.Fatalf("warm navigation sweep ran %d queries, want 0", n)
+	}
+}
+
+func TestOverviewLoadReusesTimelineTotals(t *testing.T) {
+	f := &fakeData{}
+	m := NewModel(f, Options{DBPath: "/tmp/usage.db"})
+	m.data.now = func() time.Time {
+		return time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local)
+	}
+	m.loadNow = m.data.now()
+	m.rng = Range7d
+
+	n := queriesDuring(f, func() { m.loadOverview() })
+	if n != 4 {
+		t.Fatalf("cold Overview load ran %d queries, want 4", n)
+	}
+	if !reflect.DeepEqual(m.overview.Totals, fakeUsageTotals()) {
+		t.Fatalf("Overview totals = %#v, want timeline totals %#v", m.overview.Totals, fakeUsageTotals())
+	}
+
+	m.scrubPinned = true
+	m.scrubIndex = 1
+	m.syncScrub()
+	m.scrubPinned = false
+	n = queriesDuring(f, func() { m.syncScrub() })
+	if n != 0 {
+		t.Fatalf("unpinning a warm Overview ran %d queries, want 0", n)
+	}
+	if !reflect.DeepEqual(m.overview.Totals, fakeUsageTotals()) {
+		t.Fatalf("unpin totals = %#v, want cached timeline totals %#v", m.overview.Totals, fakeUsageTotals())
 	}
 }
 

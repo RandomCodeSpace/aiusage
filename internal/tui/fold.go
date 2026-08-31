@@ -62,17 +62,23 @@ func foldMinorTools(rows []store.Bucket, grand int64, expanded bool) FoldResult 
 	if grand <= 0 || len(rows) == 0 {
 		return none
 	}
-	major := make([]store.Bucket, 0, len(rows))
-	minor := make([]store.Bucket, 0, len(rows))
+	minorCount := 0
+	for _, b := range rows {
+		if isMinorShare(b.Total, grand) {
+			minorCount++
+		}
+	}
+	if minorCount < foldMinRows {
+		return none
+	}
+	major := make([]store.Bucket, 0, len(rows)-minorCount)
+	minor := make([]store.Bucket, 0, minorCount)
 	for _, b := range rows {
 		if isMinorShare(b.Total, grand) {
 			minor = append(minor, b)
 			continue
 		}
 		major = append(major, b)
-	}
-	if len(minor) < foldMinRows {
-		return none
 	}
 
 	out := make([]store.Bucket, 0, len(rows)+1)

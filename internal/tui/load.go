@@ -73,17 +73,16 @@ func (m *Model) reloadWith(cacheOnlyDetail bool) {
 // to the scrubbed bucket via syncScrub (called after the base load).
 func (m *Model) loadOverview() {
 	now := m.qnow()
-	tot, err := m.data.Totals(m.qctx(), now, m.span(), m.crumbs)
-	if err != nil {
-		m.err = err
-		return
-	}
-	byTool, err := m.data.GroupBy(m.qctx(), now, m.span(), m.crumbs, "tool", SortTotal)
-	if err != nil {
-		m.err = err
-		return
-	}
 	tl, dim, err := m.data.Timeline(m.qctx(), now, m.span(), m.crumbs)
+	if err != nil {
+		m.err = err
+		return
+	}
+	// A grouped Summary carries the same exact grand total as an ungrouped
+	// Summary, including distinct sessions and pricing provenance. Reuse it
+	// instead of issuing a fifth query for data the timeline already returned.
+	tot := tl.Totals
+	byTool, err := m.data.GroupBy(m.qctx(), now, m.span(), m.crumbs, "tool", SortTotal)
 	if err != nil {
 		m.err = err
 		return
@@ -627,13 +626,14 @@ func (m *Model) syncScrub() {
 		m.overview.Pinned = false
 		m.overview.ScrubLabel = ""
 		now := m.qnow()
-		tot, okT := m.data.TotalsCached(now, m.span(), m.crumbs)
+		timeline, _, okT := m.data.TimelineCached(now, m.span(), m.crumbs)
 		prev, okP := m.prevTotalsCached()
 		byTool, okB := m.data.GroupByCached(now, m.span(), m.crumbs, "tool", SortTotal)
 		if !okT || !okP || !okB {
 			m.detailWanted = true
 			return
 		}
+		tot := timeline.Totals
 		m.overview.Totals = tot
 		m.overview.Prev = prev
 		m.setOverviewTools(filterBuckets(byTool.Buckets, "tool", m.filter), tot.Total)

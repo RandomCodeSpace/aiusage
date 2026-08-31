@@ -57,7 +57,14 @@ import (
 
 // refreshInterval is how often we stat the db for a live update. 10s keeps idle
 // CPU near zero while still feeling live for a usage dashboard.
-const refreshInterval = 10 * time.Second
+const (
+	refreshInterval = 10 * time.Second
+	// A cold Overview range load waits briefly before touching SQLite. This is
+	// shorter than a deliberate pause but long enough that a 120 ms rapid-cycle
+	// cadence gives a superseded query only a small head start. Warm revisits
+	// bypass it entirely.
+	rangeLoadSettle = 75 * time.Millisecond
+)
 
 // dataLoadedMsg signals that a background load finished warming the query cache
 // for the captured (view, range, filter, drill) snapshot. Update applies it by
@@ -150,12 +157,25 @@ func (g *flightGate) stop() {
 // runtime gets around to scheduling the goroutine. Doing it in loadCmd rather
 // than startLoad covers Init's first load too, which has no startLoad.
 func (m Model) loadCmd() tea.Cmd {
+	return m.loadCmdAfter(0)
+}
+
+func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
 	mc := m
 	dbPath := m.dbPath
 	gen := m.loadGen
 	mc.loadCtx = m.flight.next()
 	m.detail.stop() // a navigation moots the detail query under the old selection
 	return func() tea.Msg {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-mc.loadCtx.Done():
+				return dataLoadedMsg{gen: gen, now: mc.loadNow, err: mc.loadCtx.Err()}
+			}
+		}
 		// Stat BEFORE querying: a daemon write landing between the queries and a
 		// trailing stat would be credited to lastMTime while being absent from
 		// the rendered data, and the refresh tick would then skip it until the
@@ -206,6 +226,10 @@ func fileMTime(path string) time.Time {
 // hold, the branded loading screen owns the frame instead. Kept as the single
 // dispatch path so generation, clock and freshness never drift apart.
 func (m *Model) startLoad() tea.Cmd {
+	return m.startLoadAfter(0)
+}
+
+func (m *Model) startLoadAfter(delay time.Duration) tea.Cmd {
 	m.loadGen++
 	m.loadNow = m.data.now()
 	// A load replaces the rows under the selection — a drill, a range or sort
@@ -216,7 +240,7 @@ func (m *Model) startLoad() tea.Cmd {
 	if m.fresh != FreshCold {
 		m.fresh = FreshCutIn
 	}
-	return m.loadCmd()
+	return m.loadCmdAfter(delay)
 }
 
 // qnow returns the clock of the current load generation: resolved once per

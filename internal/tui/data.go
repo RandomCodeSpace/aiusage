@@ -806,6 +806,16 @@ func (d *Data) TimelineCached(now time.Time, sp Span, crumbs []Crumb) (*store.Su
 	return s, dim, true
 }
 
+// timelineWarm reports whether a range's Overview timeline is already cached
+// without copying or sorting it. Range cycling uses this as the cheap signal
+// that a revisit can load immediately; a cold range gets a short settle window
+// so rapid presses cancel before opening work they will discard.
+func (d *Data) timelineWarm(now time.Time, sp Span, crumbs []Crumb) bool {
+	dim := timelineDim(sp.R)
+	_, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, []string{dim}))
+	return ok
+}
+
 // windowTotalsFilter builds the ungrouped filter for an explicit [since,until)
 // window under the drill stack (shared by WindowTotals and its cached twin so
 // both derive identical cache keys).

@@ -28,6 +28,10 @@ type fakeData struct {
 	summarizeCalls atomic.Int64
 }
 
+func fakeUsageTotals() store.Bucket {
+	return store.Bucket{Events: 12, Sessions: 5, Input: 1000, Output: 2000, CacheRead: 4000, Total: 7000}
+}
+
 // fakeRows returns the canned single-dimension buckets for dim. Sessions
 // mirrors Events (each fake event its own session) so the store-level distinct
 // count has a deterministic value to assert on.
@@ -303,14 +307,12 @@ func (noActivity) TopTurnContext(context.Context, model.TurnDimension, store.Act
 func (f *fakeData) Summarize(_ context.Context, fl store.Filter) (*store.Summary, error) {
 	f.summarizeCalls.Add(1)
 	if len(fl.GroupBy) == 0 {
-		return &store.Summary{
-			Totals: store.Bucket{Events: 12, Sessions: 5, Input: 1000, Output: 2000, CacheRead: 4000, Total: 7000},
-		}, nil
+		return &store.Summary{Totals: fakeUsageTotals()}, nil
 	}
 	if len(fl.GroupBy) == 2 {
-		return &store.Summary{GroupBy: fl.GroupBy, Buckets: fakeCross(fl.GroupBy[0], fl.GroupBy[1])}, nil
+		return &store.Summary{GroupBy: fl.GroupBy, Buckets: fakeCross(fl.GroupBy[0], fl.GroupBy[1]), Totals: fakeUsageTotals()}, nil
 	}
-	return &store.Summary{GroupBy: fl.GroupBy, Buckets: fakeRows(fl.GroupBy[0])}, nil
+	return &store.Summary{GroupBy: fl.GroupBy, Buckets: fakeRows(fl.GroupBy[0]), Totals: fakeUsageTotals()}, nil
 }
 
 // queries returns the total number of DataSource (Summarize) calls f has

@@ -294,6 +294,10 @@ func (m Model) cycleRange() (Model, tea.Cmd) {
 	m.scrubPinned = false
 	m.syncStepKeys()
 	m.persistUI()
+	if m.view == ViewOverview && !m.data.timelineWarm(m.data.now(), m.span(), m.crumbs) {
+		cmd := m.startLoadAfter(rangeLoadSettle)
+		return m, cmd
+	}
 	cmd := m.startLoad()
 	return m, cmd
 }
