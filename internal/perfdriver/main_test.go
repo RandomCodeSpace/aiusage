@@ -171,11 +171,35 @@ func TestRunDispatch(t *testing.T) {
 	if err := run(nil); err == nil {
 		t.Fatal("empty run succeeded")
 	}
-	if err := run([]string{"fixture-size", "usage"}); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"usage", "activity", "contexts"} {
+		if err := run([]string{"fixture-size", name}); err != nil {
+			t.Fatalf("fixture-size %s: %v", name, err)
+		}
 	}
 	if err := run([]string{"fixture-size", "wrong"}); err == nil {
 		t.Fatal("bad fixture size succeeded")
+	}
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "dispatch.db")
+	manifestPath := filepath.Join(dir, "dispatch.json")
+	if err := run([]string{
+		"generate-long-ledger", "--db", dbPath, "--manifest", manifestPath,
+		"--usage", "40", "--activity", "16", "--contexts", "8",
+	}); err != nil {
+		t.Fatalf("generate-long-ledger dispatch: %v", err)
+	}
+	if err := run([]string{"query-suite", "--db", dbPath, "--matrix", "timed", "--samples", "1"}); err != nil {
+		t.Fatalf("query-suite dispatch: %v", err)
+	}
+	stable := filepath.Join(dir, "stable")
+	if err := os.WriteFile(stable, []byte("#!/bin/sh\nprintf 'stable-output\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"observe", "--binary", stable, "--name", "version", "--command", "version", "--samples", "1",
+	}); err != nil {
+		t.Fatalf("observe dispatch: %v", err)
 	}
 	if err := run([]string{"unknown"}); err == nil {
 		t.Fatal("unknown command succeeded")

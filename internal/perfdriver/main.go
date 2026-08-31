@@ -42,7 +42,7 @@ func run(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return generateSourceFarm(*root, *fixtures, *manifest)
+		return generateSourceFarm(*root, *fixtures, *manifest, sourceFarmSources, sourceFarmRecords)
 	case "source-farm-discovery":
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		root := fs.String("root", "", "generated source-farm directory")
@@ -113,7 +113,9 @@ func run(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return withNeutralSourceFarmEnvironment(func() error { return runSourceFarmContract(*root, *out) })
+		return withNeutralSourceFarmEnvironment(func() error {
+			return runSourceFarmContract(*root, *out, sourceFarmSources, sourceFarmRecords, sourceFarmUnchangedCycles)
+		})
 	case "query-suite":
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		db := fs.String("db", "", "schema-compatible database path")

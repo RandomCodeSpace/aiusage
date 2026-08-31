@@ -72,6 +72,7 @@ export CGO_ENABLED=0
 export GOMAXPROCS=2
 export TZ=UTC
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
+readonly go_bin="$(command -v go)"
 
 (cd "$baseline_tree" && go build -o "$perf_root/baseline-aiusage" .)
 (cd "$candidate_tree" && go build -o "$perf_root/candidate-aiusage" .)
@@ -81,8 +82,8 @@ export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 (cd "$baseline_tree" && go test -c -o "$perf_root/baseline-tui.test" ./internal/tui)
 (cd "$candidate_tree" && go test -c -o "$perf_root/candidate-tui.test" ./internal/tui)
 
-(cd "$baseline_tree" && rtk go test -c -o "$perf_root/baseline-perfdriver.test" ./internal/perfdriver)
-(cd "$candidate_tree" && rtk go test -c -o "$perf_root/candidate-perfdriver.test" ./internal/perfdriver)
+(cd "$baseline_tree" && "$go_bin" test -c -o "$perf_root/baseline-perfdriver.test" ./internal/perfdriver)
+(cd "$candidate_tree" && "$go_bin" test -c -o "$perf_root/candidate-perfdriver.test" ./internal/perfdriver)
 
 "$perf_root/candidate-driver" generate-source-farm \
 	--root "$perf_root/source-farm" --fixtures "$candidate_tree" \

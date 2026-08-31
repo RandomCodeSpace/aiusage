@@ -148,8 +148,8 @@ func sourceFarmConfig(root string) adapter.DiscoverConfig {
 	}
 }
 
-func generateSourceFarm(root, fixtures, manifestPath string) error {
-	if root == "" || fixtures == "" || manifestPath == "" {
+func generateSourceFarm(root, fixtures, manifestPath string, expectedSources, expectedRecords int) error {
+	if root == "" || fixtures == "" || manifestPath == "" || expectedSources <= 0 || expectedRecords <= 0 {
 		return errors.New("generate-source-farm requires --root, --fixtures, and --manifest")
 	}
 	if entries, err := os.ReadDir(root); err == nil && len(entries) > 0 {
@@ -176,8 +176,8 @@ func generateSourceFarm(root, fixtures, manifestPath string) error {
 	if err != nil {
 		return fmt.Errorf("measure non-Codex farm: %w", err)
 	}
-	codexSources := sourceFarmSources - initial.Sources
-	codexRecords := sourceFarmRecords - initial.Records
+	codexSources := expectedSources - initial.Sources
+	codexRecords := expectedRecords - initial.Records
 	if codexSources <= 0 || codexRecords < codexSources {
 		return fmt.Errorf("non-Codex fixture leaves invalid Codex budget: sources=%d records=%d", codexSources, codexRecords)
 	}
@@ -194,9 +194,9 @@ func generateSourceFarm(root, fixtures, manifestPath string) error {
 	if err != nil {
 		return fmt.Errorf("validate source farm: %w", err)
 	}
-	if final.Adapters != len(sourceFarmTools) || final.Sources != sourceFarmSources || final.Records != sourceFarmRecords {
+	if final.Adapters != len(sourceFarmTools) || final.Sources != expectedSources || final.Records != expectedRecords {
 		return fmt.Errorf("source farm shape = adapters %d, sources %d, records %d; want %d, %d, %d",
-			final.Adapters, final.Sources, final.Records, len(sourceFarmTools), sourceFarmSources, sourceFarmRecords)
+			final.Adapters, final.Sources, final.Records, len(sourceFarmTools), expectedSources, expectedRecords)
 	}
 
 	var byTool map[string]int
@@ -480,8 +480,8 @@ func summarizeSourceFarm(stats collect.CycleStats) sourceFarmSummary {
 	}
 }
 
-func runSourceFarmContract(root, outPath string) error {
-	if root == "" || outPath == "" {
+func runSourceFarmContract(root, outPath string, expectedSources, expectedRecords, unchangedCycles int) error {
+	if root == "" || outPath == "" || expectedSources <= 0 || expectedRecords <= 0 || unchangedCycles <= 0 {
 		return errors.New("source-farm-contract requires --root and --out")
 	}
 	work, err := os.MkdirTemp("", "aiusage-source-farm-contract-")
@@ -501,7 +501,7 @@ func runSourceFarmContract(root, outPath string) error {
 	if err != nil {
 		return err
 	}
-	if initial.Adapters != len(sourceFarmTools) || initial.Sources != sourceFarmSources || initial.Records != sourceFarmRecords {
+	if initial.Adapters != len(sourceFarmTools) || initial.Sources != expectedSources || initial.Records != expectedRecords {
 		return fmt.Errorf("initial source farm = %+v", initial)
 	}
 	before, err := usageEventsByTool(dbPath)
@@ -533,7 +533,7 @@ func runSourceFarmContract(root, outPath string) error {
 		}
 		changedTools = append(changedTools, tool)
 	}
-	if _, err := runSourceFarmUnchanged(copyRoot, dbPath, sourceFarmUnchangedCycles); err != nil {
+	if _, err := runSourceFarmUnchanged(copyRoot, dbPath, unchangedCycles); err != nil {
 		return err
 	}
 	report := sourceFarmContractReport{
@@ -543,7 +543,7 @@ func runSourceFarmContract(root, outPath string) error {
 		Changed:         summarizeSourceFarm(stats),
 		ChangedTools:    changedTools,
 		ChangedShapes:   shapes,
-		UnchangedCycles: sourceFarmUnchangedCycles,
+		UnchangedCycles: unchangedCycles,
 	}
 	if err := writeJSON(outPath, report); err != nil {
 		return err
