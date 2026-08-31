@@ -464,6 +464,42 @@ func TestWriteEventsJSONKeysStable(t *testing.T) {
 	}
 }
 
+func TestDirectEventJSONMatchesEncodingJSONEscapes(t *testing.T) {
+	value := "quote=\" slash=\\ controls=\b\f\n\r\t html=<>& separators=\u2028\u2029 invalid=" + string([]byte{0xff})
+	e := model.UsageEvent{
+		Tool: value, Model: value, Provider: value, ServiceTier: value,
+		SessionID: value, Project: value,
+		EventTime:    time.Date(2026, 8, 31, 12, 34, 56, 123456789, time.FixedZone("test", 5*60*60+30*60)),
+		ObservedTime: time.Date(2025, 1, 2, 3, 4, 5, 0, time.FixedZone("test", -7*60*60)),
+		InputTokens:  -1, OutputTokens: 2, CacheCreationTokens: 3,
+		CacheReadTokens: 4, ReasoningTokens: 5, TotalTokens: 13,
+		PriceSource: value, RequestID: value, MessageID: value,
+		SourcePath: value, DedupKey: value, Kind: model.EventKind(value), Raw: value,
+	}
+	e.SetCost(-42, value)
+
+	for _, includeRaw := range []bool{false, true} {
+		var reference any = e
+		if includeRaw {
+			reference = struct {
+				model.UsageEvent
+				Raw string
+			}{UsageEvent: e, Raw: e.Raw}
+		}
+		want, err := json.MarshalIndent(reference, "  ", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := appendEventJSON(nil, e, includeRaw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("includeRaw=%t direct JSON differs:\n--- want\n%s\n--- got\n%s", includeRaw, want, got)
+		}
+	}
+}
+
 func TestWriteEventsCSVHeaderStable(t *testing.T) {
 	wantHeader := []string{
 		"tool", "model", "session", "project", "event_time", "observed_time",

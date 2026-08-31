@@ -286,8 +286,8 @@ jobs:
             adapter-evidence
           if-no-files-found: error
 
-  performance:
-    name: Production performance
+  performance-paired:
+    name: Performance evidence / paired workloads
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -311,10 +311,101 @@ jobs:
       - name: install pinned benchstat
         run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260813145340-fd4a688df892
 
-      - name: enforce production performance contract
+      - name: enforce paired performance contract
+        env:
+          AIUSAGE_PERF_SKIP_EXPORTS: "1"
         run: ./scripts/performance-gate.sh
 
-      - name: upload performance evidence
+      - name: upload paired performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-paired
+          path: performance
+          if-no-files-found: error
+
+  performance-exports:
+    name: Performance evidence / ${{ matrix.command }}
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        command: [export-json, export-csv, export-json-raw, export-csv-raw]
+    env:
+      CGO_ENABLED: "0"
+      GOMAXPROCS: "2"
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: prepare export evidence
+        run: mkdir -p performance
+
+      - name: measure one-million-row export
+        env:
+          AIUSAGE_PERF_EXPORT_COMMAND: ${{ matrix.command }}
+        run: ./scripts/performance-export-gate.sh
+
+      - name: upload export evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-${{ matrix.command }}
+          path: performance
+          if-no-files-found: error
+
+  performance:
+    name: Production performance
+    if: github.event_name != 'schedule'
+    needs: [performance-paired, performance-exports]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      GOMAXPROCS: "2"
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: prepare combined evidence
+        run: mkdir -p performance
+
+      - name: download paired evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: performance-paired
+          path: performance
+
+      - name: download export evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: performance-export-*
+          path: performance
+          merge-multiple: true
+
+      - name: install pinned benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260813145340-fd4a688df892
+
+      - name: enforce complete production performance contract
+        run: ./scripts/finalize-performance-gate.sh
+
+      - name: upload complete performance evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

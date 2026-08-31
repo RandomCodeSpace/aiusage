@@ -1,12 +1,14 @@
 package report
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
@@ -174,14 +176,6 @@ func WriteEventsJSON(w io.Writer, evs []model.UsageEvent) error {
 	return stream.Close()
 }
 
-// eventWithRaw restores the Raw payload that UsageEvent's json:"-" tag strips.
-// The outer field marshals under the pre-tag key "Raw", so --include-raw
-// output keeps the historical shape.
-type eventWithRaw struct {
-	model.UsageEvent
-	Raw string
-}
-
 // WriteEventsJSONWithRaw is WriteEventsJSON plus the Raw provider payload.
 // Only the export --include-raw path may call it: Raw can carry full
 // transcript content.
@@ -201,16 +195,24 @@ func WriteEventsJSONWithRaw(w io.Writer, evs []model.UsageEvent) error {
 // the array exactly once. The byte shape matches WriteEventsJSON and its raw
 // variant, including PascalCase field names and the empty [] result.
 type EventsJSONWriter struct {
-	w          io.Writer
+	w          *bufio.Writer
 	includeRaw bool
 	wroteEvent bool
 	closed     bool
+	row        []byte
 }
 
 func NewEventsJSONWriter(w io.Writer, includeRaw bool) (*EventsJSONWriter, error) {
-	stream := &EventsJSONWriter{w: w, includeRaw: includeRaw}
-	if err := writeExportString(w, "["); err != nil {
+	buffered := bufio.NewWriterSize(w, 256<<10)
+	stream := &EventsJSONWriter{w: buffered, includeRaw: includeRaw}
+	if err := writeExportString(buffered, "["); err != nil {
 		return nil, fmt.Errorf("open events json array: %w", err)
+	}
+	// The performance contract measures first byte separately from completion.
+	// Flush the opening bracket immediately, then retain only this bounded buffer
+	// while the million-row body streams.
+	if err := buffered.Flush(); err != nil {
+		return nil, fmt.Errorf("flush events json opening: %w", err)
 	}
 	return stream, nil
 }
@@ -220,14 +222,11 @@ func (w *EventsJSONWriter) WritePage(evs []model.UsageEvent) error {
 		return fmt.Errorf("write events json page: writer is closed")
 	}
 	for _, e := range evs {
-		var value any = e
-		if w.includeRaw {
-			value = eventWithRaw{UsageEvent: e, Raw: e.Raw}
-		}
-		encoded, err := json.MarshalIndent(value, "  ", "  ")
+		encoded, err := appendEventJSON(w.row[:0], e, w.includeRaw)
 		if err != nil {
 			return fmt.Errorf("encode events json row: %w", err)
 		}
+		w.row = encoded
 		separator := "\n  "
 		if w.wroteEvent {
 			separator = ",\n  "
@@ -247,6 +246,139 @@ func (w *EventsJSONWriter) WritePage(evs []model.UsageEvent) error {
 	return nil
 }
 
+// appendEventJSON is the fixed v1 event encoder. encoding/json reflection plus
+// indentation consumed most of the one-million-row export budget; this direct
+// flat-struct encoding preserves the exact pinned bytes while reusing one row
+// buffer. String escaping intentionally matches encoding/json's HTML-safe
+// behavior because paths and opaque provider fields are part of the machine
+// contract.
+func appendEventJSON(dst []byte, e model.UsageEvent, includeRaw bool) ([]byte, error) {
+	dst = append(dst, "{\n    \"Tool\": "...)
+	dst = appendJSONString(dst, e.Tool)
+	dst = appendJSONFieldString(dst, "Model", e.Model)
+	dst = appendJSONFieldString(dst, "Provider", e.Provider)
+	dst = appendJSONFieldString(dst, "ServiceTier", e.ServiceTier)
+	dst = appendJSONFieldString(dst, "SessionID", e.SessionID)
+	dst = appendJSONFieldString(dst, "Project", e.Project)
+	var err error
+	dst, err = appendJSONFieldTime(dst, "EventTime", e.EventTime)
+	if err != nil {
+		return nil, err
+	}
+	dst, err = appendJSONFieldTime(dst, "ObservedTime", e.ObservedTime)
+	if err != nil {
+		return nil, err
+	}
+	dst = appendJSONFieldInt(dst, "InputTokens", e.InputTokens)
+	dst = appendJSONFieldInt(dst, "OutputTokens", e.OutputTokens)
+	dst = appendJSONFieldInt(dst, "CacheCreationTokens", e.CacheCreationTokens)
+	dst = appendJSONFieldInt(dst, "CacheReadTokens", e.CacheReadTokens)
+	dst = appendJSONFieldInt(dst, "ReasoningTokens", e.ReasoningTokens)
+	dst = appendJSONFieldInt(dst, "TotalTokens", e.TotalTokens)
+	dst = append(dst, ",\n    \"CostMicroUSD\": "...)
+	if e.CostMicroUSD == nil {
+		dst = append(dst, "null"...)
+	} else {
+		dst = strconv.AppendInt(dst, *e.CostMicroUSD, 10)
+	}
+	dst = appendJSONFieldString(dst, "PriceSource", e.PriceSource)
+	dst = appendJSONFieldString(dst, "RequestID", e.RequestID)
+	dst = appendJSONFieldString(dst, "MessageID", e.MessageID)
+	dst = appendJSONFieldString(dst, "SourcePath", e.SourcePath)
+	dst = appendJSONFieldString(dst, "DedupKey", e.DedupKey)
+	dst = appendJSONFieldString(dst, "Kind", string(e.Kind))
+	if includeRaw {
+		dst = appendJSONFieldString(dst, "Raw", e.Raw)
+	}
+	dst = append(dst, "\n  }"...)
+	return dst, nil
+}
+
+func appendJSONFieldString(dst []byte, name, value string) []byte {
+	dst = append(dst, ",\n    \""...)
+	dst = append(dst, name...)
+	dst = append(dst, "\": "...)
+	return appendJSONString(dst, value)
+}
+
+func appendJSONFieldInt(dst []byte, name string, value int64) []byte {
+	dst = append(dst, ",\n    \""...)
+	dst = append(dst, name...)
+	dst = append(dst, "\": "...)
+	return strconv.AppendInt(dst, value, 10)
+}
+
+func appendJSONFieldTime(dst []byte, name string, value time.Time) ([]byte, error) {
+	year := value.Year()
+	_, offset := value.Zone()
+	if year < 0 || year >= 10000 {
+		return nil, fmt.Errorf("Time.MarshalJSON: year outside of range [0,9999]")
+	}
+	if offset <= -24*60*60 || offset >= 24*60*60 {
+		return nil, fmt.Errorf("Time.MarshalJSON: timezone hour outside of range [0,23]")
+	}
+	dst = append(dst, ",\n    \""...)
+	dst = append(dst, name...)
+	dst = append(dst, "\": \""...)
+	dst = value.AppendFormat(dst, time.RFC3339Nano)
+	dst = append(dst, '"')
+	return dst, nil
+}
+
+func appendJSONString(dst []byte, value string) []byte {
+	const hex = "0123456789abcdef"
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(value); {
+		if b := value[i]; b < utf8.RuneSelf {
+			if b >= 0x20 && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
+				i++
+				continue
+			}
+			dst = append(dst, value[start:i]...)
+			switch b {
+			case '\\', '"':
+				dst = append(dst, '\\', b)
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hex[b>>4], hex[b&0x0f])
+			}
+			i++
+			start = i
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(value[i:])
+		if r == utf8.RuneError && size == 1 {
+			dst = append(dst, value[start:i]...)
+			dst = append(dst, `\ufffd`...)
+			i++
+			start = i
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			dst = append(dst, value[start:i]...)
+			dst = append(dst, '\\', 'u', '2', '0', '2', hex[r&0x0f])
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	dst = append(dst, value[start:]...)
+	dst = append(dst, '"')
+	return dst
+}
+
 func (w *EventsJSONWriter) Close() error {
 	if w.closed {
 		return nil
@@ -258,6 +390,9 @@ func (w *EventsJSONWriter) Close() error {
 	}
 	if err := writeExportString(w.w, ending); err != nil {
 		return fmt.Errorf("close events json array: %w", err)
+	}
+	if err := w.w.Flush(); err != nil {
+		return fmt.Errorf("flush events json array: %w", err)
 	}
 	return nil
 }

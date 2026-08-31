@@ -6,9 +6,14 @@ readonly repo_root="$(git rev-parse --show-toplevel)"
 readonly candidate_sha="$(git rev-parse HEAD)"
 readonly artifact_dir="${AIUSAGE_PERF_OUT:-$repo_root/performance}"
 readonly scale="${AIUSAGE_PERF_SCALE:-1}"
+readonly skip_exports="${AIUSAGE_PERF_SKIP_EXPORTS:-0}"
 
 if ! [[ "$scale" =~ ^[1-9][0-9]*$ ]]; then
 	echo "AIUSAGE_PERF_SCALE must be a positive integer divisor" >&2
+	exit 2
+fi
+if [[ "$skip_exports" != "0" && "$skip_exports" != "1" ]]; then
+	echo "AIUSAGE_PERF_SKIP_EXPORTS must be 0 or 1" >&2
 	exit 2
 fi
 
@@ -245,13 +250,15 @@ run_timed_set() {
 
 run_timed_set 1 10
 
-for command in export-json export-csv export-json-raw export-csv-raw; do
-	name="${command}-1m"
-	"$perf_root/candidate-driver" observe --binary "$perf_root/candidate-aiusage" \
-		--db "$perf_root/candidate-1m.db" --name "$name" --command "$command" \
-		--purpose absolute --samples 10 --warmups 1 \
-		>"$artifact_dir/candidate/process/$name.json"
-done
+if [[ "$skip_exports" == "0" ]]; then
+	for command in export-json export-csv export-json-raw export-csv-raw; do
+		name="${command}-1m"
+		"$perf_root/candidate-driver" observe --binary "$perf_root/candidate-aiusage" \
+			--db "$perf_root/candidate-1m.db" --name "$name" --command "$command" \
+			--purpose absolute --samples 10 --warmups 1 \
+			>"$artifact_dir/candidate/process/$name.json"
+	done
+fi
 
 run_checker() {
 	benchstat "$artifact_dir/benchmarks/baseline.txt" "$artifact_dir/benchmarks/candidate.txt" \
@@ -274,5 +281,5 @@ if ! run_checker; then
 fi
 
 cat >"$artifact_dir/run.json" <<EOF
-{"schema":"production-performance-run-v1","baseline":"$baseline_sha","candidate":"$candidate_sha","scale_divisor":$scale,"runner":"ubuntu-24.04","cgo_enabled":false,"gomaxprocs":2}
+{"schema":"production-performance-run-v1","baseline":"$baseline_sha","candidate":"$candidate_sha","scale_divisor":$scale,"runner":"ubuntu-24.04","cgo_enabled":false,"gomaxprocs":2,"exports_included":$([[ "$skip_exports" == "0" ]] && echo true || echo false)}
 EOF
