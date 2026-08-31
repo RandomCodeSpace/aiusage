@@ -71,6 +71,7 @@ small_context=$((small_context > 10 ? small_context : 10))
 export CGO_ENABLED=0
 export GOMAXPROCS=2
 export TZ=UTC
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 
 (cd "$baseline_tree" && go build -o "$perf_root/baseline-aiusage" .)
 (cd "$candidate_tree" && go build -o "$perf_root/candidate-aiusage" .)
