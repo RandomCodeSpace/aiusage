@@ -1,31 +1,27 @@
 // Package agy implements an AGGREGATE adapter for the Antigravity CLI.
 //
-// Antigravity is Gemini-based and is expected to reuse the Gemini CLI telemetry
-// shape once it emits usage. This adapter scans the canonical Antigravity data
-// directories for usage-bearing *.json / *.jsonl files and parses them via
-// adapter/internal/geminishape (cumulative per-id records, max snapshot per id,
-// one AggregateSnapshot per (file, id)) tagged tool="agy" so it is never
-// confused with the Gemini CLI.
-//
-// TODO(agy): the live Antigravity install is unauthenticated and emits NO token
-// usage today — the `.pb` conversation blobs carry content only, no token
-// fields. Until a logged-in session runs, Discover finds no usage-bearing files
-// and returns an empty source list with no error (the current real state).
-// Once Antigravity is authenticated and a session has run, re-inspect
-// ~/.gemini/antigravity-cli/ for the real usage file/schema and finalise the
-// parser (likely a `.pb`/usage file rather than the Gemini JSON shape probed
-// here).
+// Antigravity 1.1.22 reports authoritative cumulative conversation usage in
+// print-mode stream JSON result records. The terminal step_update for the same
+// turn repeats incremental usage, so it is deliberately ignored. Captured
+// result streams may be placed in an Antigravity data root (or an explicit
+// adapter override) for collection. The earlier Gemini-shaped JSON parser is
+// retained for source compatibility with existing captures.
 //
 // CRITICAL: strictly read-only. Files are opened O_RDONLY and never written,
 // locked, or modified.
 package agy
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,6 +35,45 @@ const metaProject = "agy"
 
 // shape is the shared Gemini-telemetry parser stamped for this adapter.
 var shape = geminishape.Shape{Tool: model.ToolAgy, Provider: model.ProviderGoogle, Project: metaProject}
+
+const maxStreamRecordBytes = 8 << 20
+
+type streamUsage struct {
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ThinkingTokens  int64 `json:"thinking_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
+}
+
+type streamUsageRecord struct {
+	InputTokens     *int64 `json:"input_tokens"`
+	OutputTokens    *int64 `json:"output_tokens"`
+	ThinkingTokens  *int64 `json:"thinking_tokens"`
+	CacheReadTokens *int64 `json:"cache_read_tokens"`
+	TotalTokens     *int64 `json:"total_tokens"`
+}
+
+type streamRecord struct {
+	Event          string `json:"event"`
+	ConversationID string `json:"conversation_id"`
+	Init           *struct {
+		Model string `json:"model"`
+	} `json:"init"`
+	Result *struct {
+		ConversationID string             `json:"conversation_id"`
+		Status         string             `json:"status"`
+		NumTurns       int64              `json:"num_turns"`
+		Usage          *streamUsageRecord `json:"usage"`
+	} `json:"result"`
+}
+
+type streamReadResult struct {
+	Snapshots []model.AggregateSnapshot
+	Skipped   int
+	ScanErr   error
+	FormatErr error
+}
 
 // candidateDirs are the Antigravity data roots, relative to the user's home,
 // probed for usage-bearing files.
@@ -94,10 +129,8 @@ func (a Adapter) roots(cfg adapter.DiscoverConfig) []string {
 }
 
 // Discover scans each Antigravity root for *.json / *.jsonl files. Files are
-// NOT pre-parsed for token usage here — that would parse every file twice per
-// cycle (Discover, then Collect). Content-only blobs from an unauthenticated
-// install become sources whose Collect emits nothing: the all-zero filter in
-// the shared parser rejects every record without tokens.
+// not pre-parsed for token usage here. Content-only artifacts remain valid
+// empty sources, while captured print-mode streams provide cumulative usage.
 func (a Adapter) Discover(ctx context.Context, cfg adapter.DiscoverConfig) ([]adapter.Source, error) {
 	seen := make(map[string]struct{})
 	var srcs []adapter.Source
@@ -165,7 +198,16 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		return adapter.Observation{}, nil // unchanged: skip, keep stored checkpoint
 	}
 
-	res, err := shape.ReadFile(src.Path, time.Now().UTC())
+	now := time.Now().UTC()
+	stream, err := isStreamFile(src.Path)
+	if err != nil {
+		return adapter.Observation{}, fmt.Errorf("agy: inspect %s: %w", src.Path, err)
+	}
+	if stream {
+		return collectStreamFile(src, size, mtimeNS, now)
+	}
+
+	res, err := shape.ReadFile(src.Path, now)
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("agy: read %s: %w", src.Path, err)
 	}
@@ -190,4 +232,190 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		return obs, fmt.Errorf("agy: skipped %d unparseable record(s) in %s", res.Skipped, src.Path)
 	}
 	return obs, nil
+}
+
+// isStreamFile recognizes the first nonempty print-mode stream record. A
+// scanner failure falls back to the legacy parser, which owns partial-read
+// reporting for legacy files and preserves its existing behavior.
+func isStreamFile(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), maxStreamRecordBytes)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var header struct {
+			Event string `json:"event"`
+		}
+		if json.Unmarshal(line, &header) != nil {
+			return false, nil
+		}
+		switch header.Event {
+		case "init", "step_update", "result":
+			return true, nil
+		default:
+			return false, nil
+		}
+	}
+	return false, nil
+}
+
+func collectStreamFile(src adapter.Source, size, mtimeNS int64, now time.Time) (adapter.Observation, error) {
+	res, err := readStreamFile(src.Path, now)
+	if err != nil {
+		return adapter.Observation{}, fmt.Errorf("agy: read %s: %w", src.Path, err)
+	}
+
+	obs := adapter.Observation{Snapshots: res.Snapshots}
+	if res.ScanErr == nil && res.FormatErr == nil {
+		obs.Checkpoint = &model.SourceCheckpoint{
+			Tool: model.ToolAgy, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
+		}
+	}
+
+	var readErrs []error
+	if res.FormatErr != nil {
+		readErrs = append(readErrs, fmt.Errorf("agy: incompatible stream %s: %w", src.Path, res.FormatErr))
+	}
+	if res.ScanErr != nil {
+		readErrs = append(readErrs, fmt.Errorf("agy: partial read of %s: %w", src.Path, res.ScanErr))
+	}
+	if res.Skipped > 0 {
+		readErrs = append(readErrs, fmt.Errorf("agy: skipped %d unparseable record(s) in %s", res.Skipped, src.Path))
+	}
+	return obs, errors.Join(readErrs...)
+}
+
+func readStreamFile(path string, now time.Time) (streamReadResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return streamReadResult{}, err
+	}
+	defer f.Close()
+
+	models := make(map[string]string)
+	latest := make(map[string]model.AggregateSnapshot)
+	var out streamReadResult
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), maxStreamRecordBytes)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var rec streamRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			out.Skipped++
+			continue
+		}
+		switch rec.Event {
+		case "init":
+			if rec.ConversationID == "" || rec.Init == nil || rec.Init.Model == "" {
+				out.FormatErr = errors.Join(out.FormatErr, streamFormatError("init record missing conversation_id or init.model"))
+				continue
+			}
+			models[rec.ConversationID] = rec.Init.Model
+		case "step_update":
+			// Its usage is the current step only. The result record below is the
+			// authoritative cumulative conversation counter.
+		case "result":
+			if rec.Result == nil || rec.Result.ConversationID == "" || rec.Result.Status == "" || rec.Result.NumTurns <= 0 {
+				out.FormatErr = errors.Join(out.FormatErr, streamFormatError("result record missing conversation_id, status, or num_turns"))
+				continue
+			}
+			if !strings.EqualFold(rec.Result.Status, "SUCCESS") {
+				continue
+			}
+			if rec.Result.Usage == nil {
+				out.FormatErr = errors.Join(out.FormatErr, streamFormatError("successful result record missing usage"))
+				continue
+			}
+			modelName := models[rec.Result.ConversationID]
+			if modelName == "" {
+				out.FormatErr = errors.Join(out.FormatErr, streamFormatError("result record has no matching init.model"))
+				continue
+			}
+			u, err := normalizeStreamUsage(rec.Result.Usage)
+			if err != nil {
+				out.FormatErr = errors.Join(out.FormatErr, err)
+				continue
+			}
+			raw, _ := json.Marshal(struct {
+				Model    string      `json:"model"`
+				NumTurns int64       `json:"num_turns"`
+				Usage    streamUsage `json:"usage"`
+			}{Model: modelName, NumTurns: rec.Result.NumTurns, Usage: u})
+			latest[rec.Result.ConversationID] = model.AggregateSnapshot{
+				Tool:            model.ToolAgy,
+				Key:             rec.Result.ConversationID,
+				Model:           modelName,
+				Provider:        model.ProviderGoogle,
+				SessionID:       rec.Result.ConversationID,
+				Project:         metaProject,
+				ObservedTime:    now,
+				InputTokens:     u.InputTokens,
+				OutputTokens:    u.OutputTokens,
+				CacheReadTokens: u.CacheReadTokens,
+				ReasoningTokens: u.ThinkingTokens,
+				TotalTokens:     u.TotalTokens,
+				SourcePath:      path,
+				Raw:             string(raw),
+			}
+		case "":
+			out.FormatErr = errors.Join(out.FormatErr, streamFormatError("record missing event discriminator"))
+		default:
+			// Additive event kinds are forward-compatible and carry no usage.
+		}
+	}
+	out.ScanErr = scanner.Err()
+
+	ids := make([]string, 0, len(latest))
+	for id := range latest {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		s := latest[id]
+		if s.InputTokens != 0 || s.OutputTokens != 0 || s.ReasoningTokens != 0 || s.CacheReadTokens != 0 || s.TotalTokens != 0 {
+			out.Snapshots = append(out.Snapshots, s)
+		}
+	}
+	return out, nil
+}
+
+func normalizeStreamUsage(raw *streamUsageRecord) (streamUsage, error) {
+	if raw.InputTokens == nil || raw.OutputTokens == nil || raw.ThinkingTokens == nil || raw.CacheReadTokens == nil || raw.TotalTokens == nil {
+		return streamUsage{}, streamFormatError("usage is missing a required token counter")
+	}
+	u := streamUsage{
+		InputTokens:     *raw.InputTokens,
+		OutputTokens:    *raw.OutputTokens,
+		ThinkingTokens:  *raw.ThinkingTokens,
+		CacheReadTokens: *raw.CacheReadTokens,
+		TotalTokens:     *raw.TotalTokens,
+	}
+	if u.InputTokens < 0 || u.OutputTokens < 0 || u.ThinkingTokens < 0 || u.CacheReadTokens < 0 || u.TotalTokens < 0 {
+		return streamUsage{}, streamFormatError("usage contains a negative counter")
+	}
+	if u.TotalTokens != u.InputTokens+u.OutputTokens {
+		return streamUsage{}, streamFormatError("usage total_tokens does not equal input_tokens + output_tokens")
+	}
+	if u.ThinkingTokens > u.OutputTokens {
+		return streamUsage{}, streamFormatError("usage thinking_tokens exceeds output_tokens")
+	}
+	if u.CacheReadTokens > u.InputTokens {
+		return streamUsage{}, streamFormatError("usage cache_read_tokens exceeds input_tokens")
+	}
+	return u, nil
+}
+
+func streamFormatError(detail string) error {
+	return fmt.Errorf("%s: %w", detail, adapter.ErrSourceFormat)
 }

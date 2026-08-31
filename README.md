@@ -80,6 +80,19 @@ Coverage varies because each tool records different information. Some provide
 exact cost and detailed activity; others provide token totals only. Run
 `aiusage doctor` to see what is available on your machine.
 
+Antigravity currently exposes token totals only in noninteractive stream JSON.
+To track those runs, append the stream to one stable file:
+
+~~~console
+mkdir -p "$HOME/.gemini/antigravity-cli"
+agy --print "YOUR PROMPT" --output-format stream-json \
+  | tee -a "$HOME/.gemini/antigravity-cli/aiusage-stream.jsonl"
+~~~
+
+Keep continued turns in that same file. `aiusage doctor` prints this reminder;
+ordinary Antigravity conversations cannot be recovered retroactively because
+their saved artifacts do not contain token counters.
+
 ## Reading the numbers
 
 Cost markers keep incomplete data honest:

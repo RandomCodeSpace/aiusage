@@ -19,12 +19,12 @@ import (
 )
 
 // adapterNotes are operator-facing caveats surfaced by `doctor` for adapters
-// whose data depends on external opt-in or is not yet emitted (plan §1).
+// whose data depends on external opt-in.
 var adapterNotes = map[string]string{
 	model.ToolCopilot: "requires Copilot OpenTelemetry file export " +
 		"(COPILOT_OTEL_FILE_EXPORTER_PATH or ~/.copilot/otel/*.jsonl); empty until enabled.",
-	model.ToolAgy: "Antigravity emits no token usage until logged in and used; " +
-		"adapter is Gemini-shaped and returns empty until data appears.",
+	model.ToolAgy: "requires Antigravity print-mode stream JSON to be appended to a local JSONL file; " +
+		"ordinary conversation artifacts do not contain token counters.",
 }
 
 // absentStatus is the wording for an adapter that is wired in but located
@@ -35,8 +35,22 @@ const absentStatus = "configured, no data source"
 
 // enablementGuides carry the steps that turn a tool's local telemetry on,
 // printed only for a tool in the absent state. Keyed by tool id so any adapter
-// can supply one; Copilot is the only source that is opt-in today (issue #28).
+// can supply one.
 var enablementGuides = map[string][]string{
+	model.ToolAgy: {
+		"Antigravity 1.1.22 reports token usage in print-mode stream JSON,",
+		"not in its ordinary saved conversation artifacts. For a noninteractive",
+		"session, append that stream to one stable local file:",
+		"",
+		`  mkdir -p "$HOME/.gemini/antigravity-cli"`,
+		`  agy --print "YOUR PROMPT" --output-format stream-json \`,
+		`    | tee -a "$HOME/.gemini/antigravity-cli/aiusage-stream.jsonl"`,
+		"",
+		"- Keep appending continued turns to the same file.",
+		"- aiusage ignores response text and stores only allow-listed metadata.",
+		"- Ordinary interactive sessions are not retroactively recoverable because",
+		"  the current Antigravity writer does not persist their token counters.",
+	},
 	model.ToolCopilot: {
 		"Copilot CLI records token usage only through its OpenTelemetry file",
 		"exporter, which is off by default. To enable it:",
@@ -64,7 +78,7 @@ func newDoctorCmd() *cobra.Command {
 		Short: "Diagnose configuration, database and adapter discovery",
 		Long: "doctor prints the resolved paths, database statistics, and a read-only " +
 			"discovery count for every adapter, including notes for adapters that " +
-			"depend on external opt-in (Copilot OTEL) or emit no data yet (agy).",
+			"depend on external opt-in (Antigravity stream JSON and Copilot OTEL).",
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return runDoctor(c)
@@ -291,9 +305,8 @@ func printDBStats(out io.Writer, s store.DBStats) {
 }
 
 // printAdapterDiscovery runs each adapter's read-only discovery and prints how
-// many sources it located, with notes for opt-in/empty adapters. An adapter that
-// discovers nothing reports the absent state rather than a zero count, and gets
-// its enablement checklist when one exists.
+// many sources it located, with notes for opt-in adapters. An adapter that
+// discovers nothing reports the absent state rather than a zero count.
 func printAdapterDiscovery(c *cobra.Command, cfg config.Config) {
 	out := c.OutOrStdout()
 	ctx := cmdContext(c)
@@ -322,7 +335,10 @@ func printAdapterDiscovery(c *cobra.Command, cfg config.Config) {
 		if note, ok := adapterNotes[ad.ID()]; ok {
 			fmt.Fprintf(out, "             note: %s\n", note)
 		}
-		if noUsage {
+		// Agy's ordinary artifacts are classified as usage-capable JSON sources
+		// but contain no counters; its capture instructions are therefore useful
+		// even when discovery found those files.
+		if noUsage || ad.ID() == model.ToolAgy {
 			printEnablementGuide(out, ad.ID())
 		}
 	}

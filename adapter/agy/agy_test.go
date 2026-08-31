@@ -25,11 +25,8 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	return p
 }
 
-// TestTokenFreeFilesYieldNoSnapshots is the headline case: an Antigravity dir
-// holding only content-only blobs (no token fields — the current real
-// unauthenticated state) produces zero snapshots. Discover no longer pre-parses
-// files for usage (that parsed every file twice per cycle); Collect's all-zero
-// filter rejects the non-usage records instead.
+// TestTokenFreeFilesYieldNoSnapshots keeps content-only Antigravity artifacts
+// valid and empty. Usage lives on the captured print-mode stream surface.
 func TestTokenFreeFilesYieldNoSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	// A conversation-style blob with no token usage anywhere.
@@ -55,6 +52,98 @@ func TestTokenFreeFilesYieldNoSnapshots(t *testing.T) {
 			t.Fatalf("token-free %s produced %d snapshots / %d events, want 0",
 				src.Path, len(obs.Snapshots), len(obs.Events))
 		}
+	}
+}
+
+// TestCollectLiveStreamFixture is the exact oracle for the sanitized Agy 1.1.22
+// two-turn capture in testdata. step_update usage is per-turn and must not be
+// added to the cumulative result usage; the second result is the one aggregate
+// snapshot for the conversation.
+func TestCollectLiveStreamFixture(t *testing.T) {
+	path := filepath.Join("testdata", "live-2026-08-31.jsonl")
+	src := adapter.Source{Tool: model.ToolAgy, Class: model.Aggregate, Path: path}
+	obs, err := Adapter{}.Collect(context.Background(), src)
+	if err != nil {
+		t.Fatalf("collect live fixture: %v", err)
+	}
+	if obs.Checkpoint == nil {
+		t.Fatal("complete live stream did not advance its checkpoint")
+	}
+	if len(obs.Snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want one cumulative conversation: %+v", len(obs.Snapshots), obs.Snapshots)
+	}
+	s := obs.Snapshots[0]
+	if s.Tool != model.ToolAgy || s.Provider != model.ProviderGoogle || s.Model != "gemini-3.7-flash-high" {
+		t.Errorf("identity = tool %q provider %q model %q", s.Tool, s.Provider, s.Model)
+	}
+	if s.SessionID != "11111111-2222-4333-8444-555555555555" {
+		t.Errorf("SessionID = %q", s.SessionID)
+	}
+	if s.Key != s.SessionID {
+		t.Errorf("Key = %q, want path-independent conversation id %q", s.Key, s.SessionID)
+	}
+	if s.InputTokens != 35192 || s.OutputTokens != 6618 || s.ReasoningTokens != 6593 || s.CacheReadTokens != 0 || s.TotalTokens != 41810 {
+		t.Errorf("usage = in %d out %d thinking %d cache %d total %d",
+			s.InputTokens, s.OutputTokens, s.ReasoningTokens, s.CacheReadTokens, s.TotalTokens)
+	}
+	if s.TotalTokens != s.InputTokens+s.OutputTokens {
+		t.Errorf("provider total = %d, input + output = %d", s.TotalTokens, s.InputTokens+s.OutputTokens)
+	}
+	if strings.Contains(s.Raw, "SANITIZED") || strings.Contains(s.Raw, "response") {
+		t.Errorf("raw audit payload retained response content: %s", s.Raw)
+	}
+
+	unchanged, err := Adapter{}.CollectIncremental(context.Background(), src, obs.Checkpoint)
+	if err != nil {
+		t.Fatalf("unchanged collect: %v", err)
+	}
+	if len(unchanged.Snapshots) != 0 || unchanged.Checkpoint != nil {
+		t.Fatalf("unchanged source was reopened: %+v", unchanged)
+	}
+}
+
+func TestStreamFormatDriftWithholdsCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "stream.jsonl", `{"event":"init","conversation_id":"c1","init":{"model":"gemini-3.7-flash-high"}}
+{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","num_turns":1,"usage":{"input_tokens":10,"output_tokens":4,"thinking_tokens":3,"total_tokens":14}}}
+`)
+	src := adapter.Source{Tool: model.ToolAgy, Class: model.Aggregate, Path: path}
+	obs, err := Adapter{}.Collect(context.Background(), src)
+	if !errors.Is(err, adapter.ErrSourceFormat) {
+		t.Fatalf("error = %v, want ErrSourceFormat", err)
+	}
+	if obs.Checkpoint != nil {
+		t.Fatalf("format drift advanced checkpoint: %+v", obs.Checkpoint)
+	}
+}
+
+func TestStreamCompletePoisonKeepsValidSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "stream.jsonl", `{"event":"init","conversation_id":"c1","init":{"model":"gemini-3.7-flash-high"}}
+not-json
+{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","num_turns":1,"usage":{"input_tokens":10,"output_tokens":4,"thinking_tokens":3,"cache_read_tokens":2,"total_tokens":14}}}
+`)
+	src := adapter.Source{Tool: model.ToolAgy, Class: model.Aggregate, Path: path}
+	obs, err := Adapter{}.Collect(context.Background(), src)
+	if err == nil || !strings.Contains(err.Error(), "1 unparseable record") {
+		t.Fatalf("error = %v, want poison-record report", err)
+	}
+	if len(obs.Snapshots) != 1 || obs.Snapshots[0].TotalTokens != 14 {
+		t.Fatalf("valid snapshot was lost: %+v", obs.Snapshots)
+	}
+	if obs.Checkpoint == nil {
+		t.Fatal("fully consumed poison record must not hold back the checkpoint")
+	}
+}
+
+func TestStreamRejectsContradictoryCounters(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "stream.jsonl", `{"event":"init","conversation_id":"c1","init":{"model":"gemini-3.7-flash-high"}}
+{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","num_turns":1,"usage":{"input_tokens":10,"output_tokens":4,"thinking_tokens":5,"cache_read_tokens":0,"total_tokens":14}}}
+`)
+	_, err := Adapter{}.Collect(context.Background(), adapter.Source{Tool: model.ToolAgy, Class: model.Aggregate, Path: path})
+	if !errors.Is(err, adapter.ErrSourceFormat) {
+		t.Fatalf("error = %v, want ErrSourceFormat", err)
 	}
 }
 

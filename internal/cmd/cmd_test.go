@@ -437,8 +437,8 @@ func TestOncePartialFailureExitsZero(t *testing.T) {
 
 // TestDoctorReportsAbsentSourceAndEnablement runs doctor against an empty home
 // so every adapter discovers nothing. A count of zero would read as "you used
-// nothing", so the absent state must be stated in words, and the opt-in tool
-// (Copilot, issue #28) must get the checklist that turns its telemetry on.
+// nothing", so the absent state must be stated in words, and opt-in tools must
+// get the checklists that turn their telemetry on.
 func TestDoctorReportsAbsentSourceAndEnablement(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "usage.db")
@@ -457,6 +457,9 @@ func TestDoctorReportsAbsentSourceAndEnablement(t *testing.T) {
 		t.Errorf("doctor rendered a zero count instead of %q:\n%s", absentStatus, out)
 	}
 	for _, want := range []string{
+		`agy --print "YOUR PROMPT" --output-format stream-json`,
+		`tee -a "$HOME/.gemini/antigravity-cli/aiusage-stream.jsonl"`,
+		"Ordinary interactive sessions are not retroactively recoverable",
 		"export COPILOT_OTEL_ENABLED=true",
 		"export COPILOT_OTEL_EXPORTER_TYPE=file",
 		`export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"`,

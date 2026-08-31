@@ -36,6 +36,7 @@ var sourceFarmTools = []string{
 }
 
 var sourceFarmFixturePaths = []string{
+	"adapter/agy/testdata/live-2026-08-31.jsonl",
 	"adapter/copilot/testdata/otel.jsonl",
 	"adapter/copilot/testdata/schema.sql",
 	"adapter/copilot/testdata/secrets.sql",
@@ -278,8 +279,8 @@ func buildNonCodexFarm(root, fixtures string) error {
 		return fmt.Errorf("build Hermes fixture: %w", err)
 	}
 
-	if err := writeFarmFile(path(model.ToolAgy, "turns.jsonl"),
-		[]byte(`{"id":"agy-farm","model":"gemini-2.5-pro","sessionId":"agy-farm","timestamp":"2026-08-31T00:00:00Z","tokens":{"input":25,"output":5,"total":30}}`+"\n")); err != nil {
+	if err := copyFarmFile(fixture("adapter/agy/testdata/live-2026-08-31.jsonl"),
+		path(model.ToolAgy, "aiusage-stream.jsonl")); err != nil {
 		return err
 	}
 
@@ -641,8 +642,8 @@ func mutateSourceFarm(root string) ([]string, error) {
 		return nil, err
 	}
 	changed = append(changed, "hermes/session-counters")
-	if err := appendShape("agy/conversation-artifact", path(model.ToolAgy, "turns.jsonl"),
-		`{"id":"agy-farm-appended","model":"gemini-2.5-pro","sessionId":"agy-farm","timestamp":"2026-08-31T00:12:00Z","tokens":{"input":7,"output":2,"total":9}}`); err != nil {
+	if err := appendShape("agy/stream-result-cumulative", path(model.ToolAgy, "aiusage-stream.jsonl"),
+		`{"event":"result","result":{"conversation_id":"11111111-2222-4333-8444-555555555555","status":"SUCCESS","response":"SANITIZED","duration_seconds":0,"num_turns":3,"usage":{"input_tokens":35199,"output_tokens":6620,"thinking_tokens":6595,"cache_read_tokens":0,"total_tokens":41819}}}`); err != nil {
 		return nil, err
 	}
 

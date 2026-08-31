@@ -18,7 +18,9 @@ func TestReasoningModeForCoversEveryTool(t *testing.T) {
 		ToolCopilot:  ReasoningSubset,
 		ToolOpenCode: ReasoningAdditive,
 		ToolGemini:   ReasoningAdditive,
-		ToolAgy:      ReasoningAdditive,
+		// Agy 1.1.22 stream JSON reports total = input + output while
+		// thinking is nonzero, proving thinking is already inside output.
+		ToolAgy: ReasoningSubset,
 		// pi/openclaw, reasonix and dsh all report reasoning inside output, and
 		// so does qwen-code on the OpenAI-compatible wires its ledger mixes in
 		// under Gemini's field names. crush (no tokens), kimi-code, goose and

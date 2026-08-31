@@ -120,8 +120,10 @@ const (
 //   - opencode: every local message row satisfies
 //     total = input + output + reasoning + cache.read + cache.write, and rows
 //     with reasoning > output exist, so reasoning cannot be a subset.
-//   - gemini / agy: tokens.thoughts is reported next to tokens.output and the
+//   - gemini: tokens.thoughts is reported next to tokens.output and the
 //     provider total is input + output + thoughts.
+//   - agy 1.1.22 stream JSON: thinking_tokens is contained in output_tokens;
+//     total_tokens is exactly input_tokens + output_tokens.
 //
 // UNVERIFIED — no local data for either tool (issue #28). These encode the
 // best available evidence and must be re-checked once data exists:
@@ -145,7 +147,7 @@ var reasoningModes = map[string]ReasoningMode{
 	ToolCodex:      ReasoningSubset,
 	ToolOpenCode:   ReasoningAdditive,
 	ToolGemini:     ReasoningAdditive,
-	ToolAgy:        ReasoningAdditive,
+	ToolAgy:        ReasoningSubset,
 	ToolHermes:     ReasoningSubset, // unverified
 	ToolCopilot:    ReasoningSubset, // unverified
 	// pi/openclaw share one session format, whose types state that output
@@ -295,7 +297,7 @@ func (e *UsageEvent) SetCost(microUSD int64, source string) {
 // usage event. Used by sources whose per-record totals GROW between polls:
 //   - hermes  — per-session running totals; Key = session_id
 //   - gemini  — per-turn cumulative snapshots; Key = sourcePath + "|" + turn id
-//   - agy     — same shape as gemini once Antigravity emits usage
+//   - agy     — cumulative result.usage from captured print-mode stream JSON
 //
 // Key is the accumulator identity (must be stable across polls and unique per
 // growing cell). SessionID/Model/Project are the reportable attributes carried
