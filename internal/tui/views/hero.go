@@ -89,7 +89,6 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 	// cannot reach the cells between the braille without a per-cell repaint pass
 	// on every scrub. Charts live on the ground plane by design (surface.go);
 	// focus is carried by the titled rule's focus bar, which needs no paint.
-	style := c.Block(ElevGround).Width(w)
 	inner := w - cardChromeW
 	if inner < 4 {
 		inner = 4
@@ -123,7 +122,7 @@ func heroPanel(c Ctx, d OverviewData, w, h int, lay Layout, focus bool) string {
 	}
 	// The rule runs out from whatever chips the title ended up carrying, so the
 	// pane's extent is drawn even in the header-less degraded bands.
-	return style.Render(c.Rule(title, inner) + "\n" +
+	return c.RenderBlock(ElevGround, w, 0, c.Rule(title, inner)+"\n"+
 		heroBodyMemo(c, d, lay, inner, chartH, scrubIdx))
 }
 

@@ -140,6 +140,15 @@ func seedBenchLedger() (string, error) {
 // first use.
 func benchLedgerStore(b *testing.B) *store.Reader {
 	b.Helper()
+	if path := os.Getenv("AIUSAGE_PERF_DB"); path != "" {
+		benchLedgerPath = path
+		st, err := store.OpenReadOnly(path)
+		if err != nil {
+			b.Fatalf("open production benchmark ledger: %v", err)
+		}
+		b.Cleanup(func() { st.Close() })
+		return st
+	}
 	benchLedgerOnce.Do(func() { benchLedgerPath, benchLedgerErr = seedBenchLedger() })
 	if benchLedgerErr != nil {
 		b.Fatalf("seed bench ledger: %v", benchLedgerErr)

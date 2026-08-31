@@ -385,7 +385,6 @@ func sidePanel(c Ctx, d OverviewData, w, h int, focus bool) string {
 	// panel instead of floating short above empty terminal.
 	elev := paneElev(focus)
 	c = c.On(elev)
-	style := c.Block(elev).Width(w).Height(maxInt(h, 3))
 	inner := w - 4
 	if inner < 4 {
 		inner = 4
@@ -394,7 +393,7 @@ func sidePanel(c Ctx, d OverviewData, w, h int, focus bool) string {
 	body := toolRows(c, d, inner)
 	gauge := splitGauge(c, d.Totals, inner)
 	content := title + "\n" + body + "\n" + gauge
-	return style.Render(content)
+	return c.RenderBlock(elev, w, maxInt(h, 3), content)
 }
 
 // toolRows renders one per-tool row: glyph + colored name + a four-component

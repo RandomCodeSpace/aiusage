@@ -1,8 +1,8 @@
 name: CI
 
 # Build, vet, format-check, test (with coverage), API/machine and adapter
-# compatibility checks, staticcheck, race detection, SonarCloud analysis and
-# vulnerability scan on every push to main and every pull request. Pure-Go,
+# compatibility checks, production performance, staticcheck, race detection,
+# SonarCloud analysis and vulnerability scan on every push to main and every pull request. Pure-Go,
 # CGO disabled to match the release build; the race job re-enables CGO. The
 # weekly schedule runs ONLY govulncheck (every other job carries an event_name
 # guard, and sonar is skipped through its build-test dependency).
@@ -284,4 +284,40 @@ jobs:
           path: |
             adapter/compatibility.json
             adapter-evidence
+          if-no-files-found: error
+
+  performance:
+    name: Production performance
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      GOMAXPROCS: "2"
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: prepare performance evidence
+        run: mkdir -p performance
+
+      - name: install pinned benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260813145340-fd4a688df892
+
+      - name: enforce production performance contract
+        run: ./scripts/performance-gate.sh
+
+      - name: upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance
+          path: performance
           if-no-files-found: error

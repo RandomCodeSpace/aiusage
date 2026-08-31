@@ -298,6 +298,67 @@ func (c Ctx) Block(e Elevation) lipgloss.Style {
 	return c.Fill(e).Padding(blockPadY, blockPadX)
 }
 
+// RenderBlock renders the same fixed-width painted surface as Block(e).Width
+// (and optional Height), without feeding an already-laid-out ANSI chart back
+// through lipgloss's generic wrapping writer. Chart and table builders already
+// produce bounded lines; re-wrapping every styled cell only allocates another
+// copy per grapheme. Overflow still takes the generic MaxWidth path so this
+// helper cannot weaken the layout boundary when a caller is wrong.
+func (c Ctx) RenderBlock(e Elevation, width, height int, content string) string {
+	if width < 2*blockPadX+1 {
+		width = 2*blockPadX + 1
+	}
+	innerW := width - 2*blockPadX
+	lines := strings.Split(content, "\n")
+	innerH := len(lines)
+	if height > 0 {
+		innerH = max(height-2*blockPadY, 1)
+	}
+
+	pad := func(n int) string {
+		if n <= 0 {
+			return ""
+		}
+		spaces := strings.Repeat(" ", n)
+		if c.ElevColor(e) == nil {
+			return spaces
+		}
+		return c.Fill(e).Render(spaces)
+	}
+	full := pad(width)
+	var out strings.Builder
+	out.Grow(len(content) + width*(2*blockPadY+1))
+	for row := 0; row < blockPadY; row++ {
+		if out.Len() > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(full)
+	}
+	for row := 0; row < innerH; row++ {
+		if out.Len() > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(pad(blockPadX))
+		line := ""
+		if row < len(lines) {
+			line = lines[row]
+		}
+		lineW := lipgloss.Width(line)
+		if lineW > innerW {
+			line = lipgloss.NewStyle().MaxWidth(innerW).Render(line)
+			lineW = lipgloss.Width(line)
+		}
+		out.WriteString(line)
+		out.WriteString(pad(innerW - lineW))
+		out.WriteString(pad(blockPadX))
+	}
+	for row := 0; row < blockPadY; row++ {
+		out.WriteByte('\n')
+		out.WriteString(full)
+	}
+	return out.String()
+}
+
 // Uniform card padding. A card costs the same 4 columns and 2 rows the rounded
 // border used to, so every width/height budget in the views is untouched.
 const (
