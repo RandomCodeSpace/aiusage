@@ -43,6 +43,8 @@ archives:
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
 
 checksum:
   name_template: checksums.txt
@@ -62,5 +64,9 @@ changelog:
       - Merge branch
 
 release:
-  draft: false
+  draft: true
+  use_existing_draft: true
+  target_commitish: "{{ .Commit }}"
   prerelease: auto
+  preflight:
+    fail_on_error: true

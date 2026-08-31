@@ -1,37 +1,246 @@
 name: Release
 
-# Cuts a GitHub Release when a version tag (vX.Y.Z) is pushed: cross-compiles
-# linux/darwin for amd64+arm64 (Windows is intentionally not a target — see
-# .goreleaser.yaml), builds archives + checksums, and injects the tag version
-# into the binary via ldflags. Versioning is tag-driven —
-# `git tag v1.2.3 && git push origin v1.2.3`.
+# Serial, fail-closed publication for one captured commit on main. The workflow
+# refuses to create a tag until that exact commit has passed every production
+# CI gate. Published tags and assets are never replaced.
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (vMAJOR.MINOR.PATCH or prerelease)
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: aiusage-release
+  cancel-in-progress: false
 
 jobs:
-  goreleaser:
-    name: goreleaser
+  release:
+    name: exact candidate release
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+      VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout captured candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: GoReleaser
-        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+      - name: Verify candidate and exact CI
+        id: preflight
+        run: ./scripts/release-preflight.sh "$VERSION" "$CANDIDATE_SHA" "$RUN_ATTEMPT" "$GITHUB_OUTPUT"
+
+      - name: Recheck coverage artifact
+        env:
+          ARTIFACT_ID: ${{ steps.preflight.outputs.coverage_artifact_id }}
+        run: |
+          archive="$RUNNER_TEMP/coverage.zip"
+          evidence="$RUNNER_TEMP/coverage"
+          mkdir -p "$evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" >"$archive"
+          unzip -q "$archive" -d "$evidence"
+          mapfile -t profiles < <(find "$evidence" -type f -name coverage.out)
+          if [ "${#profiles[@]}" -ne 1 ]; then
+            echo "::error::coverage artifact must contain exactly one coverage.out"
+            exit 1
+          fi
+          coverage="$(go tool cover -func="${profiles[0]}" | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          if [ -z "$coverage" ]; then
+            echo "::error::coverage artifact has no total statement coverage"
+            exit 1
+          fi
+          awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 84.1) exit 1 }' || {
+            echo "::error::statement coverage ${coverage}% is below the 84.1% floor"
+            exit 1
+          }
+          echo "statement coverage ${coverage}%"
+
+      - name: Install external examples from candidate
+        run: |
+          install_root="$(mktemp -d "$RUNNER_TEMP/aiusage-examples.XXXXXX")"
+          export GOBIN="$install_root/bin"
+          export GOCACHE="$install_root/build-cache"
+          export GOMODCACHE="$install_root/module-cache"
+          export GOPROXY=direct
+          mkdir -p "$GOBIN"
+          for example in collect-once custom-adapter report-totals; do
+            go install "github.com/RandomCodeSpace/aiusage/examples/${example}@${CANDIDATE_SHA}"
+            test -x "$GOBIN/$example"
+          done
+
+      - name: Prepare immutable annotated tag
+        id: tag
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+            peeled="$(git rev-parse "refs/tags/$VERSION^{}")"
+            if [ "$peeled" != "$CANDIDATE_SHA" ]; then
+              echo "::error::local tag $VERSION does not peel to $CANDIDATE_SHA"
+              exit 1
+            fi
+            if [ "$(git cat-file -t "refs/tags/$VERSION")" != tag ]; then
+              echo "::error::$VERSION is not an annotated tag"
+              exit 1
+            fi
+          else
+            git tag -a "$VERSION" "$CANDIDATE_SHA" -m "Release $VERSION"
+          fi
+          echo "tag_sha=$(git rev-parse "refs/tags/$VERSION")" >>"$GITHUB_OUTPUT"
+
+      - name: Build rehearsal without publishing
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: "~> v2"
+          version: v2.18.0
+          args: release --clean --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Verify rehearsal payload
+        run: |
+          rehearsal="$RUNNER_TEMP/rehearsal-assets"
+          mkdir -p "$rehearsal"
+          cp dist/*.tar.gz dist/checksums.txt "$rehearsal/"
+          ./scripts/verify-release-assets.sh "$VERSION" "$rehearsal" "$CANDIDATE_SHA"
+
+      - name: Push or verify immutable tag
+        id: push_tag
+        run: |
+          ./scripts/release-preflight.sh "$VERSION" "$CANDIDATE_SHA" "$RUN_ATTEMPT"
+          remote_tag_output="$(git ls-remote origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}")"
+          remote_tags=()
+          if [ -n "$remote_tag_output" ]; then
+            mapfile -t remote_tags <<<"$remote_tag_output"
+          fi
+          if [ "${#remote_tags[@]}" -eq 0 ]; then
+            git push origin "refs/tags/$VERSION"
+          else
+            peeled="$(printf '%s\n' "${remote_tags[@]}" | awk '$2 ~ /\^\{\}$/ {print $1}')"
+            if [ "$peeled" != "$CANDIDATE_SHA" ]; then
+              echo "::error::remote tag $VERSION does not peel to $CANDIDATE_SHA"
+              exit 1
+            fi
+          fi
+
+      - name: Build draft release
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.18.0
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Verify draft build payload
+        run: |
+          draft_build="$RUNNER_TEMP/draft-build-assets"
+          mkdir -p "$draft_build"
+          cp dist/*.tar.gz dist/checksums.txt "$draft_build/"
+          ./scripts/verify-release-assets.sh "$VERSION" "$draft_build" "$CANDIDATE_SHA"
+
+      - name: Download and verify draft release
+        id: draft
+        run: |
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")"
+          release_id="$(jq -r .id <<<"$release_json")"
+          if [ "$(jq -r .draft <<<"$release_json")" != true ]; then
+            echo "::error::release $VERSION is not a draft"
+            exit 1
+          fi
+          if [ "$(jq -r .tag_name <<<"$release_json")" != "$VERSION" ]; then
+            echo "::error::draft release tag differs from $VERSION"
+            exit 1
+          fi
+          if [ "$(jq -r .target_commitish <<<"$release_json")" != "$CANDIDATE_SHA" ]; then
+            echo "::error::draft release target differs from $CANDIDATE_SHA"
+            exit 1
+          fi
+          draft_assets="$RUNNER_TEMP/downloaded-draft-assets"
+          mkdir -p "$draft_assets"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$draft_assets"
+          ./scripts/verify-release-assets.sh "$VERSION" "$draft_assets" "$CANDIDATE_SHA"
+          echo "release_id=$release_id" >>"$GITHUB_OUTPUT"
+
+      - name: Publish verified release
+        id: publish
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false >/dev/null
+
+      - name: Verify public release
+        id: public
+        run: |
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")"
+          if [ "$(jq -r .draft <<<"$release_json")" != false ]; then
+            echo "::error::release $VERSION is not public"
+            exit 1
+          fi
+          public_assets="$RUNNER_TEMP/downloaded-public-assets"
+          mkdir -p "$public_assets"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$public_assets"
+          ./scripts/verify-release-assets.sh "$VERSION" "$public_assets" "$CANDIDATE_SHA" | tee "$RUNNER_TEMP/public-sha256.txt"
+          remote_tag_output="$(git ls-remote origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}")"
+          remote_tags=()
+          if [ -n "$remote_tag_output" ]; then
+            mapfile -t remote_tags <<<"$remote_tag_output"
+          fi
+          peeled="$(printf '%s\n' "${remote_tags[@]}" | awk '$2 ~ /\^\{\}$/ {print $1}')"
+          if [ "$peeled" != "$CANDIDATE_SHA" ]; then
+            echo "::error::public tag $VERSION does not peel to $CANDIDATE_SHA"
+            exit 1
+          fi
+          tag_sha="$(printf '%s\n' "${remote_tags[@]}" | awk -v ref="refs/tags/$VERSION" '$2 == ref {print $1}')"
+          echo "tag_sha=$tag_sha" >>"$GITHUB_OUTPUT"
+          echo "release_url=$(jq -r .html_url <<<"$release_json")" >>"$GITHUB_OUTPUT"
+
+      - name: Record release evidence
+        if: success()
+        env:
+          CI_RUN_ID: ${{ steps.preflight.outputs.ci_run_id }}
+          CI_RUN_URL: ${{ steps.preflight.outputs.ci_run_url }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+          RELEASE_URL: ${{ steps.public.outputs.release_url }}
+          TAG_SHA: ${{ steps.public.outputs.tag_sha }}
+        run: |
+          {
+            echo "## Published $VERSION"
+            echo
+            echo "| Evidence | Value |"
+            echo "| --- | --- |"
+            echo "| Candidate commit | $CANDIDATE_SHA |"
+            echo "| Push CI | [$CI_RUN_ID]($CI_RUN_URL) |"
+            echo "| Release run | [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |"
+            echo "| Release | [$RELEASE_ID]($RELEASE_URL) |"
+            echo "| Annotated tag object | $TAG_SHA |"
+            echo
+            echo '~~~text'
+            cat "$RUNNER_TEMP/public-sha256.txt"
+            echo '~~~'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Return a failed public release to draft
+        if: failure() && steps.push_tag.outcome == 'success'
+        run: |
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" 2>/dev/null || true)"
+          if [ -n "$release_json" ] && [ "$(jq -r .draft <<<"$release_json")" = false ]; then
+            release_id="$(jq -r .id <<<"$release_json")"
+            if ! gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=true >/dev/null; then
+              echo "::warning::could not return release $VERSION to draft; tag remains immutable"
+            fi
+          fi

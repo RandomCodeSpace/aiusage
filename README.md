@@ -207,17 +207,19 @@ If refresh fails, the bundled table remains in use and a later pass may retry.
 
 | Package | Purpose |
 |---|---|
-| `usage` | Stable event, query, and pricing types |
-| `adapter` | Adapter interfaces and source descriptors |
+| `model` | Usage, activity, turn-context, capability, and cost types |
+| `adapter` | Read-only adapter interfaces, source descriptors, and registries |
 | `adapter/all` | Built-in adapter registry |
-| `collector` | One-shot and continuous collection |
+| `collect` | One-shot and interval-based collection |
 | `store` | SQLite storage and query API |
 | `pricing` | Bundled and refreshable model prices |
-| `config` | Configuration loading |
 
 Open an existing database with `store.OpenReadOnly`. Use `store.Open` only
-for collection or migrations, then call `collector.RunOnce` or
-`collector.Run`.
+for collection or migrations, then call `collect.RunOnce` or `collect.Run`.
+
+The [Go compatibility promise](./docs/compatibility.md) defines the supported
+packages and upgrade rules. Scripts consuming JSON or CSV should follow the
+[machine output contract](./docs/export-contract.md).
 
 API documentation is available on
 [pkg.go.dev](https://pkg.go.dev/github.com/RandomCodeSpace/aiusage).
@@ -242,8 +244,10 @@ Release binaries are built with CGO disabled.
 
 The project uses semantic version tags. Database migrations are automatic and
 forward-only, so back up the database before opening it with an older build.
-While aiusage is at v0.x, breaking Go API changes are limited to minor
-releases; patch releases preserve consumer compatibility.
+`v0.5.0` is the first compatibility baseline for the public Go packages and
+the existing JSON and CSV formats. Those contracts remain compatible through
+the v1 release line. See the [compatibility promise](./docs/compatibility.md)
+for the patch, minor, and database migration rules.
 
 ## License
 
