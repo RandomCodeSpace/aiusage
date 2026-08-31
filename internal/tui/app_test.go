@@ -935,7 +935,7 @@ func TestQuit(t *testing.T) {
 func TestResponsiveRender(t *testing.T) {
 	for _, width := range []int{80, 120} {
 		m := newTestModelW(t, &fakeData{}, width)
-		for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse} {
+		for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse, ViewActivity} {
 			m.view = v
 			m.reload()
 			out := m.View().Content
@@ -952,7 +952,7 @@ func TestSmallWidthRender(t *testing.T) {
 	m := NewModel(&fakeData{}, Options{})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
 	m = loadOnce(tm.(Model))
-	for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse} {
+	for _, v := range []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse, ViewActivity} {
 		m.view = v
 		m.reload()
 		if m.View().Content == "" {

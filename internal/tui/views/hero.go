@@ -299,22 +299,68 @@ func gapRuns(times []time.Time, dim string) [][]int {
 	return append(runs, run)
 }
 
-// paneHeader renders one pane's plain-text header: the series glyphs, the pane
-// name, and the declared scale. scale is the readout's magnitude only ("5M",
-// "10^2"); the SCALE/div framing is added here so every detented pane — linear
-// or decade-ring — declares itself in the same words. The readout is text, so
-// it survives monochrome and screen readers alike.
+// paneHeader renders one pane's component legend and declared scale. It chooses
+// a complete legend rung instead of clipping one: full names, compact names,
+// then glyph+initial. The SCALE readout never yields at the 28-cell chart floor,
+// so a narrow monochrome pane still names every visible series and its axis.
 func paneHeader(c Ctx, specs []CompSpec, name, scale string, w int) string {
-	var glyphs strings.Builder
-	for _, s := range specs {
-		glyphs.WriteString(c.compStyle(s).Render(s.Glyph))
-	}
-	head := glyphs.String() + c.pad(1) + c.StatLabel.Render(name)
 	tail := c.Subtle.Render("SCALE " + scale + "/div")
-	if lipgloss.Width(head)+3+lipgloss.Width(tail) <= w {
-		return c.RuleBetween(head, tail, w)
+	forms := paneHeaderForms(c, specs, name)
+	for _, head := range forms {
+		if lipgloss.Width(head)+1+lipgloss.Width(tail) <= w {
+			return c.RuleBetween(head, tail, w)
+		}
 	}
-	return head
+	// Built charts never reach this branch at the supported 28-cell floor. Keep
+	// the scale intact if a direct caller nevertheless hands us less room.
+	if lipgloss.Width(tail) <= w {
+		return tail
+	}
+	return lipgloss.NewStyle().MaxWidth(w).Render(tail)
+}
+
+// paneHeaderForms returns complete component legends, widest first. rank zero
+// carries the pane name as context; narrower rungs spend every remaining cell
+// on the component identities themselves.
+func paneHeaderForms(c Ctx, specs []CompSpec, name string) []string {
+	legend := func(label func(CompSpec) string, tight bool) string {
+		parts := make([]string, 0, len(specs))
+		for _, s := range specs {
+			body := s.Glyph + label(s)
+			if !tight {
+				body = s.Glyph + " " + label(s)
+			}
+			parts = append(parts, c.compStyle(s).Render(body))
+		}
+		return strings.Join(parts, c.pad(1))
+	}
+	compact := func(s CompSpec) string {
+		switch s.Key {
+		case "input":
+			return "in"
+		case "output":
+			return "out"
+		default:
+			return s.Short
+		}
+	}
+	initial := func(s CompSpec) string {
+		if s.Key == "" {
+			return "?"
+		}
+		return string([]rune(s.Key)[:1])
+	}
+
+	full := legend(func(s CompSpec) string { return s.Label }, false)
+	if name != "" {
+		full = c.StatLabel.Render(name) + c.Subtle.Render(" · ") + full
+	}
+	return []string{
+		full,
+		legend(func(s CompSpec) string { return s.Label }, false),
+		legend(compact, false),
+		legend(initial, true),
+	}
 }
 
 // defaultLeverageFloor is the per-bucket input floor derived from the bucket

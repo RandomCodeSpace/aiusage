@@ -24,7 +24,7 @@ var ansiResp = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 func TestResponsiveNoOverflow(t *testing.T) {
 	widths := []int{30, 40, 44, 48, 56, 64, 72, 80, 100, 120, 140, 160, 200, 240}
 	heights := []int{6, 8, 10, 12, 16, 20, 24, 30, 40, 50}
-	allViews := []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse}
+	allViews := []View{ViewOverview, ViewByTool, ViewByModel, ViewBrowse, ViewActivity}
 
 	for _, w := range widths {
 		for _, h := range heights {

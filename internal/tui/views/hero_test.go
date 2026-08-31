@@ -84,6 +84,34 @@ func heroTestData(mode HeroMode) OverviewData {
 	}
 }
 
+// TestPaneHeaderRungsKeepComponentsAndScale locks the three width rungs. The
+// compact forms shorten labels, never identities, and the 28-cell floor keeps
+// the complete SCALE readout instead of silently dropping it.
+func TestPaneHeaderRungsKeepComponentsAndScale(t *testing.T) {
+	c := heroTestCtx()
+	for _, tc := range []struct {
+		name string
+		w    int
+		want []string
+	}{
+		{"wide", 80, []string{"tokens", "▰ input", "▱ output", "◆ cache"}},
+		{"compact", 36, []string{"▰ in", "▱ out", "◆ cache"}},
+		{"minimum", minChartInnerW, []string{"▰i", "▱o", "◆c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ansiHero.ReplaceAllString(paneHeader(c, c.Comp, "tokens", "10^9", tc.w), "")
+			if got := lipgloss.Width(out); got > tc.w {
+				t.Fatalf("header width = %d, want <= %d: %q", got, tc.w, out)
+			}
+			for _, want := range append(tc.want, "SCALE 10^9/div") {
+				if !strings.Contains(out, want) {
+					t.Errorf("header %q does not contain %q", out, want)
+				}
+			}
+		})
+	}
+}
+
 // TestHeroPaneSplitGeometry pins the pane budget: the two panes exactly fill the
 // chart body, the cache pane keeps a usable plot area under its x axis, and the
 // axis-less fresh pane gets an ODD height — ntcharts draws row i's label at

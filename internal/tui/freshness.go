@@ -61,29 +61,40 @@ func (f Freshness) String() string {
 	}
 }
 
-// freshnessChip renders the header chip ladder: "● live / ◐ sync / ◔ stale Nm
-// / ○ cold". Glyph+word is the load-bearing channel — the ladder survives
-// monochrome unchanged; color is secondary. The stale rung carries the age of
-// the last good dataset (from lastLoadAt, re-read every frame; the 10s refresh
-// tick guarantees a frame, so no extra timer exists for it) and a truncated
-// error so the failure is inspectable where it is signalled.
-func (m Model) freshnessChip() string {
+// freshnessChipForms returns complete freshness rungs, widest first. Only a
+// stale state needs to narrow: the diagnostic yields first, then the age, while
+// the state glyph+word remains. That glyph+word is the load-bearing channel;
+// color is secondary.
+func (m Model) freshnessChipForms() []string {
 	switch m.fresh {
 	case FreshLive:
-		return m.headerChip("● live", m.th.Positive)
+		return []string{m.headerChip("● live", m.th.Positive)}
 	case FreshCutIn:
-		return m.headerChip("◐ sync", m.th.Now)
+		return []string{m.headerChip("◐ sync", m.th.Now)}
 	case FreshStale:
-		chip := "◔ stale"
+		base := "◔ stale"
+		aged := base
 		if !m.lastLoadAt.IsZero() {
-			chip += " " + ageShort(m.data.now().Sub(m.lastLoadAt))
+			aged += " " + ageShort(m.data.now().Sub(m.lastLoadAt))
 		}
+		full := aged
 		if m.err != nil {
-			chip += " " + Truncate(m.err.Error(), 18)
+			full += " " + Truncate(m.err.Error(), 18)
 		}
-		return m.headerChip(chip, m.th.Warn)
+		bodies := []string{full}
+		if aged != full {
+			bodies = append(bodies, aged)
+		}
+		if base != aged {
+			bodies = append(bodies, base)
+		}
+		forms := make([]string, 0, len(bodies))
+		for _, body := range bodies {
+			forms = append(forms, m.headerChip(body, m.th.Warn))
+		}
+		return forms
 	default:
-		return m.headerChip("○ cold", m.th.Muted)
+		return []string{m.headerChip("○ cold", m.th.Muted)}
 	}
 }
 
@@ -146,14 +157,27 @@ func (m Model) heartbeatCell() string {
 	if m.ingestMTime.IsZero() {
 		return m.th.Subtle.Render(heartbeatFrames[0]) // flatline: no ingest observed yet
 	}
-	style := lipgloss.NewStyle().Foreground(m.th.Positive)
-	if m.collectorStalled() {
-		style = lipgloss.NewStyle().Foreground(m.th.Warn)
-	}
+	style := m.heartbeatStyle()
 	if m.reducedMotion {
 		return style.Render("⣿") + " " + m.th.Subtle.Render(ageShort(m.ingestLag()))
 	}
 	return style.Render(heartbeatFrames[int(m.beat)%len(heartbeatFrames)])
+}
+
+// heartbeatCore is the one-cell truthful ingest state used when the optional
+// reduced-motion age rider cannot fit in the header.
+func (m Model) heartbeatCore() string {
+	if m.ingestMTime.IsZero() {
+		return m.th.Subtle.Render(heartbeatFrames[0])
+	}
+	return m.heartbeatStyle().Render("⣿")
+}
+
+func (m Model) heartbeatStyle() lipgloss.Style {
+	if m.collectorStalled() {
+		return lipgloss.NewStyle().Foreground(m.th.Warn)
+	}
+	return lipgloss.NewStyle().Foreground(m.th.Positive)
 }
 
 // bannerRows is the body-row reserve for the dead-collector banner (0 or 1).

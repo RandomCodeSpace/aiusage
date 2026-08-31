@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/RandomCodeSpace/aiusage/internal/tui/views"
 	"github.com/RandomCodeSpace/aiusage/store"
@@ -198,6 +199,124 @@ func TestHeartbeatReducedMotion(t *testing.T) {
 	m.beat = 1
 	if m.heartbeatCell() == f0 {
 		t.Fatal("observed ingest did not advance the heartbeat frame")
+	}
+}
+
+// TestHeaderCoreMatrix protects the 42-column contract across every view,
+// freshness state, live/stepped window and accessibility mode. Optional detail
+// may yield; the wordmark, state, complete range and help action may not.
+func TestHeaderCoreMatrix(t *testing.T) {
+	fixed := time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local)
+	modes := []struct {
+		name, noColor, reduced string
+	}{
+		{name: "normal"},
+		{name: "no-color", noColor: "1"},
+		{name: "reduced-motion", reduced: "1"},
+	}
+	states := []struct {
+		fresh Freshness
+		want  string
+	}{
+		{FreshCold, "○ cold"},
+		{FreshLive, "● live"},
+		{FreshCutIn, "◐ sync"},
+		{FreshStale, "◔ stale"},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", mode.noColor)
+			t.Setenv("AIUSAGE_REDUCED_MOTION", mode.reduced)
+			for _, w := range []int{42, 60, 80, 120, 160} {
+				for _, stepped := range []bool{false, true} {
+					for _, state := range states {
+						for _, meta := range viewList {
+							m := newTestModelWH(t, &fakeData{}, w, 24)
+							m.data.now = func() time.Time { return fixed }
+							m.view = meta.v
+							m.rng = Range7d
+							if stepped {
+								m.step = -2
+							}
+							m.fresh = state.fresh
+							m.lastLoadAt = fixed.Add(-2 * time.Hour)
+							if state.fresh == FreshStale {
+								m.err = errors.New("database remains unavailable after refresh")
+							} else {
+								m.err = nil
+							}
+
+							header := m.renderHeader()
+							plain := ansiResp.ReplaceAllString(header, "")
+							for _, want := range []string{"◧ aiusage", state.want, "? help"} {
+								if !strings.Contains(plain, want) {
+									t.Errorf("w=%d stepped=%v state=%v view=%v: header dropped %q: %q",
+										w, stepped, state.fresh, meta.v, want, plain)
+								}
+							}
+							completeRange := false
+							for _, form := range m.rangeChipForms() {
+								if strings.Contains(plain, form) {
+									completeRange = true
+									break
+								}
+							}
+							if !completeRange {
+								t.Errorf("w=%d stepped=%v state=%v view=%v: header has no complete range: %q",
+									w, stepped, state.fresh, meta.v, plain)
+							}
+							if got := lipgloss.Width(header); got > m.frameW() {
+								t.Errorf("w=%d stepped=%v state=%v view=%v: header width %d > frame %d",
+									w, stepped, state.fresh, meta.v, got, m.frameW())
+							}
+							if w == 42 && m.reducedMotion && strings.Contains(plain, "·still·") {
+								t.Errorf("42-column header kept optional still chip: %q", plain)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestNarrowHeaderMouseKeyboardParity proves the two core actions remain real
+// hit targets at 42 columns and do exactly what their keyboard twins do.
+func TestNarrowHeaderMouseKeyboardParity(t *testing.T) {
+	for _, mode := range []struct {
+		name, noColor, reduced string
+	}{
+		{name: "normal"},
+		{name: "no-color", noColor: "1"},
+		{name: "reduced-motion", reduced: "1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", mode.noColor)
+			t.Setenv("AIUSAGE_REDUCED_MOTION", mode.reduced)
+
+			mouseRange := newTestModelWH(t, &fakeData{}, 42, 24)
+			keyboardRange := newTestModelWH(t, &fakeData{}, 42, 24)
+			mouseRange, found := click(t, mouseRange, views.ZoneRangePill)
+			if !found {
+				t.Fatal("42-column range zone does not resolve")
+			}
+			keyboardRange = send(keyboardRange, keyMsg("t"))
+			if mouseRange.rng != keyboardRange.rng {
+				t.Fatalf("range click selected %v, keyboard selected %v", mouseRange.rng, keyboardRange.rng)
+			}
+
+			mouseHelp := newTestModelWH(t, &fakeData{}, 42, 24)
+			keyboardHelp := newTestModelWH(t, &fakeData{}, 42, 24)
+			mouseHelp, found = click(t, mouseHelp, views.ZoneHelp)
+			if !found {
+				t.Fatal("42-column help zone does not resolve")
+			}
+			keyboardHelp = send(keyboardHelp, keyMsg("?"))
+			if mouseHelp.showHelp != keyboardHelp.showHelp || !mouseHelp.showHelp {
+				t.Fatalf("help parity failed: mouse=%v keyboard=%v", mouseHelp.showHelp, keyboardHelp.showHelp)
+			}
+		})
 	}
 }
 

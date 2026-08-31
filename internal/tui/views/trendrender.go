@@ -2,12 +2,14 @@ package views
 
 import (
 	"math"
+	"math/bits"
 	"sort"
 	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
+	"github.com/NimbleMarkets/ntcharts/v2/canvas/graph"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas/runes"
 	"github.com/NimbleMarkets/ntcharts/v2/linechart/timeserieslinechart"
 
@@ -80,6 +82,8 @@ func (g paneGeom) rawX(c int) float64 {
 // contiguous runs the gap rule produced. A lane must never draw across an
 // outage, so the split happens before any of it reaches the canvas.
 type paneSeriesData struct {
+	key   string
+	rank  int
 	style lipgloss.Style
 	runs  [][]canvas.Float64Point
 }
@@ -87,10 +91,18 @@ type paneSeriesData struct {
 // paneSeriesFor extracts each spec's points, split by gapRuns. X is unix seconds
 // the way timeserieslinechart stores a TimePoint; Y is the pane's value scale.
 func paneSeriesFor(specs []CompSpec, buckets []store.Bucket, times []time.Time, dim string) []paneSeriesData {
+	return paneSeriesForValue(specs, buckets, times, dim, func(v int64) float64 { return float64(v) })
+}
+
+// paneSeriesForValue is paneSeriesFor with the pane's Y transform injected.
+// The rank is the descriptor's canonical component order; draw order may change,
+// but an equal-dot cell must keep the same owner.
+func paneSeriesForValue(specs []CompSpec, buckets []store.Bucket, times []time.Time, dim string,
+	value func(int64) float64) []paneSeriesData {
 	runs := gapRuns(times, dim)
 	out := make([]paneSeriesData, 0, len(specs))
-	for _, s := range specs {
-		d := paneSeriesData{style: s.Style()}
+	for rank, s := range specs {
+		d := paneSeriesData{key: s.Key, rank: rank, style: s.Style()}
 		for _, run := range runs {
 			if len(run) == 0 {
 				continue
@@ -99,7 +111,7 @@ func paneSeriesFor(specs []CompSpec, buckets []store.Bucket, times []time.Time, 
 			for _, i := range run {
 				pts = append(pts, canvas.Float64Point{
 					X: float64(times[i].UnixMilli()) / 1e3,
-					Y: float64(s.Pick(Split(buckets[i]))),
+					Y: value(s.Pick(Split(buckets[i]))),
 				})
 			}
 			d.runs = append(d.runs, pts)
@@ -107,6 +119,91 @@ func paneSeriesFor(specs []CompSpec, buckets []store.Bucket, times []time.Time, 
 		out = append(out, d)
 	}
 	return out
+}
+
+// brailleCell is the union of every component that reaches one canvas cell and
+// the component that owns its style. A terminal cell can carry one style only,
+// so ownership goes to the component contributing the most dots; equal counts
+// resolve by canonical component rank, never by draw order.
+type brailleCell struct {
+	rune      rune
+	style     lipgloss.Style
+	ownerDots int
+	ownerRank int
+	owned     bool
+}
+
+// drawBrailleComponents draws two or more logical component series as one
+// component-aware braille layer. Each component first gets its own dot grid,
+// including all of its gap-separated runs; the grids are then unioned cell by
+// cell and written once. It returns false for a single component so callers can
+// keep ntcharts' native path for genuinely single-series panes.
+func drawBrailleComponents(m *timeserieslinechart.Model, series []paneSeriesData) bool {
+	if len(series) < 2 {
+		return false
+	}
+	g := newPaneGeom(m)
+	if !g.ok() {
+		return false
+	}
+
+	cells := make([][]brailleCell, g.gh)
+	for y := range cells {
+		cells[y] = make([]brailleCell, g.gw)
+	}
+	for _, s := range series {
+		grid := graph.NewBrailleGrid(g.gw, g.gh, g.minX, g.maxX, g.minY, g.maxY)
+		for _, run := range s.runs {
+			for i, p1 := range run {
+				j := i + 1
+				if j >= len(run) {
+					j = i
+				}
+				p2 := run[j]
+				if (p1.X < g.minX && p2.X < g.minX) || (p1.X > g.maxX && p2.X > g.maxX) {
+					continue
+				}
+				for _, p := range graph.GetLinePointsWithLimit(
+					grid.GridPoint(p1), grid.GridPoint(p2), m.MaxInterpolationPoints) {
+					grid.Set(p)
+				}
+			}
+		}
+
+		for y, row := range grid.BraillePatterns() {
+			for x, pattern := range row {
+				if pattern == runes.BrailleBlockOffset {
+					continue
+				}
+				dots := bits.OnesCount8(uint8(pattern - runes.BrailleBlockOffset))
+				cell := &cells[y][x]
+				if cell.rune == 0 {
+					cell.rune = pattern
+				} else {
+					cell.rune = runes.CombineBraillePatterns(cell.rune, pattern)
+				}
+				if !cell.owned || dots > cell.ownerDots || (dots == cell.ownerDots && s.rank < cell.ownerRank) {
+					cell.style = s.style
+					cell.ownerDots = dots
+					cell.ownerRank = s.rank
+					cell.owned = true
+				}
+			}
+		}
+	}
+
+	m.Clear()
+	m.DrawXYAxisAndLabel()
+	for y, row := range cells {
+		for x, cell := range row {
+			if !cell.owned {
+				continue
+			}
+			m.Canvas.SetCell(canvas.Point{X: g.startX + x, Y: y},
+				canvas.NewCellWithStyle(cell.rune, cell.style))
+		}
+	}
+	return true
 }
 
 // nearestValue returns the value of the point closest to tx, provided it is

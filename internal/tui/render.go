@@ -184,54 +184,90 @@ func (m Model) renderHeader() string {
 	}
 
 	wordmark := m.th.Wordmark.Render("◧ aiusage")
-	subtitle := ""
-	if !m.compact() {
-		subtitle = " " + m.th.Subtle.Render("command center")
-	}
-
 	help := m.zoneMark(views.ZoneHelp, m.headerChip("? help", m.th.Muted))
-	// Ingest heartbeat (real collector pulse) + query-freshness chip. The chip
-	// is a click zone: the indicator is where you act (left-press = force
-	// refresh). Never blanks the frame.
-	lead := m.heartbeatCell() + " " + m.zoneMark(views.ZoneFreshness, m.freshnessChip()) + " "
+
+	// Start with the header's non-negotiable core: wordmark, one-cell ingest
+	// state, truthful freshness, a complete window name and the help action.
+	// Optional detail is then bought back in product order. This keeps the core
+	// intact at 42 columns instead of trusting a final MaxWidth clip to choose
+	// which action disappears.
+	rangeForms := m.rangeChipForms()
+	rangeRung := len(rangeForms) - 1
+	freshForms := m.freshnessChipForms()
+	freshRung := len(freshForms) - 1
+	heartbeat := m.heartbeatCore()
 	still := ""
-	if m.reducedMotion {
-		// Surface the reduced-motion state; the dashboard renders all charts
-		// instantly with no animation when this is set (NO_COLOR /
-		// AIUSAGE_REDUCED_MOTION), so motion never adds input latency.
-		still = " " + m.headerChip("·still·", m.th.Muted)
-	}
-
-	// Cells left for the range chip once everything mandatory is paid for: the
-	// wordmark, the one-cell gap between the halves, the heartbeat + freshness
-	// lead, the reduced-motion chip and the help chip. The subtitle is NOT in
-	// this budget: it is decoration and yields to the window name (below).
-	budget := iw - lipgloss.Width(wordmark) - 1 -
-		lipgloss.Width(lead) - lipgloss.Width(still) - 1 - lipgloss.Width(help)
-	forms := m.rangeChipForms()
-	rung := m.rangeFit(forms, budget)
-
-	// The subtitle buys itself back only while it costs the range chip nothing:
-	// at 60 columns its 15 cells are the difference between naming the window by
-	// its day and naming it by its step offset, and the window name outranks a
-	// tagline. Comparing the chosen RUNG also keeps the header monotone in
-	// width: widening a terminal never takes something away.
+	path := ""
 	left := wordmark
-	if subtitle != "" && m.rangeFit(forms, budget-lipgloss.Width(subtitle)) == rung {
-		left += subtitle
-	}
 
-	rangePill := m.zoneMark(views.ZoneRangePill, m.headerChip(forms[rung], m.th.Accent))
-	right := lead + rangePill + still
-	// The db path is the first thing to drop when space is tight; only show it
-	// when the wordmark + range + help + path comfortably fit.
-	if m.dbPath != "" {
-		path := m.th.Subtle.Render("  " + Truncate(m.dbPath, 40))
-		if lipgloss.Width(left)+lipgloss.Width(right)+lipgloss.Width(path)+lipgloss.Width(help)+3 <= iw {
-			right += path
+	rightWidth := func(hb, fresh, rangeChip, stillChip, dbPath string) int {
+		parts := []string{hb, fresh, rangeChip}
+		if stillChip != "" {
+			parts = append(parts, stillChip)
+		}
+		if dbPath != "" {
+			parts = append(parts, dbPath)
+		}
+		parts = append(parts, help)
+		return lipgloss.Width(strings.Join(parts, " "))
+	}
+	fits := func(candidateLeft, hb, fresh, rangeChip, stillChip, dbPath string) bool {
+		return lipgloss.Width(candidateLeft)+1+rightWidth(hb, fresh, rangeChip, stillChip, dbPath) <= iw
+	}
+	rangeChip := func(rung int) string { return m.headerChip(rangeForms[rung], m.th.Accent) }
+
+	// 1. The widest complete range the core can afford.
+	for i := range rangeForms {
+		if fits(left, heartbeat, freshForms[freshRung], rangeChip(i), "", "") {
+			rangeRung = i
+			break
 		}
 	}
-	right += " " + help
+	// 2. Stale age/error detail, then the reduced-motion heartbeat age rider.
+	for i := range freshForms {
+		if fits(left, heartbeat, freshForms[i], rangeChip(rangeRung), "", "") {
+			freshRung = i
+			break
+		}
+	}
+	if detailed := m.heartbeatCell(); detailed != heartbeat &&
+		fits(left, detailed, freshForms[freshRung], rangeChip(rangeRung), "", "") {
+		heartbeat = detailed
+	}
+	// 3. Accessibility-state rider, tagline, then the db path. All are useful;
+	// none outranks an action or the window being inspected.
+	if m.reducedMotion {
+		candidate := m.headerChip("·still·", m.th.Muted)
+		if fits(left, heartbeat, freshForms[freshRung], rangeChip(rangeRung), candidate, "") {
+			still = candidate
+		}
+	}
+	if !m.compact() {
+		candidate := wordmark + " " + m.th.Subtle.Render("command center")
+		if fits(candidate, heartbeat, freshForms[freshRung], rangeChip(rangeRung), still, "") {
+			left = candidate
+		}
+	}
+	if m.dbPath != "" {
+		candidate := m.th.Subtle.Render(Truncate(m.dbPath, 40))
+		if fits(left, heartbeat, freshForms[freshRung], rangeChip(rangeRung), still, candidate) {
+			path = candidate
+		}
+	}
+
+	parts := []string{
+		heartbeat,
+		m.zoneMark(views.ZoneFreshness, freshForms[freshRung]),
+		m.zoneMark(views.ZoneRangePill, rangeChip(rangeRung)),
+	}
+	if still != "" {
+		parts = append(parts, still)
+	}
+	if path != "" {
+		parts = append(parts, path)
+	}
+	parts = append(parts, help)
+	right := strings.Join(parts, " ")
 
 	gap := iw - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -256,21 +292,6 @@ func (m Model) rangeChipForms() []string {
 		forms = append(forms, "‹ "+l+" ›")
 	}
 	return append(forms, "‹"+labels[len(labels)-1]+"›")
-}
-
-// rangeFit picks the widest range-chip form that fits budget cells. Every rung
-// is a complete name for the window, so a narrow header shows a shorter label
-// and never a truncated one. When even the narrowest rung overflows (a stale
-// chip carrying an error can eat the whole header) that rung is used anyway
-// and the frame clamps it: a clipped SHORT form still reads as a past window,
-// which is the property that must not break.
-func (m Model) rangeFit(forms []string, budget int) int {
-	for i, f := range forms {
-		if lipgloss.Width(m.headerChip(f, m.th.Accent)) <= budget {
-			return i
-		}
-	}
-	return len(forms) - 1
 }
 
 // headerChip renders a state/range/action chip on the header bar: one cell of

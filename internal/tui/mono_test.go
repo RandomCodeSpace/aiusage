@@ -68,6 +68,7 @@ func TestMonoFocusIndication(t *testing.T) {
 		{"2", "BY TOOL"},
 		{"3", "BY MODEL"},
 		{"4", "TOOL"}, // Browse opens on the first drill dimension
+		{"5", "INVOCATIONS"},
 	} {
 		m := newTestModelWH(t, &fakeData{}, 160, 44)
 		m = step(t, m, keyMsg(tc.key))
@@ -117,7 +118,7 @@ func TestMonoFocusBarIsWidthInvariant(t *testing.T) {
 // does not reflow when the selection moves.
 func TestMonoActiveTabChip(t *testing.T) {
 	for _, tc := range []struct{ key, label string }{
-		{"1", "Overview"}, {"2", "By Tool"}, {"3", "By Model"}, {"4", "Sessions"},
+		{"1", "Overview"}, {"2", "By Tool"}, {"3", "By Model"}, {"4", "Sessions"}, {"5", "Activity"},
 	} {
 		m := newTestModelWH(t, &fakeData{}, 160, 44)
 		m = step(t, m, keyMsg(tc.key))
@@ -250,7 +251,7 @@ func TestMonoEmptyStates(t *testing.T) {
 // border — the outer app frame. Cards carry elevation and titled rules instead,
 // so any per-panel box drawing is a regression.
 func TestBordersRetreatToTheAppFrame(t *testing.T) {
-	for _, tab := range []string{"1", "2", "3", "4"} {
+	for _, tab := range []string{"1", "2", "3", "4", "5"} {
 		m := newTestModelWH(t, &fakeData{}, 160, 44)
 		m = step(t, m, keyMsg(tab))
 		out := monoFrame(m)

@@ -144,7 +144,9 @@ func buildTrendChart(c Ctx, buckets []store.Bucket, dim string, w, h int) (*time
 			tslc.PushDataSet(s.Key, timeserieslinechart.TimePoint{Time: times[i], Value: logT(s.Pick(comp))})
 		}
 	}
-	tslc.DrawBrailleDataSets(order)
+	if !drawBrailleComponents(&tslc, paneSeriesForValue(c.Comp, buckets, times, dim, logT)) {
+		tslc.DrawBrailleDataSets(order)
+	}
 	return &tslc, times, true
 }
 
@@ -449,7 +451,9 @@ func buildDecadeLogFrame(c Ctx, buckets []store.Bucket, times []time.Time, dim s
 			order = append(order, name)
 		}
 	}
-	tslc.DrawBrailleDataSets(order)
+	if !drawBrailleComponents(&tslc, paneSeriesForValue(c.Comp, buckets, times, dim, decadeLogValue)) {
+		tslc.DrawBrailleDataSets(order)
+	}
 	return &heroFrame{
 		panes: []heroPane{{
 			header: paneHeader(c, c.Comp, "tokens", decadePitchLabel(pitch), w),
@@ -540,7 +544,9 @@ func detentPane(c Ctx, buckets []store.Bucket, times []time.Time, dim string,
 			order = append(order, name)
 		}
 	}
-	tslc.DrawBrailleDataSets(order)
+	if !drawBrailleComponents(&tslc, paneSeriesFor(specs, buckets, times, dim)) {
+		tslc.DrawBrailleDataSets(order)
+	}
 	return &tslc
 }
 
