@@ -99,7 +99,7 @@ func TestObserveProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := observeProcesses(script, "", "version", "version", "timed", 2, 1, &out); err != nil {
+	if err := observeProcesses(script, "", "", "version", "version", "timed", 2, 1, &out); err != nil {
 		t.Fatalf("observe stable process: %v", err)
 	}
 	var report processReport
@@ -117,7 +117,7 @@ func TestObserveProcesses(t *testing.T) {
 	if err := os.WriteFile(failing, []byte("#!/bin/sh\necho failed >&2\nexit 7\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := observeProcesses(failing, "", "version", "version", "timed", 1, 0, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "failed") {
+	if err := observeProcesses(failing, "", "", "version", "version", "timed", 1, 0, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "failed") {
 		t.Fatalf("failing process error = %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestObserveProcesses(t *testing.T) {
 		{"unknown", script, "", "x", "wrong", "timed"},
 		{"needs db", script, "", "summary", "summary-all", "timed"},
 	} {
-		if err := observeProcesses(tc.binary, tc.db, tc.metric, tc.command, tc.purpose, 1, 0, &bytes.Buffer{}); err == nil {
+		if err := observeProcesses(tc.binary, tc.db, "", tc.metric, tc.command, tc.purpose, 1, 0, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s unexpectedly succeeded", tc.name)
 		}
 	}
@@ -137,12 +137,18 @@ func TestObserveProcesses(t *testing.T) {
 
 func TestObservedCommandsAndWriters(t *testing.T) {
 	for _, name := range []string{"version", "summary-all", "summary-breakdown", "summary-provider", "export-json", "export-csv", "export-json-raw", "export-csv-raw"} {
-		args, needsDB, err := observedCommand(name, "/tmp/fixture.db")
-		if err != nil || len(args) == 0 || (name == "version") == needsDB {
-			t.Errorf("observedCommand(%s) = %v,%v,%v", name, args, needsDB, err)
+		args, needsDB, needsRoot, err := observedCommand(name, "/tmp/fixture.db", "")
+		if err != nil || len(args) == 0 || (name == "version") == needsDB || needsRoot {
+			t.Errorf("observedCommand(%s) = %v,%v,%v,%v", name, args, needsDB, needsRoot, err)
 		}
 	}
-	if _, _, err := observedCommand("unknown", ""); err == nil {
+	for _, name := range []string{"source-farm-discovery", "source-farm-catchup", "source-farm-unchanged"} {
+		args, _, needsRoot, err := observedCommand(name, "/tmp/farm.db", "/tmp/farm")
+		if err != nil || len(args) == 0 || !needsRoot {
+			t.Errorf("observedCommand(%s) = %v,%v,%v", name, args, needsRoot, err)
+		}
+	}
+	if _, _, _, err := observedCommand("unknown", "", ""); err == nil {
 		t.Fatal("unknown command succeeded")
 	}
 

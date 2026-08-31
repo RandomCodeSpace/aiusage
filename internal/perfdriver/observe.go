@@ -33,6 +33,7 @@ type processReport struct {
 	Profile string        `json:"profile"`
 	Binary  string        `json:"binary"`
 	DB      string        `json:"db,omitempty"`
+	Root    string        `json:"root,omitempty"`
 	Samples int           `json:"samples"`
 	Warmups int           `json:"warmups"`
 	Metric  processMetric `json:"metric"`
@@ -46,7 +47,7 @@ type observedRun struct {
 	digest     string
 }
 
-func observeProcesses(binary, dbPath, name, command, purpose string, samples, warmups int, out io.Writer) error {
+func observeProcesses(binary, dbPath, rootPath, name, command, purpose string, samples, warmups int, out io.Writer) error {
 	if binary == "" || name == "" || command == "" {
 		return fmt.Errorf("observe requires --binary, --name, and --command")
 	}
@@ -56,12 +57,15 @@ func observeProcesses(binary, dbPath, name, command, purpose string, samples, wa
 	if purpose != "timed" && purpose != "absolute" && purpose != "correctness" {
 		return fmt.Errorf("observe purpose must be timed, absolute, or correctness")
 	}
-	args, needsDB, err := observedCommand(command, dbPath)
+	args, needsDB, needsRoot, err := observedCommand(command, dbPath, rootPath)
 	if err != nil {
 		return err
 	}
 	if needsDB && dbPath == "" {
 		return fmt.Errorf("observe command %s requires --db", command)
+	}
+	if needsRoot && rootPath == "" {
+		return fmt.Errorf("observe command %s requires --root", command)
 	}
 	root, err := os.MkdirTemp("", "aiusage-perf-observe-")
 	if err != nil {
@@ -72,7 +76,7 @@ func observeProcesses(binary, dbPath, name, command, purpose string, samples, wa
 	if err := os.WriteFile(configPath, []byte("{\"pricing\":{\"refresh\":false}}\n"), 0o600); err != nil {
 		return fmt.Errorf("write observer config: %w", err)
 	}
-	if needsDB {
+	if needsDB && !strings.HasPrefix(command, "source-farm-") {
 		args = append([]string{"--db", dbPath, "--home", filepath.Join(root, "home"), "--config", configPath, "--no-daemon"}, args...)
 	}
 	env := observerEnvironment(root)
@@ -109,10 +113,15 @@ func observeProcesses(binary, dbPath, name, command, purpose string, samples, wa
 		metric.MaxRSSKB = append(metric.MaxRSSKB, result.maxRSSKB)
 		metric.SampleDigests = append(metric.SampleDigests, result.digest)
 	}
+	profile := longLedgerProfile
+	if strings.HasPrefix(command, "source-farm-") {
+		profile = sourceFarmProfile
+	}
 	report := processReport{
-		Profile: longLedgerProfile,
+		Profile: profile,
 		Binary:  binary,
 		DB:      dbPath,
+		Root:    rootPath,
 		Samples: samples,
 		Warmups: warmups,
 		Metric:  metric,
@@ -120,26 +129,32 @@ func observeProcesses(binary, dbPath, name, command, purpose string, samples, wa
 	return json.NewEncoder(out).Encode(report)
 }
 
-func observedCommand(name, dbPath string) ([]string, bool, error) {
+func observedCommand(name, dbPath, rootPath string) ([]string, bool, bool, error) {
 	switch name {
 	case "version":
-		return []string{"version"}, false, nil
+		return []string{"version"}, false, false, nil
 	case "summary-all":
-		return []string{"summary", "--json"}, true, nil
+		return []string{"summary", "--json"}, true, false, nil
 	case "summary-breakdown":
-		return []string{"summary", "--by", "day,tool,model", "--json"}, true, nil
+		return []string{"summary", "--by", "day,tool,model", "--json"}, true, false, nil
 	case "summary-provider":
-		return []string{"summary", "--by", "provider", "--json"}, true, nil
+		return []string{"summary", "--by", "provider", "--json"}, true, false, nil
 	case "export-json":
-		return []string{"export", "--format", "json"}, true, nil
+		return []string{"export", "--format", "json"}, true, false, nil
 	case "export-csv":
-		return []string{"export", "--format", "csv"}, true, nil
+		return []string{"export", "--format", "csv"}, true, false, nil
 	case "export-json-raw":
-		return []string{"export", "--format", "json", "--include-raw"}, true, nil
+		return []string{"export", "--format", "json", "--include-raw"}, true, false, nil
 	case "export-csv-raw":
-		return []string{"export", "--format", "csv", "--include-raw"}, true, nil
+		return []string{"export", "--format", "csv", "--include-raw"}, true, false, nil
+	case "source-farm-discovery":
+		return []string{"source-farm-discovery", "--root", rootPath}, false, true, nil
+	case "source-farm-catchup":
+		return []string{"source-farm-catchup", "--root", rootPath}, false, true, nil
+	case "source-farm-unchanged":
+		return []string{"source-farm-unchanged", "--root", rootPath, "--db", dbPath, "--cycles", "1"}, true, true, nil
 	default:
-		return nil, false, fmt.Errorf("unknown observed command %q for database %q", name, dbPath)
+		return nil, false, false, fmt.Errorf("unknown observed command %q for database %q", name, dbPath)
 	}
 }
 

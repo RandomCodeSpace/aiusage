@@ -58,6 +58,34 @@ func TestEvaluateRejectsContractFailures(t *testing.T) {
 	}
 }
 
+func TestSourceFarmLimits(t *testing.T) {
+	baseline := passingSide()
+	candidate := passingSide()
+	candidate.process["source-farm-discovery"].DurationsNS = repeatInt64(3_000_000_000)
+	candidate.process["source-farm-catchup"].MaxRSSKB = repeatInt64(300 * 1024)
+	candidate.bench["BenchmarkSourceFarmUnchanged"]["B/op"] = repeatFloat(17 * MiB)
+	candidate.bench["BenchmarkSourceFarmUnchanged"]["sources/op"] = repeatFloat(2_499)
+	candidate.bench["BenchmarkSourceFarmUnchanged"]["inserted/op"] = repeatFloat(1)
+
+	var failures strings.Builder
+	for _, item := range evaluate(baseline, candidate) {
+		if item.Status == "FAIL" {
+			failures.WriteString(item.Category + "/" + item.Metric + "\n")
+		}
+	}
+	for _, want := range []string{
+		"absolute/source-farm-discovery duration p95",
+		"absolute/source-farm-catchup RSS",
+		"absolute/BenchmarkSourceFarmUnchanged B/op",
+		"deterministic/BenchmarkSourceFarmUnchanged sources/op",
+		"deterministic/BenchmarkSourceFarmUnchanged inserted/op",
+	} {
+		if !strings.Contains(failures.String(), want) {
+			t.Errorf("source-farm failures missing %q:\n%s", want, failures.String())
+		}
+	}
+}
+
 func TestLoadSideAndReportIO(t *testing.T) {
 	dir := t.TempDir()
 	for _, sub := range []string{"process", "query"} {
@@ -157,6 +185,21 @@ func passingSide() side {
 			DurationsNS: repeatInt64(2_000_000_000), FirstByteNS: repeatInt64(100_000_000), MaxRSSKB: repeatInt64(50 * 1024),
 			OutputBytes: 10, OutputSHA256: "export",
 		},
+		"source-farm-discovery": {
+			Name: "source-farm-discovery", Command: "source-farm-discovery", Purpose: "timed",
+			DurationsNS: repeatInt64(200_000_000), FirstByteNS: repeatInt64(190_000_000), MaxRSSKB: repeatInt64(32 * 1024),
+			OutputBytes: 10, OutputSHA256: "farm-discovery",
+		},
+		"source-farm-catchup": {
+			Name: "source-farm-catchup", Command: "source-farm-catchup", Purpose: "timed",
+			DurationsNS: repeatInt64(1_000_000_000), FirstByteNS: repeatInt64(900_000_000), MaxRSSKB: repeatInt64(128 * 1024),
+			OutputBytes: 10, OutputSHA256: "farm-catchup",
+		},
+		"source-farm-unchanged": {
+			Name: "source-farm-unchanged", Command: "source-farm-unchanged", Purpose: "timed",
+			DurationsNS: repeatInt64(100_000_000), FirstByteNS: repeatInt64(90_000_000), MaxRSSKB: repeatInt64(64 * 1024),
+			OutputBytes: 10, OutputSHA256: "farm-unchanged",
+		},
 	}
 	bench := map[string]map[string][]float64{
 		"BenchmarkReload":                   benchmarkMetrics(10_000, 3*KiB, 22),
@@ -174,6 +217,9 @@ func passingSide() side {
 		}),
 		"BenchmarkRangeCycleRevisit": withExtras(benchmarkMetrics(100_000, 1, 1), map[string]float64{
 			"queries/op": 0, "query-ms/op": 0,
+		}),
+		"BenchmarkSourceFarmUnchanged": withExtras(benchmarkMetrics(100_000_000, 8*MiB, 10_000), map[string]float64{
+			"sources/op": 2500, "inserted/op": 0,
 		}),
 	}
 	return side{

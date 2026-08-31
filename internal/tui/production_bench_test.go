@@ -17,6 +17,11 @@ type productionView struct {
 	pivot ActivityPivot
 }
 
+// productionBenchNow is the fixed UTC clock used to generate long-ledger-v1.
+// Every benchmark that reads that fixture must resolve ranges against the same
+// instant or an empty grouped rollup window falls back to the full ledger.
+var productionBenchNow = time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
 func productionViews() []productionView {
 	views := []productionView{
 		{name: "Overview", view: ViewOverview, pivot: PivotCalls},
@@ -55,9 +60,8 @@ func camelDimension(value string) string {
 
 func productionModel(src DataSource, width, height int, target productionView) Model {
 	m := NewModel(src, Options{DBPath: "/fixture/usage.db"})
-	fixed := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
-	m.data.now = func() time.Time { return fixed }
-	m.loadNow = fixed
+	m.data.now = func() time.Time { return productionBenchNow }
+	m.loadNow = productionBenchNow
 	m.view = target.view
 	m.pivot = target.pivot
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})

@@ -81,6 +81,23 @@ export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 (cd "$baseline_tree" && go test -c -o "$perf_root/baseline-tui.test" ./internal/tui)
 (cd "$candidate_tree" && go test -c -o "$perf_root/candidate-tui.test" ./internal/tui)
 
+(cd "$baseline_tree" && rtk go test -c -o "$perf_root/baseline-perfdriver.test" ./internal/perfdriver)
+(cd "$candidate_tree" && rtk go test -c -o "$perf_root/candidate-perfdriver.test" ./internal/perfdriver)
+
+"$perf_root/candidate-driver" generate-source-farm \
+	--root "$perf_root/source-farm" --fixtures "$candidate_tree" \
+	--manifest "$artifact_dir/fixtures/source-farm.json" \
+	>"$artifact_dir/fixtures/source-farm.stdout.json"
+"$perf_root/baseline-driver" source-farm-warm \
+	--root "$perf_root/source-farm" --db "$perf_root/baseline-source-farm.db" \
+	>"$artifact_dir/fixtures/baseline-source-farm-warm.json"
+"$perf_root/candidate-driver" source-farm-warm \
+	--root "$perf_root/source-farm" --db "$perf_root/candidate-source-farm.db" \
+	>"$artifact_dir/fixtures/candidate-source-farm-warm.json"
+"$perf_root/candidate-driver" source-farm-contract \
+	--root "$perf_root/source-farm" --out "$artifact_dir/fixtures/source-farm-contract.json" \
+	>"$artifact_dir/fixtures/source-farm-contract.stdout.json"
+
 "$perf_root/baseline-driver" generate-long-ledger \
 	--db "$perf_root/baseline-1m.db" --manifest "$artifact_dir/fixtures/baseline-1m.json" \
 	--usage "$usage_count" --activity "$activity_count" --contexts "$context_count" \
@@ -130,6 +147,31 @@ paired_process_metric() {
 	done
 }
 
+observe_source_farm_sample() {
+	local side="$1" driver="$2" db="$3" name="$4" command="$5" sample="$6" warmups="$7"
+	local db_args=()
+	if [[ -n "$db" ]]; then db_args=(--db "$db"); fi
+	"$driver" observe --binary "$driver" --root "$perf_root/source-farm" "${db_args[@]}" \
+		--name "$name" --command "$command" --purpose timed --samples 1 --warmups "$warmups" \
+		>"$artifact_dir/$side/process/$name-$sample.json"
+}
+
+paired_source_farm_metric() {
+	local name="$1" command="$2" baseline_db="$3" candidate_db="$4" start="$5" end="$6"
+	local sample warmups
+	for sample in $(seq "$start" "$end"); do
+		warmups=0
+		if [[ "$sample" == "1" ]]; then warmups=1; fi
+		if ((sample % 2 == 1)); then
+			observe_source_farm_sample baseline "$perf_root/baseline-driver" "$baseline_db" "$name" "$command" "$sample" "$warmups"
+			observe_source_farm_sample candidate "$perf_root/candidate-driver" "$candidate_db" "$name" "$command" "$sample" "$warmups"
+		else
+			observe_source_farm_sample candidate "$perf_root/candidate-driver" "$candidate_db" "$name" "$command" "$sample" "$warmups"
+			observe_source_farm_sample baseline "$perf_root/baseline-driver" "$baseline_db" "$name" "$command" "$sample" "$warmups"
+		fi
+	done
+}
+
 paired_query_samples() {
 	local start="$1" end="$2" sample warmups
 	for sample in $(seq "$start" "$end"); do
@@ -150,11 +192,20 @@ readonly cold_bench='^(BenchmarkProductionColdLoad|BenchmarkRangeCycleBurst|Benc
 
 bench_sample() {
 	local side="$1" binary="$2" db="$3" sample="$4"
-	AIUSAGE_PERF_DB="$db" "$binary" -test.run '^$' -test.bench "$micro_bench" -test.benchmem -test.benchtime 100x -test.count 1 \
+	AIUSAGE_PERF_DB="$db" "$binary" -test.run '^$' -test.bench "$micro_bench" -test.benchmem -test.benchtime 10x -test.count 1 \
 		>>"$artifact_dir/benchmarks/$side.txt"
 	AIUSAGE_PERF_DB="$db" "$binary" -test.run '^$' -test.bench "$cold_bench" -test.benchmem -test.benchtime 1x -test.count 1 \
 		>>"$artifact_dir/benchmarks/$side.txt"
 	echo "sample $sample complete" >&2
+}
+
+source_farm_bench_sample() {
+	local side="$1" binary="$2" db="$3" sample="$4"
+	AIUSAGE_SOURCE_FARM="$perf_root/source-farm" AIUSAGE_SOURCE_FARM_DB="$db" \
+		"$binary" -test.run '^$' -test.bench '^BenchmarkSourceFarmUnchanged$' \
+		-test.benchmem -test.benchtime 1x -test.count 1 \
+		>>"$artifact_dir/benchmarks/$side.txt"
+	echo "source-farm sample $sample complete" >&2
 }
 
 paired_bench_samples() {
@@ -162,10 +213,14 @@ paired_bench_samples() {
 	for sample in $(seq "$start" "$end"); do
 		if ((sample % 2 == 1)); then
 			bench_sample baseline "$perf_root/baseline-tui.test" "$perf_root/baseline-1m.db" "$sample"
+			source_farm_bench_sample baseline "$perf_root/baseline-perfdriver.test" "$perf_root/baseline-source-farm.db" "$sample"
 			bench_sample candidate "$perf_root/candidate-tui.test" "$perf_root/candidate-1m.db" "$sample"
+			source_farm_bench_sample candidate "$perf_root/candidate-perfdriver.test" "$perf_root/candidate-source-farm.db" "$sample"
 		else
 			bench_sample candidate "$perf_root/candidate-tui.test" "$perf_root/candidate-1m.db" "$sample"
+			source_farm_bench_sample candidate "$perf_root/candidate-perfdriver.test" "$perf_root/candidate-source-farm.db" "$sample"
 			bench_sample baseline "$perf_root/baseline-tui.test" "$perf_root/baseline-1m.db" "$sample"
+			source_farm_bench_sample baseline "$perf_root/baseline-perfdriver.test" "$perf_root/baseline-source-farm.db" "$sample"
 		fi
 	done
 }
@@ -181,6 +236,9 @@ run_timed_set() {
 	paired_process_metric export-csv-100k export-csv "$perf_root/baseline-100k.db" "$perf_root/candidate-100k.db" "$start" "$end"
 	paired_process_metric export-json-raw-100k export-json-raw "$perf_root/baseline-100k.db" "$perf_root/candidate-100k.db" "$start" "$end"
 	paired_process_metric export-csv-raw-100k export-csv-raw "$perf_root/baseline-100k.db" "$perf_root/candidate-100k.db" "$start" "$end"
+	paired_source_farm_metric source-farm-discovery source-farm-discovery "" "" "$start" "$end"
+	paired_source_farm_metric source-farm-catchup source-farm-catchup "" "" "$start" "$end"
+	paired_source_farm_metric source-farm-unchanged source-farm-unchanged "$perf_root/baseline-source-farm.db" "$perf_root/candidate-source-farm.db" "$start" "$end"
 	paired_bench_samples "$start" "$end"
 }
 

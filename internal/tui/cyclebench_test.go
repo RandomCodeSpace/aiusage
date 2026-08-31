@@ -223,17 +223,28 @@ func reportQueryCost(b *testing.B, calls, nanos int64) {
 	b.ReportMetric(float64(nanos)/float64(b.N)/1e6, "query-ms/op")
 }
 
-// benchLedgerModel returns a loaded Overview model over the synthetic ledger
-// with its clock pinned to benchNow, plus the counting source wrapped around
-// the store.
+// benchLedgerClock follows the fixture being read. The self-seeded ledger uses
+// benchNow; the production gate's external long-ledger-v1 uses its own pinned
+// clock so every measured range overlaps the workload it claims to exercise.
+func benchLedgerClock() time.Time {
+	if os.Getenv("AIUSAGE_PERF_DB") != "" {
+		return productionBenchNow
+	}
+	return benchNow
+}
+
+// benchLedgerModel returns a loaded Overview model over the selected ledger
+// with its clock pinned to that fixture, plus the counting source wrapped
+// around the store.
 func benchLedgerModel(b *testing.B) (Model, *countingSource) {
 	b.Helper()
 	src := &countingSource{src: benchLedgerStore(b)}
 	m := NewModel(src, Options{DBPath: benchLedgerPath})
-	m.data.now = func() time.Time { return benchNow }
+	now := benchLedgerClock()
+	m.data.now = func() time.Time { return now }
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = tm.(Model)
-	m.loadNow = benchNow
+	m.loadNow = now
 	return loadOnce(m), src
 }
 

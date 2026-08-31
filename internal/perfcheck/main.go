@@ -241,9 +241,10 @@ func compareProcess(baseline, candidate map[string]*processMetric) []result {
 			out = append(out, failed("process", name, b.Purpose+"/"+b.Command, c.Purpose+"/"+c.Command, "same purpose and command", "process metric contract changed"))
 			continue
 		}
-		if c.Command != "version" && (b.OutputSHA256 != c.OutputSHA256 || b.OutputBytes != c.OutputBytes) {
+		compareOutput := c.Command != "version" && !strings.HasPrefix(c.Command, "source-farm-")
+		if compareOutput && (b.OutputSHA256 != c.OutputSHA256 || b.OutputBytes != c.OutputBytes) {
 			out = append(out, failed("equivalence", name, b.OutputSHA256, c.OutputSHA256, "exact bytes", "process output changed"))
-		} else if c.Command != "version" {
+		} else if compareOutput {
 			out = append(out, passed("equivalence", name, "exact bytes"))
 		}
 		if c.Purpose == "timed" {
@@ -271,6 +272,12 @@ func processAbsolute(m processMetric) []result {
 	switch m.Command {
 	case "version":
 		durationLimit, rssLimitKB = 100*time.Millisecond, 32*1024
+	case "source-farm-discovery":
+		durationLimit, rssLimitKB = 2500*time.Millisecond, 64*1024
+	case "source-farm-unchanged":
+		durationLimit, rssLimitKB = time.Second, 128*1024
+	case "source-farm-catchup":
+		durationLimit, rssLimitKB = 5*time.Second, 256*1024
 	case "summary-all", "summary-breakdown", "summary-provider":
 		durationLimit, rssLimitKB = 2500*time.Millisecond, 128*1024
 	case "export-json", "export-csv":
@@ -355,6 +362,8 @@ func benchmarkAbsolute(name string, metrics map[string][]float64) []result {
 	switch {
 	case name == "BenchmarkReload":
 		durationLimit, bytesLimit, allocLimit = 25_000, 4*KiB, 24
+	case name == "BenchmarkSourceFarmUnchanged":
+		durationLimit, bytesLimit = 1_000_000_000, 16*MiB
 	case name == "BenchmarkScrubStep":
 		durationLimit, bytesLimit, allocLimit = 1_000, KiB, 4
 	case name == "BenchmarkView" || strings.Contains(name, "ProductionRender120x40"):
@@ -417,6 +426,19 @@ func benchmarkAbsolute(name string, metrics map[string][]float64) []result {
 	if strings.Contains(name, "ProductionUIThread") {
 		if values := metrics["queries/op"]; len(values) > 0 {
 			out = append(out, limitFloat("deterministic", name+" queries/op", percentile(values, .95), 0, "queries/op"))
+		}
+	}
+	if name == "BenchmarkSourceFarmUnchanged" {
+		if values := metrics["sources/op"]; len(values) > 0 {
+			value := percentile(values, .95)
+			if value != 2500 {
+				out = append(out, failed("deterministic", name+" sources/op", "", fmtFloat(value)+" sources/op", "= 2500 sources/op", "source-farm cardinality"))
+			} else {
+				out = append(out, passedValue("deterministic", name+" sources/op", fmtFloat(value)+" sources/op", "= 2500 sources/op"))
+			}
+		}
+		if values := metrics["inserted/op"]; len(values) > 0 {
+			out = append(out, limitFloat("deterministic", name+" inserted/op", percentile(values, .95), 0, "inserted/op"))
 		}
 	}
 	return out
