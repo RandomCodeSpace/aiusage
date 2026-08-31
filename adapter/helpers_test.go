@@ -1,12 +1,21 @@
 package adapter
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 )
+
+func TestErrSourceFormatWraps(t *testing.T) {
+	err := fmt.Errorf("codex session: missing token_count discriminator: %w", ErrSourceFormat)
+	if !errors.Is(err, ErrSourceFormat) {
+		t.Fatalf("wrapped format error is not discoverable with errors.Is: %v", err)
+	}
+}
 
 // entryFor returns the walk entry a directory walk would report for name, which
 // is the only metadata the discovery filters get: Lstat semantics, so a symlink

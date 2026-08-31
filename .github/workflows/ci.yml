@@ -1,11 +1,11 @@
 name: CI
 
-# Build, vet, format-check, test (with coverage), compatibility checks,
-# staticcheck, race detection, SonarCloud analysis and vulnerability scan on
-# every push to main and every pull request. Pure-Go, CGO disabled to match the
-# release build; the race job re-enables CGO. The weekly schedule runs ONLY
-# govulncheck (every other job carries an event_name guard, and sonar is skipped
-# through its build-test dependency).
+# Build, vet, format-check, test (with coverage), API/machine and adapter
+# compatibility checks, staticcheck, race detection, SonarCloud analysis and
+# vulnerability scan on every push to main and every pull request. Pure-Go,
+# CGO disabled to match the release build; the race job re-enables CGO. The
+# weekly schedule runs ONLY govulncheck (every other job carries an event_name
+# guard, and sonar is skipped through its build-test dependency).
 #
 # There are no build tags: every gate runs once, over exactly the source the
 # release binary is built from.
@@ -220,4 +220,68 @@ jobs:
         with:
           name: compatibility
           path: compatibility
+          if-no-files-found: error
+
+  adapter-compatibility:
+    name: Adapter compatibility
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      # A fixture test that forgets to isolate discovery must see an impossible
+      # root, never a developer or runner installation. Keep this list aligned
+      # with internal/cmd.discoveryEnv.
+      CLAUDE_CONFIG_DIR: /nonexistent/aiusage-adapter-contract
+      CLINE_DIR: /nonexistent/aiusage-adapter-contract
+      CLINE_DATA_DIR: /nonexistent/aiusage-adapter-contract
+      CLINE_SESSION_DATA_DIR: /nonexistent/aiusage-adapter-contract
+      CLINE_DB_DATA_DIR: /nonexistent/aiusage-adapter-contract
+      CODEX_HOME: /nonexistent/aiusage-adapter-contract
+      COPILOT_OTEL_FILE_EXPORTER_PATH: /nonexistent/aiusage-adapter-contract
+      CRUSH_GLOBAL_DATA: /nonexistent/aiusage-adapter-contract
+      XDG_DATA_HOME: /nonexistent/aiusage-adapter-contract
+      DSH_HOME: /nonexistent/aiusage-adapter-contract
+      GOOSE_PATH_ROOT: /nonexistent/aiusage-adapter-contract
+      HERMES_HOME: /nonexistent/aiusage-adapter-contract
+      KIMI_CODE_HOME: /nonexistent/aiusage-adapter-contract
+      KIMI_CODE_DATA_DIR: /nonexistent/aiusage-adapter-contract
+      OPENCODE_DATA_DIR: /nonexistent/aiusage-adapter-contract
+      PI_CODING_AGENT_DIR: /nonexistent/aiusage-adapter-contract
+      PI_CODING_AGENT_SESSION_DIR: /nonexistent/aiusage-adapter-contract
+      OPENCLAW_STATE_DIR: /nonexistent/aiusage-adapter-contract
+      OPENCLAW_HOME: /nonexistent/aiusage-adapter-contract
+      OPENCLAW_AGENT_DIR: /nonexistent/aiusage-adapter-contract
+      QWEN_RUNTIME_DIR: /nonexistent/aiusage-adapter-contract
+      QWEN_HOME: /nonexistent/aiusage-adapter-contract
+      REASONIX_STATE_HOME: /nonexistent/aiusage-adapter-contract
+      REASONIX_HOME: /nonexistent/aiusage-adapter-contract
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: prepare adapter evidence
+        run: mkdir -p adapter-evidence
+
+      - name: replay adapter contracts
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -o pipefail
+          go test -p 1 -count=1 ./adapter/... | tee adapter-evidence/tests.txt
+
+      - name: validate adapter evidence manifest
+        if: always()
+        run: go run ./internal/adaptercompatcheck --mode ci --out adapter-evidence/result.json
+
+      - name: upload adapter compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adapter-compatibility
+          path: |
+            adapter/compatibility.json
+            adapter-evidence
           if-no-files-found: error

@@ -112,9 +112,16 @@ package adapter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/RandomCodeSpace/aiusage/model"
 )
+
+// ErrSourceFormat marks a discovered source whose required writer/schema
+// anchors no longer match a supported surface. Adapters wrap it with the tool,
+// surface and incompatible anchor so callers can distinguish upstream drift
+// from valid zero usage without learning a new error type per harness.
+var ErrSourceFormat = errors.New("adapter source format incompatible")
 
 // Source is a concrete usage source discovered by an adapter — typically a
 // file, directory, or database belonging to one agent CLI.

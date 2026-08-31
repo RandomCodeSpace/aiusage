@@ -73,6 +73,41 @@ jobs:
           }
           echo "statement coverage ${coverage}%"
 
+      - name: Recheck adapter compatibility artifact
+        env:
+          ARTIFACT_ID: ${{ steps.preflight.outputs.adapter_artifact_id }}
+        run: |
+          archive="$RUNNER_TEMP/adapter-compatibility.zip"
+          evidence="$RUNNER_TEMP/adapter-compatibility"
+          mkdir -p "$evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" >"$archive"
+          unzip -q "$archive" -d "$evidence"
+          mapfile -t manifests < <(find "$evidence" -type f -name compatibility.json)
+          mapfile -t results < <(find "$evidence" -type f -name result.json)
+          if [ "${#manifests[@]}" -ne 1 ] || [ "${#results[@]}" -ne 1 ]; then
+            echo "::error::adapter artifact must contain exactly one compatibility.json and one result.json"
+            exit 1
+          fi
+          cmp adapter/compatibility.json "${manifests[0]}"
+          manifest_sha="$(sha256sum "${manifests[0]}" | awk '{print $1}')"
+          jq -e --arg manifest_sha "$manifest_sha" '
+            .schema == "adapter-compatibility-result-v1" and
+            .manifest_sha256 == $manifest_sha and
+            .mode == "ci" and
+            .registered == 15 and
+            .ready == 15 and
+            .complete == true and
+            (.pending | length) == 0 and
+            (.errors | length) == 0
+          ' "${results[0]}" >/dev/null || {
+            echo "::error::adapter compatibility artifact is incomplete"
+            jq '{registered, ready, complete, pending, errors}' "${results[0]}"
+            exit 1
+          }
+
+      - name: Revalidate fresh adapter evidence before tag
+        run: go run ./internal/adaptercompatcheck --mode release >/dev/null
+
       - name: Install external examples from candidate
         run: |
           install_root="$(mktemp -d "$RUNNER_TEMP/aiusage-examples.XXXXXX")"
@@ -175,6 +210,9 @@ jobs:
           gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$draft_assets"
           ./scripts/verify-release-assets.sh "$VERSION" "$draft_assets" "$CANDIDATE_SHA"
           echo "release_id=$release_id" >>"$GITHUB_OUTPUT"
+
+      - name: Revalidate fresh adapter evidence before publication
+        run: go run ./internal/adaptercompatcheck --mode release >/dev/null
 
       - name: Publish verified release
         id: publish

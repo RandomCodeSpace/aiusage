@@ -145,6 +145,8 @@ for required_artifact in coverage compatibility adapter-compatibility performanc
 	fi
 	if [[ "$required_artifact" == "coverage" ]]; then
 		coverage_artifact_id="$artifact_id"
+	elif [[ "$required_artifact" == "adapter-compatibility" ]]; then
+		adapter_artifact_id="$artifact_id"
 	fi
 done
 
@@ -154,6 +156,7 @@ if [[ -n "$output_file" ]]; then
 		echo "ci_run_id=${ci_run_id}"
 		echo "ci_run_url=${ci_run_url}"
 		echo "coverage_artifact_id=${coverage_artifact_id}"
+		echo "adapter_artifact_id=${adapter_artifact_id}"
 	} >>"$output_file"
 fi
 

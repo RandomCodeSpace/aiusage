@@ -1,0 +1,658 @@
+{
+  "schema": "adapter-compatibility-v1",
+  "entries": [
+    {
+      "tool": "claude-code",
+      "harness": "Claude Code",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "",
+      "surfaces": [
+        {
+          "name": "project transcript JSONL",
+          "origin": "constructed",
+          "fixture": "",
+          "package": "./adapter/claudecode",
+          "oracle": "TestCollectParsesMapsAndDedupes",
+          "discriminator": "assistant transcript record with message.usage",
+          "required_anchors": ["type", "message.id", "message.model", "message.usage"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": true,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/claudecode", "test": "TestStreamedTurnCountsCallsAcrossItsRecords"},
+        {"name": "cumulative-vs-event", "not_applicable": "Claude usage is attached to individual assistant response identities, not exported as a running counter."},
+        {"name": "assigned-not-accumulated", "not_applicable": "The transcript surface has no last-value session token column."}
+      ],
+      "gaps": [
+        "no sanitized live-origin fixture is committed",
+        "exact harness version and capture metadata are not recorded",
+        "the reasoning declaration lacks nonzero live or versioned-writer evidence",
+        "the bounded capture recipe and sanitization record are missing"
+      ]
+    },
+    {
+      "tool": "codex",
+      "harness": "OpenAI Codex CLI",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "",
+      "surfaces": [
+        {
+          "name": "session rollout JSONL",
+          "origin": "constructed",
+          "fixture": "",
+          "package": "./adapter/codex",
+          "oracle": "TestLastTokenUsageMapping",
+          "discriminator": "event_msg token_count payload",
+          "required_anchors": ["type", "payload.type", "payload.info.last_token_usage"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": true,
+            "turn_context": false,
+            "reasoning": true
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "Usage and call records expose no honest shared identity; calls are deliberately retained without attribution."},
+        {"name": "cumulative-vs-event", "package": "./adapter/codex", "test": "TestCumulativeDelta"},
+        {"name": "assigned-not-accumulated", "not_applicable": "The supported token_count surface reports cumulative snapshots rather than a last-value session column."}
+      ],
+      "gaps": [
+        "no sanitized live-origin fixture is committed",
+        "exact harness version and capture metadata are not recorded",
+        "ambient CODEX_HOME isolation needs a CI regression proof",
+        "the bounded capture recipe and sanitization record are missing"
+      ]
+    },
+    {
+      "tool": "copilot",
+      "harness": "GitHub Copilot CLI",
+      "version": "1.0.80",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Prompt, command, argument, path, and description text was replaced; counter values, record ordering, identifier shape, and cross-surface identity were retained.",
+      "surfaces": [
+        {
+          "name": "OTEL JSONL",
+          "origin": "live",
+          "fixture": "adapter/copilot/testdata/otel.jsonl",
+          "package": "./adapter/copilot",
+          "oracle": "TestDiscoverFindsEverySurface",
+          "discriminator": "OTLP resourceSpans or resourceMetrics envelope",
+          "required_anchors": ["resourceSpans", "scopeSpans", "spans", "attributes"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": true,
+            "turn_context": false,
+            "reasoning": false
+          }
+        },
+        {
+          "name": "session-store usage ledger",
+          "origin": "live",
+          "fixture": "adapter/copilot/testdata/usage.sql",
+          "package": "./adapter/copilot",
+          "oracle": "TestCostIsVendorPricedAndNeverExceedsTheVendorTotal",
+          "discriminator": "assistant_usage_events SQLite table",
+          "required_anchors": ["session_id", "model", "input_tokens", "output_tokens", "total_nano_aiu"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": true,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        },
+        {
+          "name": "session-state event stream",
+          "origin": "live",
+          "fixture": "adapter/copilot/testdata/session-state/11111111-2222-4333-8444-555555555555/events.jsonl",
+          "package": "./adapter/copilot",
+          "oracle": "TestSkillAndHookActivityFromSessionState",
+          "discriminator": "session event record with type and data",
+          "required_anchors": ["type", "data"],
+          "evidence": {
+            "nonzero_usage": false,
+            "nonzero_vendor_cost": true,
+            "joined_activity": false,
+            "unattributed_activity": true,
+            "turn_context": true,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "The three authoritative surfaces share an explicit session UUID and are reconciled by that identity."},
+        {"name": "cumulative-vs-event", "package": "./adapter/copilot", "test": "TestCumulativeMetricIsNotACall"},
+        {"name": "assigned-not-accumulated", "package": "./adapter/copilot", "test": "TestProviderTotalWins"}
+      ],
+      "gaps": [
+        "the provider-dependent reasoning relationship remains unsettled",
+        "exact UTC capture time and platform were not recorded",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "opencode",
+      "harness": "OpenCode",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "",
+      "surfaces": [
+        {
+          "name": "SQLite message database",
+          "origin": "constructed",
+          "fixture": "",
+          "package": "./adapter/opencode",
+          "oracle": "TestDBMappingAndProject",
+          "discriminator": "message table with JSON data column",
+          "required_anchors": ["message.id", "message.session_id", "message.data"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": true
+          }
+        },
+        {
+          "name": "JSON message tree fallback",
+          "origin": "constructed",
+          "fixture": "",
+          "package": "./adapter/opencode",
+          "oracle": "TestJSONTreeAndDBSameDedupKey",
+          "discriminator": "assistant message JSON with tokens",
+          "required_anchors": ["id", "sessionID", "modelID", "tokens"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": true
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/opencode", "test": "TestJSONTreeAndDBSameDedupKey"},
+        {"name": "cumulative-vs-event", "not_applicable": "OpenCode message token objects are event rows keyed by message identity, not running exports."},
+        {"name": "assigned-not-accumulated", "not_applicable": "The supported message surfaces contain no session last-value token column."}
+      ],
+      "gaps": [
+        "neither supported surface has a committed sanitized live-origin fixture",
+        "exact harness version and capture metadata are not recorded",
+        "the bounded capture recipe and sanitization record are missing"
+      ]
+    },
+    {
+      "tool": "hermes",
+      "harness": "Hermes Agent",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "",
+      "surfaces": [
+        {
+          "name": "session SQLite database",
+          "origin": "constructed",
+          "fixture": "",
+          "package": "./adapter/hermes",
+          "oracle": "TestCollectSingleSession",
+          "discriminator": "sessions table with cumulative token counters",
+          "required_anchors": ["id", "model", "input_tokens", "output_tokens", "reasoning_tokens"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": true
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "Hermes exposes one cumulative counter row per session identity."},
+        {"name": "cumulative-vs-event", "package": "./adapter/hermes", "test": "TestIncrementalGates"},
+        {"name": "assigned-not-accumulated", "not_applicable": "The supported sessions columns are declared cumulative counters, not last-call assignments."}
+      ],
+      "gaps": [
+        "no real Hermes installation or live-origin fixture is available",
+        "exact harness version and capture metadata are missing",
+        "the reasoning relationship is unverified",
+        "the bounded capture recipe and sanitization record are missing"
+      ]
+    },
+    {
+      "tool": "agy",
+      "harness": "Google Antigravity",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "",
+      "surfaces": [
+        {
+          "name": "conversation artifact JSON",
+          "origin": "constructed",
+          "fixture": "",
+          "package": "./adapter/agy",
+          "oracle": "TestParseGeminiShapedUsage",
+          "discriminator": "Gemini-shaped usage metadata",
+          "required_anchors": ["usageMetadata", "promptTokenCount", "candidatesTokenCount"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": true
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "The provisional parser treats each artifact as one aggregate snapshot identity."},
+        {"name": "cumulative-vs-event", "package": "./adapter/agy", "test": "TestParseGeminiShapedUsage"},
+        {"name": "assigned-not-accumulated", "not_applicable": "No authenticated authoritative surface has been observed, so this classification remains deliberately unresolved."}
+      ],
+      "gaps": [
+        "the current parser is explicitly provisional",
+        "discovered unauthenticated files are token-free",
+        "an authenticated nonzero authoritative usage surface has not been captured",
+        "exact harness version, capture metadata, recipe, and sanitization record are missing"
+      ]
+    },
+    {
+      "tool": "cline",
+      "harness": "Cline CLI",
+      "version": "3.0.55",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Conversation text was replaced while counters, timestamps, identifiers, model/provider values, record order, and whole-file rewrite behavior were retained.",
+      "surfaces": [
+        {
+          "name": "session messages JSON",
+          "origin": "live",
+          "fixture": "adapter/clinecli/testdata/live",
+          "package": "./adapter/clinecli",
+          "oracle": "TestLiveFixtureExactEvents",
+          "discriminator": "assistant message with metrics",
+          "required_anchors": ["id", "role", "ts", "modelInfo", "metrics"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/clinecli", "test": "TestDedupKeysSurviveTheWholeFileRewrite"},
+        {"name": "cumulative-vs-event", "package": "./adapter/clinecli", "test": "TestSessionAccumulatorIsNeverRead"},
+        {"name": "assigned-not-accumulated", "package": "./adapter/clinecli", "test": "TestActivityDivisorCountsOnlyEmittedRows"}
+      ],
+      "gaps": [
+        "exact UTC capture time and platform were not recorded",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "crush",
+      "harness": "Crush",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "The live zero-cost capture retains assigned counters and the zero vendor cost; content-bearing database columns are replaced by planted placeholders.",
+      "surfaces": [
+        {
+          "name": "project SQLite database",
+          "origin": "live",
+          "fixture": "adapter/crush/testdata/live.sql",
+          "package": "./adapter/crush",
+          "oracle": "TestLiveCaptureWithZeroCostEmitsNothing",
+          "discriminator": "sessions and messages tables written by Crush",
+          "required_anchors": ["sessions.id", "messages.session_id", "messages.cost"],
+          "evidence": {
+            "nonzero_usage": false,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/crush", "test": "TestSubAgentCostIsCountedOnce"},
+        {"name": "cumulative-vs-event", "package": "./adapter/crush", "test": "TestCostGrowthChargesOnlyTheDelta"},
+        {"name": "assigned-not-accumulated", "package": "./adapter/crush", "test": "TestAssignedTokenColumnsNeverBecomeUsage"}
+      ],
+      "gaps": [
+        "the only live capture has zero vendor cost and correctly emits no usage",
+        "a real nonzero vendor-cost event has not been captured",
+        "exact harness version and capture metadata are missing",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "dsh",
+      "harness": "DSH",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Prose, tool arguments, and results were replaced; structure, sequence numbers, timestamps, identities, model/provider values, and token counts were retained.",
+      "surfaces": [
+        {
+          "name": "session transcript JSONL and zstd frames",
+          "origin": "live",
+          "fixture": "adapter/dsh/testdata/session.jsonl",
+          "package": "./adapter/dsh",
+          "oracle": "TestFixtureSessionEmitsExactEvents",
+          "discriminator": "assistant/message records with usage",
+          "required_anchors": ["type", "seq", "time", "data.message.id", "data.usage"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/dsh", "test": "TestForkedSessionReplaysCollapseOntoTheParent"},
+        {"name": "cumulative-vs-event", "package": "./adapter/dsh", "test": "TestFixtureAuditPayloadKeepsTheCollapseEvidence"},
+        {"name": "assigned-not-accumulated", "not_applicable": "DSH accounting is attached to assistant message events; no supported session last-value token column is read."}
+      ],
+      "gaps": [
+        "exact harness version and capture metadata are not recorded",
+        "the live fixture contains no nonzero reasoning example",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "goose",
+      "harness": "Goose",
+      "version": "1.46.0",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Session names, prompts, replies, tool arguments, and tool output were replaced; live schema, real ledger counters, timestamps, models, stable IDs, and table relationships were retained.",
+      "surfaces": [
+        {
+          "name": "sessions SQLite database schema 16",
+          "origin": "live",
+          "fixture": "adapter/goose/testdata/sessions.sql",
+          "package": "./adapter/goose",
+          "oracle": "TestLedgerMappingIsExact",
+          "discriminator": "usage_ledger table at schema_version 16",
+          "required_anchors": ["usage_ledger.id", "usage_ledger.session_id", "usage_ledger.total_tokens", "usage_ledger.cost"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": true,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "Usage ledger and message activity retain separate stable row identities; the source exposes no honest join between them."},
+        {"name": "cumulative-vs-event", "package": "./adapter/goose", "test": "TestSessionAccumulatorsAreNeverSummed"},
+        {"name": "assigned-not-accumulated", "package": "./adapter/goose", "test": "TestQueriesReadNoSessionCounters"}
+      ],
+      "gaps": [
+        "exact UTC capture time and platform were not recorded",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "kimi-code",
+      "harness": "Kimi Code",
+      "version": "0.36.1 (protocol 1.5)",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Every content field was replaced; record order, record types, counters, timestamps, stable identities, and the real model/alias pair were retained.",
+      "surfaces": [
+        {
+          "name": "wire event JSONL",
+          "origin": "live",
+          "fixture": "adapter/kimicode/testdata/home",
+          "package": "./adapter/kimicode",
+          "oracle": "TestRealSessionEmitsExactlyOneEvent",
+          "discriminator": "usage.record paired with a preceding llm.request",
+          "required_anchors": ["type", "time", "usageScope", "usage", "modelAlias"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "A usage.record joins to the nearest prior llm.request in the same agent stream; the fixture pins that explicit ordering rule."},
+        {"name": "cumulative-vs-event", "package": "./adapter/kimicode", "test": "TestStepEndUsageIsNotCountedTwice"},
+        {"name": "assigned-not-accumulated", "package": "./adapter/kimicode", "test": "TestModelIsTheRequestsNotTheUsageRecordsAlias"}
+      ],
+      "gaps": [
+        "exact UTC capture time and platform were not recorded",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "pi",
+      "harness": "Pi Coding Agent",
+      "version": "0.84.2",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Every content field was replaced; structure, IDs, timestamps, model/provider names, counters, fork identity, and record order were retained.",
+      "surfaces": [
+        {
+          "name": "session JSONL",
+          "origin": "live",
+          "fixture": "adapter/pi/testdata/pi",
+          "package": "./adapter/pi",
+          "oracle": "TestPiFixtureEventsAreExact",
+          "discriminator": "session header followed by usage-bearing assistant entries",
+          "required_anchors": ["type=session", "id", "timestamp", "cwd", "message.usage"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/pi", "test": "TestForkedSessionCollapsesToTheSameKeys"},
+        {"name": "cumulative-vs-event", "not_applicable": "Pi usage is stored on individual message, compaction, and branch-summary entries rather than a running export."},
+        {"name": "assigned-not-accumulated", "package": "./adapter/pi", "test": "TestActivityDivisorIsCountedFromTheRecord"}
+      ],
+      "gaps": [
+        "exact UTC capture time and platform were not recorded",
+        "the live capture has no nonzero reasoning example and no recorded versioned-writer proof",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "openclaw",
+      "harness": "OpenClaw",
+      "version": "2026.7.1-2",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Every content field was replaced; structure, IDs, timestamps, model/provider names, counters, sidecar identity, and record order were retained.",
+      "surfaces": [
+        {
+          "name": "agent session JSONL",
+          "origin": "live",
+          "fixture": "adapter/pi/testdata/openclaw",
+          "package": "./adapter/pi",
+          "oracle": "TestOpenClawFixtureEventsAreExact",
+          "discriminator": "session header under the agent sessions root",
+          "required_anchors": ["type=session", "id", "timestamp", "cwd", "message.usage"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": true,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "The supported primary session stream exposes one stable entry identity per billable response."},
+        {"name": "cumulative-vs-event", "package": "./adapter/pi", "test": "TestTrajectorySidecarIsNeitherDiscoveredNorRead"},
+        {"name": "assigned-not-accumulated", "package": "./adapter/pi", "test": "TestTrajectorySidecarIsNeitherDiscoveredNorRead"}
+      ],
+      "gaps": [
+        "exact UTC capture time and platform were not recorded",
+        "the live capture has no nonzero reasoning example and no recorded versioned-writer proof",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "qwen-code",
+      "harness": "Qwen Code",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "Session and event UUIDs were replaced; counters, timestamps, model, auth type, source attribution, and record order were retained.",
+      "surfaces": [
+        {
+          "name": "monthly usage ledger JSONL",
+          "origin": "live",
+          "fixture": "adapter/qwencode/testdata/live",
+          "package": "./adapter/qwencode",
+          "oracle": "TestCollectLiveFixtureEmitsExactEvents",
+          "discriminator": "schemaVersion 1 usage record",
+          "required_anchors": ["schemaVersion", "id", "timestamp", "sessionId", "inputTokens", "outputTokens", "totalTokens"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": true,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "not_applicable": "Each ledger event has a provider-generated UUID that is the stable usage identity."},
+        {"name": "cumulative-vs-event", "not_applicable": "The live ledger records independent request events; the event-vs-total relationship is pinned by exact record tests."},
+        {"name": "assigned-not-accumulated", "package": "./adapter/qwencode", "test": "TestTokenMapping"}
+      ],
+      "gaps": [
+        "exact harness version and capture metadata are not recorded",
+        "the live fixture has no nonzero thoughtsTokens example",
+        "the bounded capture recipe was not recorded"
+      ]
+    },
+    {
+      "tool": "reasonix",
+      "harness": "Reasonix",
+      "version": "",
+      "captured_at": "",
+      "goos": "unrecorded",
+      "goarch": "unrecorded",
+      "status": "pending",
+      "recipe": [],
+      "sanitization": "The committed live records retain the writer's counters, nanosecond timestamps, model/provider identifiers, honesty flags, and ordering; no prompt or response content is present on the surface.",
+      "surfaces": [
+        {
+          "name": "daily stats ledger JSONL",
+          "origin": "live",
+          "fixture": "adapter/reasonix/testdata/live-2026-08-16.jsonl",
+          "package": "./adapter/reasonix",
+          "oracle": "TestCollectLiveLedgerExactEvents",
+          "discriminator": "daily request accounting record",
+          "required_anchors": ["ts", "model", "prompt", "completion", "total", "usage_source"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        }
+      ],
+      "traps": [
+        {"name": "split-identity", "package": "./adapter/reasonix", "test": "TestIdenticalCountersKeepDistinctKeys"},
+        {"name": "cumulative-vs-event", "package": "./adapter/reasonix", "test": "TestLiveLedgerRecordsAreEventsNotCumulative"},
+        {"name": "assigned-not-accumulated", "not_applicable": "The writer emits one immutable stats row per request and exposes no session last-value token column."}
+      ],
+      "gaps": [
+        "exact harness revision and capture metadata are not recorded",
+        "the live fixture has no nonzero reasoning example",
+        "the bounded capture recipe was not recorded"
+      ]
+    }
+  ]
+}

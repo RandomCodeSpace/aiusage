@@ -11,6 +11,14 @@ import (
 	"github.com/RandomCodeSpace/aiusage/model"
 )
 
+// TestMain prevents a developer's or CI runner's Codex installation from
+// outranking every fixture DiscoverConfig. Tests that exercise CODEX_HOME set
+// it explicitly after this package-level reset.
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv(HomeEnv)
+	os.Exit(m.Run())
+}
+
 // codexHome returns the default codex home (<home>/.codex) for a user home dir,
 // matching production discovery (CODEX_HOME unset => ~/.codex).
 func codexHome(home string) string { return filepath.Join(home, ".codex") }

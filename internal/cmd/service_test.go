@@ -406,6 +406,24 @@ func TestDiscoveryEnvCoversEveryAdapterVariable(t *testing.T) {
 	}
 }
 
+// TestAdapterCIIsolatesEveryDiscoveryVariable keeps the dedicated adapter job
+// from silently inheriting a runner or developer installation. The source scan
+// above owns the complete variable list; this check makes the workflow consume
+// that same contract even though GitHub Actions cannot call Go code for env
+// declarations.
+func TestAdapterCIIsolatesEveryDiscoveryVariable(t *testing.T) {
+	body, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("read CI workflow: %v", err)
+	}
+	const sentinel = ": /nonexistent/aiusage-adapter-contract"
+	for _, name := range discoveryEnv() {
+		if !strings.Contains(string(body), "\n      "+name+sentinel+"\n") {
+			t.Errorf("adapter CI does not neutralize %s with the impossible sentinel", name)
+		}
+	}
+}
+
 // adapterEnvLookups parses every non-test source file under adapter and
 // returns each environment variable it reads. Constants are resolved within
 // their own package, which is how the adapters spell these (a bare literal and

@@ -17,6 +17,13 @@ import (
 	"github.com/RandomCodeSpace/aiusage/model"
 )
 
+// TestMain keeps DSH_HOME from redirecting fixture discovery into an ambient
+// installation. The env-precedence test sets it explicitly after this reset.
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv(HomeEnv)
+	os.Exit(m.Run())
+}
+
 // The fixture is a REAL DSH session captured on this machine — a two-step turn
 // that called `bash` and `glob` — with every content field replaced by a
 // synthetic placeholder. Structure, sequence numbers, timestamps, identities and

@@ -15,6 +15,14 @@ import (
 	"github.com/RandomCodeSpace/aiusage/model"
 )
 
+// TestMain keeps an ambient Hermes installation from replacing the temporary
+// databases built by this package. The env-precedence test sets HERMES_HOME
+// explicitly after this reset.
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv(HomeEnv)
+	os.Exit(m.Run())
+}
+
 // makeStateDB creates a Hermes-shaped state.db with a sessions table and runs
 // the supplied seed callback to insert rows. It returns the db path.
 func makeStateDB(t *testing.T, home string, seed func(*sql.DB)) string {
