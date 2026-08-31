@@ -96,8 +96,8 @@ func TestChatSpanAndDuplicateInferenceSuppression(t *testing.T) {
 	if e.ReasoningTokens != 128 {
 		t.Errorf("ReasoningTokens = %d, want 128", e.ReasoningTokens)
 	}
-	// Provider-authoritative total = in+out+cacheC+cacheR+reasoning.
-	wantTotal := int64(19329 + 281 + 25 + 123 + 128)
+	// Copilot reports reasoning inside output, so it is not added again.
+	wantTotal := int64(19329 + 281 + 25 + 123)
 	if e.TotalTokens != wantTotal {
 		t.Errorf("TotalTokens = %d, want %d", e.TotalTokens, wantTotal)
 	}
@@ -121,6 +121,40 @@ func TestChatSpanAndDuplicateInferenceSuppression(t *testing.T) {
 	}
 	if got := e.EventTime.UTC().Format("2006-01-02T15:04:05.000Z"); got != "2026-04-11T19:04:24.967Z" {
 		t.Errorf("EventTime = %s, want 2026-04-11T19:04:24.967Z", got)
+	}
+}
+
+// TestLiveReasoningIsInsideOutput replays a sanitized Copilot CLI 1.0.82 span.
+// The exporter omits total_tokens, while its response usage states
+// total=input+output and reports nonzero reasoning inside output. This pins the
+// fallback that would otherwise inflate the call by reasoning a second time.
+func TestLiveReasoningIsInsideOutput(t *testing.T) {
+	path := filepath.Join("testdata", "otel-1.0.82.jsonl")
+	obs, err := New().Collect(context.Background(), adapter.Source{
+		Tool: model.ToolCopilot, Class: model.EventLevel, Path: path,
+	})
+	if err != nil {
+		t.Fatalf("collect live fixture: %v", err)
+	}
+	if len(obs.Events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(obs.Events), obs.Events)
+	}
+	e := obs.Events[0]
+	if e.Model != "mai-code-1.1-flash" || e.Provider != model.ProviderGitHub {
+		t.Errorf("identity = model %q provider %q", e.Model, e.Provider)
+	}
+	if e.InputTokens != 10099 || e.CacheReadTokens != 5888 || e.OutputTokens != 77 || e.ReasoningTokens != 64 {
+		t.Errorf("usage = in %d cache %d out %d reasoning %d",
+			e.InputTokens, e.CacheReadTokens, e.OutputTokens, e.ReasoningTokens)
+	}
+	if e.TotalTokens != 16064 || e.TotalTokens != e.InputTokens+e.CacheReadTokens+e.OutputTokens {
+		t.Errorf("total = %d, want 16064 without adding reasoning twice", e.TotalTokens)
+	}
+	if e.ReasoningTokens > e.OutputTokens {
+		t.Errorf("reasoning = %d exceeds output = %d", e.ReasoningTokens, e.OutputTokens)
+	}
+	if cost, ok := e.Cost(); !ok || cost != 2229 || e.PriceSource != PriceSourceAIU {
+		t.Errorf("vendor cost = %d present %t source %q", cost, ok, e.PriceSource)
 	}
 }
 

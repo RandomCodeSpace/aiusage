@@ -37,6 +37,7 @@ var sourceFarmTools = []string{
 
 var sourceFarmFixturePaths = []string{
 	"adapter/agy/testdata/live-2026-08-31.jsonl",
+	"adapter/copilot/testdata/otel-1.0.82.jsonl",
 	"adapter/copilot/testdata/otel.jsonl",
 	"adapter/copilot/testdata/schema.sql",
 	"adapter/copilot/testdata/secrets.sql",
@@ -248,6 +249,9 @@ func buildNonCodexFarm(root, fixtures string) error {
 
 	copilotRoot := path(model.ToolCopilot, ".copilot")
 	if err := copyFarmFile(fixture("adapter/copilot/testdata/otel.jsonl"), filepath.Join(copilotRoot, "otel", "otel.jsonl")); err != nil {
+		return err
+	}
+	if err := copyFarmFile(fixture("adapter/copilot/testdata/otel-1.0.82.jsonl"), filepath.Join(copilotRoot, "otel", "otel-1.0.82.jsonl")); err != nil {
 		return err
 	}
 	if err := copyFarmTree(fixture("adapter/copilot/testdata/session-state"), filepath.Join(copilotRoot, "session-state")); err != nil {

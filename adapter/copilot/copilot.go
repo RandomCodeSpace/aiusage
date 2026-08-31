@@ -656,19 +656,14 @@ func toCandidate(rec *otelRecord, index int, fallbackTS time.Time, traceModels, 
 	output, reasoning = tokenutil.ApplyTotalFallback(input, output, cacheCreation, cacheRead, reasoning, totalAttr)
 
 	// Authoritative total: gen_ai.usage.total_tokens when the exporter reported
-	// one. Copilot proxies several vendors and for Anthropic-backed models the
-	// reasoning attribute is already inside output_tokens, so recomputing the
-	// sum would inflate the exporter's own total and bill those tokens twice.
-	// The component sum is used only when no total was reported — the same rule
-	// codex and gemini already follow.
-	//
-	// UNVERIFIED: no local Copilot OTEL data exists to check the reasoning rule
-	// per backing provider (issue #28). model.ReasoningModeFor now agrees with
-	// this handling and treats Copilot reasoning as a subset of output, so the
-	// attribute is never billed twice; revisit both together.
+	// one. Otherwise use the component total, excluding reasoning because it is
+	// already inside output_tokens. Copilot 1.0.82 live OTEL proves this directly:
+	// input 15,987 + output 77 = response total 16,064 while reasoning is 64.
+	// After splitting cache-read out of input, the same total is
+	// 10,099 + 5,888 + 77. Adding reasoning again would overstate the call.
 	total := totalAttr
 	if total <= 0 {
-		total = input + output + cacheCreation + cacheRead + reasoning
+		total = input + output + cacheCreation + cacheRead
 	}
 	if total == 0 {
 		return nil

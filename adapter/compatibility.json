@@ -86,13 +86,17 @@
     {
       "tool": "copilot",
       "harness": "GitHub Copilot CLI",
-      "version": "1.0.80",
-      "captured_at": "",
-      "goos": "unrecorded",
-      "goarch": "unrecorded",
-      "status": "pending",
-      "recipe": [],
-      "sanitization": "Prompt, command, argument, path, and description text was replaced; counter values, record ordering, identifier shape, and cross-surface identity were retained.",
+      "version": "1.0.82",
+      "captured_at": "2026-08-31T14:55:07Z",
+      "goos": "linux",
+      "goarch": "amd64",
+      "status": "ready",
+      "recipe": [
+        "copilot --version",
+        "Create an empty temporary working directory and keep OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false.",
+        "COPILOT_OTEL_FILE_EXPORTER_PATH='<temporary capture>/otel.jsonl' COPILOT_OTEL_EXPORTER_TYPE=file COPILOT_OTEL_ENABLED=true OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false copilot -C '<empty temporary directory>' --prompt '<bounded arithmetic prompt that explicitly forbids tools>' --mode plan --allow-all-tools --available-tools= --disable-builtin-mcps --no-custom-instructions --no-remote --no-remote-export --max-ai-credits 30 --output-format json --usage-output-file '<temporary capture>/usage.json'"
+      ],
+      "sanitization": "Content capture was disabled and the bounded turn invoked no tools. The focused 1.0.82 fixture keeps the flat span shape, model, timestamps, token counters, and nano-AIU valuation; trace, span, response, and conversation identifiers were replaced, and tool definitions plus operational request metadata were removed. The earlier multi-surface fixture retains its existing content replacements and cross-surface identity shape.",
       "surfaces": [
         {
           "name": "OTEL JSONL",
@@ -109,6 +113,23 @@
             "unattributed_activity": true,
             "turn_context": false,
             "reasoning": false
+          }
+        },
+        {
+          "name": "OTEL JSONL reasoning span",
+          "origin": "live",
+          "fixture": "adapter/copilot/testdata/otel-1.0.82.jsonl",
+          "package": "./adapter/copilot",
+          "oracle": "TestLiveReasoningIsInsideOutput",
+          "discriminator": "flat chat span with GenAI usage attributes",
+          "required_anchors": ["type", "traceId", "spanId", "gen_ai.operation.name", "gen_ai.response.model", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning.output_tokens", "github.copilot.nano_aiu"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": true,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": true
           }
         },
         {
@@ -147,15 +168,11 @@
         }
       ],
       "traps": [
-        {"name": "split-identity", "not_applicable": "The three authoritative surfaces share an explicit session UUID and are reconciled by that identity."},
+        {"name": "split-identity", "not_applicable": "The OTEL, session-store, and session-state surfaces share an explicit session UUID and are reconciled by that identity."},
         {"name": "cumulative-vs-event", "package": "./adapter/copilot", "test": "TestCumulativeMetricIsNotACall"},
         {"name": "assigned-not-accumulated", "package": "./adapter/copilot", "test": "TestProviderTotalWins"}
       ],
-      "gaps": [
-        "the provider-dependent reasoning relationship remains unsettled",
-        "exact UTC capture time and platform were not recorded",
-        "the bounded capture recipe was not recorded"
-      ]
+      "gaps": []
     },
     {
       "tool": "opencode",

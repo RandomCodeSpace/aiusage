@@ -124,9 +124,11 @@ const (
 //     provider total is input + output + thoughts.
 //   - agy 1.1.22 stream JSON: thinking_tokens is contained in output_tokens;
 //     total_tokens is exactly input_tokens + output_tokens.
+//   - copilot 1.0.82 OTEL: response usage reports nonzero reasoning while
+//     total = input + output, proving reasoning is contained in output.
 //
-// UNVERIFIED — no local data for either tool (issue #28). These encode the
-// best available evidence and must be re-checked once data exists:
+// UNVERIFIED — no local data for Hermes (issue #28). This encodes the best
+// available evidence and must be re-checked once data exists:
 //   - hermes: sessions carry reasoning_tokens in their own column and the
 //     adapter keeps it out of the authoritative total, which only holds if the
 //     count is already inside output_tokens.
@@ -149,7 +151,7 @@ var reasoningModes = map[string]ReasoningMode{
 	ToolGemini:     ReasoningAdditive,
 	ToolAgy:        ReasoningSubset,
 	ToolHermes:     ReasoningSubset, // unverified
-	ToolCopilot:    ReasoningSubset, // unverified
+	ToolCopilot:    ReasoningSubset,
 	// pi/openclaw share one session format, whose types state that output
 	// already includes reasoning; reasonix labels the field a subset of
 	// completion; dsh reports reasoning as a subdivision of output.

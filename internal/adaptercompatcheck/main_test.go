@@ -34,7 +34,7 @@ func TestMainWritesMachineReadableCIResult(t *testing.T) {
 		"--root", root,
 		"--manifest", "adapter/compatibility.json",
 		"--mode", "ci",
-		"--now", "2026-08-31T07:00:00Z",
+		"--now", "2026-08-31T16:00:00Z",
 		"--out", outRel,
 	}
 
@@ -60,15 +60,15 @@ func TestRepositoryManifestCoversRegistryWithoutPretendingPendingEvidenceIsReady
 		t.Fatalf("read manifest: %v", err)
 	}
 
-	got := validate(root, m, raw, "ci", mustTime(t, "2026-08-31T07:00:00Z"))
+	got := validate(root, m, raw, "ci", mustTime(t, "2026-08-31T16:00:00Z"))
 	if len(got.Errors) != 0 {
 		t.Fatalf("CI validation errors: %v", got.Errors)
 	}
 	if got.Registered != 15 || len(m.Entries) != got.Registered {
 		t.Fatalf("registered/manifest entries = %d/%d, want 15/15", got.Registered, len(m.Entries))
 	}
-	if got.Ready != 0 || len(got.Pending) != 15 || got.Complete {
-		t.Fatalf("ready/pending/complete = %d/%d/%v, want 0/15/false",
+	if got.Ready != 2 || len(got.Pending) != 13 || got.Complete {
+		t.Fatalf("ready/pending/complete = %d/%d/%v, want 2/13/false",
 			got.Ready, len(got.Pending), got.Complete)
 	}
 
@@ -85,7 +85,7 @@ func TestReleaseModeFailsClosedOnEveryPendingGap(t *testing.T) {
 		t.Fatalf("read manifest: %v", err)
 	}
 
-	got := validate(root, m, raw, "release", mustTime(t, "2026-08-31T07:00:00Z"))
+	got := validate(root, m, raw, "release", mustTime(t, "2026-08-31T16:00:00Z"))
 	if len(got.Errors) == 0 || got.Complete {
 		t.Fatalf("release accepted pending compatibility evidence: complete=%v errors=%v",
 			got.Complete, got.Errors)
@@ -103,7 +103,7 @@ func TestManifestMustCoverEachRegisteredToolExactlyOnce(t *testing.T) {
 	}
 
 	m.Entries = append(m.Entries[:len(m.Entries)-1], m.Entries[0])
-	got := validate(root, m, raw, "ci", mustTime(t, "2026-08-31T07:00:00Z"))
+	got := validate(root, m, raw, "ci", mustTime(t, "2026-08-31T16:00:00Z"))
 	if !containsSubstring(got.Errors, "duplicate tool entry") {
 		t.Fatalf("duplicate entry was accepted: %v", got.Errors)
 	}
