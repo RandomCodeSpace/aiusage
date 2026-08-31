@@ -121,6 +121,22 @@ func testLaunchdOptions(t *testing.T) Options {
 	}
 }
 
+func writeTestLaunchAgent(t *testing.T, m *Manager) string {
+	t.Helper()
+	if err := os.MkdirAll(m.UnitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := renderLaunchAgent(testLaunchdOptions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(m.UnitDir, CollectPlist)
+	if err := os.WriteFile(path, []byte(body), unitFileMode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRenderedLaunchAgentCarriesLifecycleContract(t *testing.T) {
 	o := testLaunchdOptions(t)
 	body, err := renderLaunchAgent(o)
@@ -382,4 +398,182 @@ func TestLaunchdUnavailableGUIHasNoFilesystemSideEffect(t *testing.T) {
 	if fileExists(m.UnitDir) {
 		t.Fatal("availability probe created the LaunchAgents directory")
 	}
+}
+
+func TestLaunchdLifecycleFailuresRemainVisible(t *testing.T) {
+	t.Run("restart unknown", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.failOnce["print"] = 1
+		if _, err := m.Restart(t.Context()); err == nil {
+			t.Fatal("unknown launchd state was reported as a successful restart")
+		}
+	})
+
+	t.Run("restart refused", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.loaded, f.running = true, true
+		f.failOnce["kickstart"] = 1
+		if _, err := m.Restart(t.Context()); err == nil {
+			t.Fatal("refused launchd restart was reported as successful")
+		}
+	})
+
+	t.Run("stop unknown", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.failOnce["print"] = 1
+		if _, err := m.StopCollection(t.Context()); err == nil {
+			t.Fatal("unknown launchd state was reported as a successful stop")
+		}
+	})
+
+	t.Run("stop refused", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.loaded, f.running = true, true
+		f.failOnce["bootout"] = 1
+		if _, err := m.StopCollection(t.Context()); err == nil {
+			t.Fatal("refused launchd stop was reported as successful")
+		}
+	})
+
+	t.Run("start missing", func(t *testing.T) {
+		m, _ := testLaunchdManager(t)
+		if err := m.StartCollection(t.Context()); err == nil {
+			t.Fatal("missing LaunchAgent was reported as started")
+		}
+	})
+
+	t.Run("start unknown", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.failOnce["print"] = 1
+		if err := m.StartCollection(t.Context()); err == nil {
+			t.Fatal("unknown launchd state was reported as a successful start")
+		}
+	})
+
+	t.Run("load refused", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.failOnce["bootstrap"] = 1
+		if err := m.StartCollection(t.Context()); err == nil {
+			t.Fatal("refused launchd load was reported as a successful start")
+		}
+	})
+
+	t.Run("start refused", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.loaded = true
+		f.failOnce["kickstart"] = 1
+		if err := m.StartCollection(t.Context()); err == nil {
+			t.Fatal("refused launchd start was reported as successful")
+		}
+	})
+
+	t.Run("remove unknown", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.failOnce["print"] = 1
+		if _, err := m.Remove(t.Context(), false); err == nil {
+			t.Fatal("unknown launchd state was reported as a successful removal")
+		}
+	})
+
+	t.Run("remove refused", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		writeTestLaunchAgent(t, m)
+		f.loaded = true
+		f.failOnce["bootout"] = 1
+		if _, err := m.Remove(t.Context(), false); err == nil {
+			t.Fatal("refused launchd bootout was reported as a successful removal")
+		}
+	})
+}
+
+func TestLaunchdHelpersReportBoundaries(t *testing.T) {
+	t.Run("render requirements", func(t *testing.T) {
+		o := testLaunchdOptions(t)
+		o.WorkingDir = ""
+		if _, err := renderLaunchAgent(o); err == nil {
+			t.Fatal("empty working directory was accepted")
+		}
+		o = testLaunchdOptions(t)
+		o.LogPath = ""
+		if _, err := renderLaunchAgent(o); err == nil {
+			t.Fatal("empty log path was accepted")
+		}
+	})
+
+	t.Run("boolean false", func(t *testing.T) {
+		var b strings.Builder
+		plistBool(&b, "Disabled", false)
+		if got := b.String(); !strings.Contains(got, "<false/>") {
+			t.Fatalf("false plist value = %q", got)
+		}
+	})
+
+	t.Run("platform identity", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if got := DefaultLaunchAgentDir(); got != filepath.Join(home, "Library", "LaunchAgents") {
+			t.Fatalf("LaunchAgent directory = %q", got)
+		}
+		if got := (&Manager{GOOS: "darwin"}).Kind(); got != "launchd" {
+			t.Fatalf("Darwin manager = %q", got)
+		}
+		if got := (&Manager{GOOS: "linux"}).Kind(); got != "systemd" {
+			t.Fatalf("Linux manager = %q", got)
+		}
+		if (&Manager{GOOS: "windows", Run: newFakeLaunchd().run}).Available(t.Context()) {
+			t.Fatal("unsupported platform reported a native manager")
+		}
+	})
+
+	t.Run("log path errors", func(t *testing.T) {
+		if got := launchdLogPath(filepath.Join(t.TempDir(), "missing.plist")); got != "" {
+			t.Fatalf("missing plist log path = %q", got)
+		}
+		path := filepath.Join(t.TempDir(), "broken.plist")
+		if err := os.WriteFile(path, []byte("<plist>"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := launchdLogPath(path); got != "" {
+			t.Fatalf("malformed plist log path = %q", got)
+		}
+	})
+
+	t.Run("manager answers", func(t *testing.T) {
+		m, f := testLaunchdManager(t)
+		f.failOnce["print-disabled"] = 1
+		if _, known := m.launchdDisabled(t.Context()); known {
+			t.Fatal("failed persistence query reported a known answer")
+		}
+
+		m.Run = func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("unrelated label => true"), nil
+		}
+		if disabled, known := m.launchdDisabled(t.Context()); disabled || !known {
+			t.Fatalf("missing label = disabled %t, known %t", disabled, known)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		m.Run = func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("transient failure"), errors.New("exit status 1")
+		}
+		if loaded, running, known := m.launchdState(ctx); loaded || running || known {
+			t.Fatalf("cancelled state = loaded %t, running %t, known %t", loaded, running, known)
+		}
+	})
+
+	t.Run("atomic restore needs a parent", func(t *testing.T) {
+		err := writeAtomicFile(filepath.Join(t.TempDir(), "missing", "agent.plist"), []byte("body"), 0o600)
+		if err == nil {
+			t.Fatal("atomic restore unexpectedly created its missing parent")
+		}
+	})
 }
