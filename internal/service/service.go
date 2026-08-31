@@ -1,12 +1,12 @@
-// Package service installs and supervises aiusage as a systemd USER unit, so
-// that a machine where the user has no root still gets a collector that starts
-// on login, restarts after a crash and survives logout.
+// Package service installs and supervises aiusage through the platform's
+// rootless per-user manager: a systemd user unit on Linux or a LaunchAgent on
+// macOS. Both run the same collection command and retain detached collection as
+// the caller's compatibility fallback.
 //
 // It owns detection, unit rendering, install, enable/start, restart, removal
 // and status, and nothing else: internal/cmd wires it into the CLI. The
-// dependency list is deliberately short (the standard library, and nothing
-// else) because supervision is a fact about the machine, not about what aiusage
-// collects or reports.
+// dependency list is deliberately short because supervision is a fact about
+// the machine, not about what aiusage collects or reports.
 //
 // Three properties matter more than the rest:
 //
@@ -41,6 +41,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -71,19 +72,31 @@ const unitFileMode = 0o644
 // systemd, and the production path uses execRunner.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// Manager drives the systemd user manager for this user.
+// Manager drives the native per-user manager for this user.
 //
-// The zero value is the production manager: the real systemctl, the XDG unit
-// directory and the default timeout.
+// The zero value is the production manager: the runtime platform, real manager
+// commands, native configuration directory and default timeout.
 type Manager struct {
-	// UnitDir overrides where unit files are written. Empty means DefaultUnitDir.
+	// UnitDir overrides where native service files are written. Empty selects
+	// DefaultUnitDir on Linux or DefaultLaunchAgentDir on macOS.
 	UnitDir string
 	// Run overrides how commands are executed. Empty means the real systemctl
 	// and loginctl.
 	Run Runner
 	// Timeout overrides the per-command timeout. Zero means DefaultTimeout.
 	Timeout time.Duration
+	// GOOS overrides runtime.GOOS. It exists so the Darwin backend can be
+	// exercised by focused tests without touching a developer's login services.
+	// Production callers leave it empty.
+	GOOS string
 }
+
+const (
+	PersistenceLingerConfirmed  = "linger confirmed"
+	PersistenceLingerNotEnabled = "linger not enabled"
+	PersistenceLingerUnknown    = "linger unknown"
+	PersistenceGUILogin         = "at GUI login"
+)
 
 // UnitStatus is one unit's supervision state, as doctor reports it.
 type UnitStatus struct {
@@ -96,6 +109,13 @@ type UnitStatus struct {
 	Enabled bool
 	// Active reports that it is running now.
 	Active bool
+	// Loaded distinguishes a registered launchd job from a plist that merely
+	// exists. It is unused by systemd, whose active/enabled states already name
+	// the manager facts users need.
+	Loaded bool
+	// Persistence states the platform boundary: one of the linger states above
+	// on Linux, or at-GUI-login for a macOS LaunchAgent.
+	Persistence string
 	// StateKnown reports that Enabled and Active are answers rather than the
 	// zero value. The service manager is asked under a deadline, and a caller
 	// that printed "inactive, not enabled" about a unit it never got a word
@@ -103,6 +123,14 @@ type UnitStatus struct {
 	// not installed: nothing is asked about a unit with no file, and its
 	// absence is the whole answer.
 	StateKnown bool
+}
+
+// Kind names the native per-user supervisor selected for this process.
+func (m *Manager) Kind() string {
+	if m.goos() == "darwin" {
+		return "launchd"
+	}
+	return "systemd"
 }
 
 // Result is the account of one operation: plain lines to print, whether
@@ -182,6 +210,12 @@ func (m *Manager) Available(ctx context.Context) bool {
 }
 
 func (m *Manager) detect(ctx context.Context) bool {
+	if m.goos() == "darwin" {
+		return m.detectLaunchd(ctx)
+	}
+	if m.goos() != "linux" {
+		return false
+	}
 	// LookPath consults the real PATH, which an injected runner has replaced;
 	// with one in play the runner is the whole world and gets the only say.
 	if m.Run == nil {
@@ -197,31 +231,57 @@ func (m *Manager) detect(ctx context.Context) bool {
 // safe to repeat: an existing unit file is left exactly as it is unless o.Force
 // says otherwise, and an already enabled or already running unit is not touched.
 func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
+	if m.goos() == "darwin" {
+		return m.installLaunchd(ctx, o)
+	}
 	var r Result
 	if o.Exec == "" {
 		return r, errors.New("install: the aiusage binary has no resolvable path")
 	}
 
 	dir := m.unitDir()
+	dirExisted := fileExists(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return r, fmt.Errorf("create unit directory %s: %w", dir, err)
 	}
 	r.addf("unit directory: %s", dir)
 
 	u := unitPlan{name: CollectUnit}
+	path := filepath.Join(dir, u.name)
+	existed := fileExists(path)
+	wasEnabled := m.isEnabled(ctx, u.name)
+	wasActive := m.isActive(ctx, u.name)
+	var original []byte
+	originalMode := os.FileMode(unitFileMode)
+	if existed && o.Force {
+		var err error
+		original, err = os.ReadFile(path)
+		if err != nil {
+			return r, fmt.Errorf("read %s before replacement: %w", path, err)
+		}
+		if fi, statErr := os.Stat(path); statErr == nil {
+			originalMode = fi.Mode().Perm()
+		}
+	}
 	wrote, rewritten, err := m.writeUnit(dir, u.name, renderCollect(o), o.Force, &r)
 	if err != nil {
+		if !dirExisted {
+			_ = os.Remove(dir)
+		}
 		return r, err
 	}
 	u.rewritten = rewritten
 	if wrote {
 		if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
-			return r, fmt.Errorf("systemctl --user daemon-reload: %w", err)
+			cause := fmt.Errorf("systemctl --user daemon-reload: %w", err)
+			return r, m.withSystemdRollback(ctx, cause, path, wrote, existed, original, originalMode,
+				wasEnabled, wasActive, dir, dirExisted)
 		}
 	}
 
 	if err := m.activate(ctx, u, &r); err != nil {
-		return r, err
+		return r, m.withSystemdRollback(ctx, err, path, wrote, existed, original, originalMode,
+			wasEnabled, wasActive, dir, dirExisted)
 	}
 	r.Collecting = true
 
@@ -239,6 +299,9 @@ func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
 // was the thing restarted, so a caller that got false knows supervision did not
 // handle the mismatch and it still owns the problem.
 func (m *Manager) Restart(ctx context.Context) (Result, error) {
+	if m.goos() == "darwin" {
+		return m.restartLaunchd(ctx)
+	}
 	var r Result
 	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) || !m.isActive(ctx, CollectUnit) {
 		return r, nil
@@ -255,6 +318,9 @@ func (m *Manager) Restart(ctx context.Context) (Result, error) {
 // it. The returned bool records whether this call stopped a running unit so a
 // database maintenance command can restore exactly the prior lifecycle state.
 func (m *Manager) StopCollection(ctx context.Context) (bool, error) {
+	if m.goos() == "darwin" {
+		return m.stopLaunchdCollection(ctx)
+	}
 	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) {
 		return false, nil
 	}
@@ -279,6 +345,9 @@ func (m *Manager) StopCollection(ctx context.Context) (bool, error) {
 // StartCollection starts an installed collection unit that maintenance stopped.
 // It does not enable or install anything.
 func (m *Manager) StartCollection(ctx context.Context) error {
+	if m.goos() == "darwin" {
+		return m.startLaunchdCollection(ctx)
+	}
 	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) {
 		return fmt.Errorf("start %s: unit is not installed", CollectUnit)
 	}
@@ -302,6 +371,9 @@ func (m *Manager) StartCollection(ctx context.Context) error {
 // Linger is left alone. It is a property of the user, not of this unit, and
 // other services may be relying on it.
 func (m *Manager) Remove(ctx context.Context, force bool) (Result, error) {
+	if m.goos() == "darwin" {
+		return m.removeLaunchd(ctx, force)
+	}
 	var r Result
 	name := CollectUnit
 	path := filepath.Join(m.unitDir(), name)
@@ -353,11 +425,15 @@ func (m *Manager) Remove(ctx context.Context, force bool) (Result, error) {
 // It returns a slice because supervision is a set of units, whatever this
 // version happens to install; a caller renders whatever it is handed.
 func (m *Manager) Status(ctx context.Context) []UnitStatus {
+	if m.goos() == "darwin" {
+		return m.statusLaunchd(ctx)
+	}
 	st := UnitStatus{Name: CollectUnit, Installed: fileExists(filepath.Join(m.unitDir(), CollectUnit))}
 	if st.Installed && ctx.Err() == nil {
 		st.Enabled = m.isEnabled(ctx, CollectUnit)
 		st.Active = m.isActive(ctx, CollectUnit)
 		st.StateKnown = ctx.Err() == nil
+		st.Persistence = m.lingerState(ctx)
 	}
 	return []UnitStatus{st}
 }
@@ -376,7 +452,7 @@ func (m *Manager) writeUnit(dir, name, body string, force bool, r *Result) (wrot
 		r.addf("%s already present, left as it is", name)
 		return false, false, nil
 	}
-	if err := os.WriteFile(path, []byte(body), unitFileMode); err != nil {
+	if err := writeAtomicFile(path, []byte(body), unitFileMode); err != nil {
 		return false, false, fmt.Errorf("write %s: %w", path, err)
 	}
 	if existed {
@@ -385,6 +461,61 @@ func (m *Manager) writeUnit(dir, name, body string, force bool, r *Result) (wrot
 		r.change("wrote %s", path)
 	}
 	return true, existed, nil
+}
+
+func (m *Manager) withSystemdRollback(parent context.Context, cause error, path string, wrote, existed bool,
+	original []byte, originalMode os.FileMode, wasEnabled, wasActive bool, dir string, dirExisted bool,
+) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), m.timeout())
+	defer cancel()
+	var failures []string
+	if wrote {
+		if existed {
+			if err := writeAtomicFile(path, original, originalMode); err != nil {
+				failures = append(failures, "restore prior unit: "+err.Error())
+			}
+		} else if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			failures = append(failures, "remove new unit: "+err.Error())
+		}
+		if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
+			failures = append(failures, "reload restored units: "+err.Error())
+		}
+	}
+
+	activeNow := m.isActive(ctx, CollectUnit)
+	switch {
+	case wasActive && wrote:
+		verb := "restart"
+		if !activeNow {
+			verb = "start"
+		}
+		if _, err := m.systemctl(ctx, verb, CollectUnit); err != nil {
+			failures = append(failures, "restore running state: "+err.Error())
+		}
+	case !wasActive && activeNow:
+		if _, err := m.systemctl(ctx, "stop", CollectUnit); err != nil {
+			failures = append(failures, "restore stopped state: "+err.Error())
+		}
+	}
+
+	enabledNow := m.isEnabled(ctx, CollectUnit)
+	switch {
+	case wasEnabled && !enabledNow:
+		if _, err := m.systemctl(ctx, "enable", CollectUnit); err != nil {
+			failures = append(failures, "restore enabled state: "+err.Error())
+		}
+	case !wasEnabled && enabledNow:
+		if _, err := m.systemctl(ctx, "disable", CollectUnit); err != nil {
+			failures = append(failures, "restore disabled state: "+err.Error())
+		}
+	}
+	if !dirExisted {
+		_ = os.Remove(dir)
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%w; rollback failed: %s", cause, strings.Join(failures, "; "))
+	}
+	return cause
 }
 
 // activate brings one unit to the state Install promises: enabled, so it starts
@@ -449,26 +580,49 @@ func (m *Manager) activate(ctx context.Context, u unitPlan, r *Result) error {
 // reported and the install continues.
 func (m *Manager) enableLinger(ctx context.Context, r *Result) {
 	name := currentUser()
-	if name != "" && m.lingerEnabled(ctx, name) {
-		r.addf("linger already enabled for %s", name)
+	before := m.lingerStateFor(ctx, name)
+	if before == PersistenceLingerConfirmed {
+		r.addf("persistence: %s (starts at boot and survives logout)", PersistenceLingerConfirmed)
 		return
 	}
 	if _, err := m.loginctl(ctx, "enable-linger"); err != nil {
-		r.addf("could not enable linger (%v); the units stop when your last session ends", err)
+		state := before
+		if state != PersistenceLingerNotEnabled {
+			state = PersistenceLingerUnknown
+		}
+		r.addf("persistence: %s (%v); the service may stop after the last logout and starts again at login", state, err)
 		if name != "" {
 			r.addf("an administrator can fix that with: loginctl enable-linger %s", name)
 		}
 		return
 	}
-	r.change("enabled linger: the units keep running after you log out")
+	r.change("persistence: %s (starts at boot and survives logout)", PersistenceLingerConfirmed)
 }
 
-// lingerEnabled reports whether logind already keeps this user's units alive.
+func (m *Manager) lingerState(ctx context.Context) string {
+	return m.lingerStateFor(ctx, currentUser())
+}
+
+// lingerStateFor reports the three factual states doctor and setup distinguish.
 // Asking first keeps a repeated install from putting a polkit prompt in front
 // of a user who settled this the first time.
-func (m *Manager) lingerEnabled(ctx context.Context, name string) bool {
+func (m *Manager) lingerStateFor(ctx context.Context, name string) string {
+	if name == "" {
+		return PersistenceLingerUnknown
+	}
 	out, err := m.loginctl(ctx, "show-user", name, "--property=Linger")
-	return err == nil && strings.Contains(strings.ToLower(out), "=yes")
+	if err != nil {
+		return PersistenceLingerUnknown
+	}
+	lower := strings.ToLower(out)
+	switch {
+	case strings.Contains(lower, "=yes"):
+		return PersistenceLingerConfirmed
+	case strings.Contains(lower, "=no"):
+		return PersistenceLingerNotEnabled
+	default:
+		return PersistenceLingerUnknown
+	}
 }
 
 // isEnabled reports whether the unit PERSISTENTLY starts with the user session.
@@ -556,6 +710,9 @@ func (m *Manager) unitDir() string {
 	if m.UnitDir != "" {
 		return m.UnitDir
 	}
+	if m.goos() == "darwin" {
+		return DefaultLaunchAgentDir()
+	}
 	return DefaultUnitDir()
 }
 
@@ -571,6 +728,13 @@ func (m *Manager) timeout() time.Duration {
 		return m.Timeout
 	}
 	return DefaultTimeout
+}
+
+func (m *Manager) goos() string {
+	if m.GOOS != "" {
+		return m.GOOS
+	}
+	return runtime.GOOS
 }
 
 // execRunner is the production Runner.

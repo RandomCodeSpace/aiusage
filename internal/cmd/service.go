@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 )
 
-// newSupervisor returns the systemd user-service manager this process drives.
+// newSupervisor returns the native per-user service manager this process drives.
 // It is a package-level var so tests can inject a fake command runner and a
 // temporary unit directory: a test suite that reached the developer's real
 // service manager would install units on the machine running it.
@@ -50,11 +51,24 @@ func supervisionOptions(cfg config.Config, args []string) (service.Options, erro
 	if err != nil {
 		return service.Options{}, fmt.Errorf("resolve executable: %w", err)
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return service.Options{}, fmt.Errorf("resolve user home for supervision: %w", err)
+	}
+	if home == "" {
+		return service.Options{}, fmt.Errorf("resolve user home for supervision: empty path")
+	}
+	logPath := cfg.LogPath
+	if !filepath.IsAbs(logPath) {
+		logPath = filepath.Join(home, logPath)
+	}
 	return service.Options{
-		Exec:     exe,
-		Args:     args,
-		DataDir:  filepath.Dir(cfg.DBPath),
-		StateDir: filepath.Dir(cfg.PIDPath),
+		Exec:       exe,
+		Args:       args,
+		DataDir:    filepath.Dir(cfg.DBPath),
+		StateDir:   filepath.Dir(cfg.PIDPath),
+		WorkingDir: home,
+		LogPath:    logPath,
 	}, nil
 }
 
@@ -112,7 +126,7 @@ func autoInstall(f globalFlags) bool {
 	return len(config.PathEnvOverrides()) == 0 && len(discoveryEnvOverrides()) == 0
 }
 
-// superviseStart hands the collection daemon to systemd when this machine and
+// superviseStart hands the collection daemon to the native user supervisor when this machine and
 // this invocation both allow it, and reports whether it succeeded. A false
 // return means the caller owns the problem and should spawn the detached
 // background process it always did.
@@ -168,7 +182,7 @@ func reportSupervision(warn io.Writer, res service.Result) {
 	if !res.Changed {
 		return
 	}
-	fmt.Fprintln(warn, "notice: aiusage changed its own systemd user service (`aiusage setup --remove` removes them):")
+	fmt.Fprintln(warn, "notice: aiusage changed its own native user service (`aiusage setup --remove` removes it):")
 	// Written verbatim rather than as format strings: the lines carry paths,
 	// and a path with a percent sign in it is not a format verb.
 	for _, ln := range res.Lines {
@@ -176,8 +190,8 @@ func reportSupervision(warn io.Writer, res service.Result) {
 	}
 }
 
-// superviseRestart resolves a build mismatch through the service manager, which
-// is the supervised equivalent of stopping a daemon and spawning a new one.
+// superviseRestart resolves a build mismatch through the native service manager,
+// which is the supervised equivalent of stopping a daemon and spawning a new one.
 //
 // It restarts only what is already running, so it answers false whenever the
 // running collector is not the unit - a detached daemon from before the unit

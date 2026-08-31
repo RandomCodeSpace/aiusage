@@ -664,13 +664,13 @@ func contains(s, sub string) bool {
 	})()
 }
 
-// TestRotateDaemonLog: an oversized log is renamed to .old before the daemon
+// TestDaemonRotateLog: an oversized log is renamed to .old before the daemon
 // appends (so it cannot grow unbounded); a small or missing log is left alone.
-func TestRotateDaemonLog(t *testing.T) {
+func TestDaemonRotateLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "aiusage.log")
 
 	// Missing file: no-op.
-	rotateDaemonLog(path)
+	daemon.RotateLog(path)
 	if _, err := os.Stat(path + ".old"); err == nil {
 		t.Fatalf("rotation invented a .old for a missing log")
 	}
@@ -679,7 +679,7 @@ func TestRotateDaemonLog(t *testing.T) {
 	if err := os.WriteFile(path, []byte("cycle ok\n"), 0o600); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
-	rotateDaemonLog(path)
+	daemon.RotateLog(path)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("small log was rotated away: %v", err)
 	}
@@ -688,10 +688,10 @@ func TestRotateDaemonLog(t *testing.T) {
 	}
 
 	// Oversized log rotates to .old (sparse truncate keeps the test fast).
-	if err := os.Truncate(path, maxDaemonLogBytes+1); err != nil {
+	if err := os.Truncate(path, daemon.MaxLogBytes+1); err != nil {
 		t.Fatalf("grow log: %v", err)
 	}
-	rotateDaemonLog(path)
+	daemon.RotateLog(path)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("oversized log still present (err=%v)", err)
 	}
@@ -699,23 +699,23 @@ func TestRotateDaemonLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotated log missing: %v", err)
 	}
-	if fi.Size() != maxDaemonLogBytes+1 {
-		t.Fatalf("rotated size = %d, want %d", fi.Size(), maxDaemonLogBytes+1)
+	if fi.Size() != daemon.MaxLogBytes+1 {
+		t.Fatalf("rotated size = %d, want %d", fi.Size(), daemon.MaxLogBytes+1)
 	}
 
 	// A second rotation replaces the previous .old.
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatalf("recreate log: %v", err)
 	}
-	if err := os.Truncate(path, maxDaemonLogBytes+2); err != nil {
+	if err := os.Truncate(path, daemon.MaxLogBytes+2); err != nil {
 		t.Fatalf("regrow log: %v", err)
 	}
-	rotateDaemonLog(path)
+	daemon.RotateLog(path)
 	fi, err = os.Stat(path + ".old")
 	if err != nil {
 		t.Fatalf("second rotation: %v", err)
 	}
-	if fi.Size() != maxDaemonLogBytes+2 {
+	if fi.Size() != daemon.MaxLogBytes+2 {
 		t.Fatalf("second rotation did not replace .old (size=%d)", fi.Size())
 	}
 }

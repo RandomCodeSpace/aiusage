@@ -10,15 +10,23 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 )
 
-// noSupervisionNotice is what setup prints on a machine with no systemd user
-// manager. It is not an error: the fallback works, it just does not survive a
-// reboot on its own, and the user asked what the state of things is.
-const noSupervisionNotice = "no systemd user session here, so there is nothing to install.\n" +
-	"aiusage keeps starting its collector as a detached background process, which\n" +
-	"collects exactly the same data but does not come back by itself after a reboot."
+// noSupervisionNotice is what setup prints when the platform's per-user manager
+// is unavailable. It is not an error: detached collection still works, but its
+// logout and reboot boundary must be stated honestly.
+func noSupervisionNotice(kind string) string {
+	if kind == "launchd" {
+		return "no macOS GUI launch domain is available, so nothing was installed.\n" +
+			"Run `aiusage setup` from a GUI login session. Until then aiusage uses a detached\n" +
+			"collector, which is not persistent across logout or reboot."
+	}
+	return "no systemd user session here, so there is nothing to install.\n" +
+		"aiusage keeps starting its collector as a detached background process, which\n" +
+		"is not persistent across logout or reboot."
+}
 
 // newSetupCmd builds the `setup` command: the explicit, inspectable half of the
 // supervision that data-facing commands otherwise arrange by themselves.
@@ -35,10 +43,10 @@ func newSetupCmd() *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "setup",
-		Short: "Install the aiusage systemd user service",
-		Long: "setup writes, enables and starts the systemd USER unit aiusage runs " +
-			"under - the collection daemon - in $XDG_CONFIG_HOME/systemd/user. No " +
-			"root is needed and none is asked for.\n\n" +
+		Short: "Install the aiusage native user service",
+		Long: "setup installs and starts aiusage's rootless native user service: a " +
+			"systemd user unit on Linux or a LaunchAgent on macOS. No root is needed " +
+			"and none is asked for.\n\n" +
 			"It is create-if-missing: a unit file that already exists is left " +
 			"exactly as it is, because it may carry your edits, and only its " +
 			"enabled and running state is corrected. Use --force to replace it " +
@@ -53,8 +61,9 @@ func newSetupCmd() *cobra.Command {
 			"--remove deletes only a unit file aiusage generated, which it knows by " +
 			"the stamp comment it writes into it. A unit you wrote yourself is " +
 			"named and left alone unless --force says otherwise.\n\n" +
-			"On a machine with no systemd user session, setup says so and changes " +
-			"nothing; aiusage falls back to a detached background collector.",
+			"When the native user manager is unavailable, setup says so and changes " +
+			"nothing; aiusage falls back to a detached collector that is not persistent " +
+			"across logout or reboot.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -97,7 +106,7 @@ func runSetup(c *cobra.Command, sf setupFlags) error {
 
 	m := newSupervisor()
 	if !m.Available(ctx) {
-		fmt.Fprintln(out, noSupervisionNotice)
+		fmt.Fprintln(out, noSupervisionNotice(m.Kind()))
 		return nil
 	}
 
@@ -129,13 +138,56 @@ func runSetup(c *cobra.Command, sf setupFlags) error {
 	printEnvNotice(out, flags)
 	o.Force = sf.force
 
+	// Explicit setup is the migration point from the compatibility fallback to
+	// native supervision. Stop only a collector the native manager did not
+	// start, then restore that detached collector if activation fails.
+	detachedStopped := false
+	if running, pid := daemon.Status(cfg); running {
+		nativeActive, stateKnown := nativeCollectorState(m.Status(ctx))
+		if !stateKnown {
+			return fmt.Errorf("cannot determine whether the running collector belongs to %s; no lifecycle change was made", m.Kind())
+		}
+		if !nativeActive {
+			if err := stopDaemon(cfg, pid); err != nil {
+				return fmt.Errorf("stop detached collector before %s activation: %w", m.Kind(), err)
+			}
+			detachedStopped = true
+			fmt.Fprintln(out, "stopped the detached collector before native activation")
+		}
+	}
+
 	res, err := m.Install(ctx, o)
 	printLines(out, res.Lines)
 	if err != nil {
+		if detachedStopped {
+			if restoreErr := spawnDaemon(cfg); restoreErr != nil {
+				return fmt.Errorf("%w; restore detached collector: %v", err, restoreErr)
+			}
+			fmt.Fprintln(out, "restored the detached collector after native activation failed")
+		}
 		return err
 	}
-	fmt.Fprintf(out, "aiusage is supervised by systemd; check it with: systemctl --user status %s\n", service.CollectUnit)
+	if m.Kind() == "launchd" {
+		fmt.Fprintf(out, "aiusage is supervised by launchd for this GUI login; check it with: launchctl print gui/$(id -u)/%s\n", service.CollectLabel)
+	} else {
+		fmt.Fprintf(out, "aiusage is supervised by systemd; check it with: systemctl --user status %s\n", service.CollectUnit)
+	}
 	return nil
+}
+
+func nativeCollectorState(units []service.UnitStatus) (active, known bool) {
+	for _, unit := range units {
+		if !unit.Installed {
+			continue
+		}
+		if !unit.StateKnown {
+			return false, false
+		}
+		if unit.Active {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // printEnvNotice warns that this shell's environment moved something the units

@@ -145,8 +145,12 @@ Opening the dashboard or a report makes sure a collector is running. The
 default interval is five minutes.
 
 On Linux with systemd, `aiusage setup` installs a user service without
-`sudo`. On macOS, and on Linux without systemd, aiusage starts a detached
-collector; start it again after a reboot.
+`sudo`. On macOS, it installs a LaunchAgent that starts when you sign in and
+runs until you sign out. Neither option needs administrator access.
+
+If your system cannot use its native service manager, aiusage falls back to a
+detached collector. That fallback stops when you sign out or restart, so run
+aiusage again afterward.
 
 For manual control:
 

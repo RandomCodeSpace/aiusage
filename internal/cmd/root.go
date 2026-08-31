@@ -162,8 +162,8 @@ func newRootCmd() *cobra.Command {
 	pf.IntVar(&flags.interval, "interval", 0, "collection interval in seconds (overrides config; clamped [60,1800])")
 	pf.StringVar(&flags.home, "home", "", "discovery home directory (overrides config; for testing/sandboxing)")
 	pf.BoolVar(&flags.noDaemon, "no-daemon", false,
-		"do not auto-start the collection daemon or install its systemd user units "+
-			"(the explicit setup command still installs them)")
+		"do not auto-start the collection daemon or install its native user service "+
+			"(the explicit setup command still installs it)")
 
 	root.AddCommand(
 		newRunCmd(),

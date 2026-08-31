@@ -459,6 +459,9 @@ func TestInstallFailuresDegrade(t *testing.T) {
 			if err != nil && strings.Contains(err.Error(), "nobody should print") {
 				t.Errorf("error carries more than one line of tool output: %v", err)
 			}
+			if err != nil && fileExists(filepath.Join(m.UnitDir, CollectUnit)) {
+				t.Error("failed first install left a generated unit behind")
+			}
 		})
 	}
 }
@@ -723,8 +726,26 @@ func TestStatusReportsTheUnit(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("Status returned %d units, want 1", len(got))
 	}
-	if got[0] != (UnitStatus{Name: CollectUnit, Installed: true, Enabled: true, Active: true, StateKnown: true}) {
+	if got[0] != (UnitStatus{Name: CollectUnit, Installed: true, Enabled: true, Active: true,
+		Persistence: PersistenceLingerNotEnabled, StateKnown: true}) {
 		t.Errorf("collect status = %+v", got[0])
+	}
+}
+
+func TestStatusReportsAllLingerStates(t *testing.T) {
+	m, f := testManager(t)
+	seedUnit(t, m, CollectUnit, renderCollect(testOptions(t)))
+
+	if got := m.Status(t.Context())[0].Persistence; got != PersistenceLingerNotEnabled {
+		t.Fatalf("disabled linger = %q", got)
+	}
+	f.linger = true
+	if got := m.Status(t.Context())[0].Persistence; got != PersistenceLingerConfirmed {
+		t.Fatalf("enabled linger = %q", got)
+	}
+	f.fail["show-user"] = errExitOne
+	if got := m.Status(t.Context())[0].Persistence; got != PersistenceLingerUnknown {
+		t.Fatalf("unanswered linger = %q", got)
 	}
 }
 
@@ -879,6 +900,37 @@ func TestInstallForceRestartsAUnitItRewrote(t *testing.T) {
 		if strings.Contains(ln, "already running") {
 			t.Errorf("--force claimed the rewritten unit was already running: %q", ln)
 		}
+	}
+}
+
+func TestFailedSystemdReplacementRestoresPriorUnitAndProcess(t *testing.T) {
+	m, f := testManager(t)
+	o := testOptions(t)
+	old := "[Service]\nExecStart=/old/aiusage run\n"
+	seedUnit(t, m, CollectUnit, old)
+	f.enabled[CollectUnit] = true
+	f.active[CollectUnit] = true
+
+	base := m.Run
+	restarts := 0
+	m.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "restart "+CollectUnit) {
+			restarts++
+			if restarts == 1 {
+				return []byte("restart refused"), errExitOne
+			}
+		}
+		return base(ctx, name, args...)
+	}
+	o.Force = true
+	if _, err := m.Install(t.Context(), o); err == nil {
+		t.Fatal("failed replacement restart reported success")
+	}
+	if got := readUnit(t, m, CollectUnit); got != old {
+		t.Fatalf("rollback did not restore the prior unit:\n%s", got)
+	}
+	if !f.active[CollectUnit] || !f.enabled[CollectUnit] || restarts != 2 {
+		t.Fatalf("rollback state active=%t enabled=%t restarts=%d", f.active[CollectUnit], f.enabled[CollectUnit], restarts)
 	}
 }
 

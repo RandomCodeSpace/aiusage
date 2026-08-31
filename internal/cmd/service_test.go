@@ -54,6 +54,69 @@ type fakeUnits struct {
 	delay time.Duration
 }
 
+// fakeLaunchd is the command-boundary stand-in for a macOS GUI launch domain.
+// It proves cmd selects and describes launchd without touching the host running
+// the test.
+type fakeLaunchd struct {
+	calls     []string
+	available bool
+	loaded    bool
+	running   bool
+	fail      map[string]error
+}
+
+func newFakeLaunchd() *fakeLaunchd {
+	return &fakeLaunchd{available: true, fail: map[string]error{}}
+}
+
+func (f *fakeLaunchd) run(_ context.Context, name string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, strings.Join(append([]string{name}, args...), " "))
+	verb := name
+	if name == "launchctl" && len(args) > 0 {
+		verb = args[0]
+	}
+	if err := f.fail[verb]; err != nil {
+		return []byte(verb + " refused"), err
+	}
+	if name == "plutil" {
+		return []byte("OK"), nil
+	}
+	if name != "launchctl" || len(args) == 0 {
+		return nil, fmt.Errorf("unexpected command %s", name)
+	}
+	switch args[0] {
+	case "print":
+		if !strings.Contains(args[1], service.CollectLabel) {
+			if f.available {
+				return []byte("domain = gui"), nil
+			}
+			return []byte("Could not find domain"), errors.New("exit status 1")
+		}
+		if !f.loaded {
+			return []byte("Could not find service"), errors.New("exit status 113")
+		}
+		state := "waiting"
+		if f.running {
+			state = "running"
+		}
+		return []byte("state = " + state), nil
+	case "print-disabled":
+		return []byte(`"` + service.CollectLabel + `" => false`), nil
+	case "enable":
+		return nil, nil
+	case "bootstrap", "kickstart":
+		f.loaded = true
+		f.running = true
+		return nil, nil
+	case "bootout":
+		f.loaded = false
+		f.running = false
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unexpected launchctl verb %s", args[0])
+	}
+}
+
 func newFakeUnits() *fakeUnits {
 	return &fakeUnits{enabled: map[string]bool{}, active: map[string]bool{}, fail: map[string]error{}}
 }
@@ -139,6 +202,18 @@ func stubSupervisor(t *testing.T) (*fakeUnits, string) {
 	prev := newSupervisor
 	newSupervisor = func() *service.Manager {
 		return &service.Manager{UnitDir: dir, Run: f.run}
+	}
+	t.Cleanup(func() { newSupervisor = prev })
+	return f, dir
+}
+
+func stubLaunchdSupervisor(t *testing.T) (*fakeLaunchd, string) {
+	t.Helper()
+	f := newFakeLaunchd()
+	dir := filepath.Join(t.TempDir(), "Library", "LaunchAgents")
+	prev := newSupervisor
+	newSupervisor = func() *service.Manager {
+		return &service.Manager{GOOS: "darwin", UnitDir: dir, Run: f.run}
 	}
 	t.Cleanup(func() { newSupervisor = prev })
 	return f, dir
@@ -801,15 +876,15 @@ func TestDoctorReportsSupervision(t *testing.T) {
 	}{
 		{
 			name: "systemd units", units: true, active: true, available: true,
-			want: []string{"systemd user units:", service.CollectUnit, "active, enabled"},
+			want: []string{"systemd user service:", service.CollectUnit, "active, enabled", "linger confirmed", "starts at boot and survives logout"},
 		},
 		{
 			name: "installed but stopped", units: true, available: true,
-			want: []string{"systemd user units:", "inactive, not enabled"},
+			want: []string{"systemd user service:", "inactive, not enabled", "linger confirmed"},
 		},
 		{
 			name: "unsupervised daemon", daemon: true,
-			want: []string{"unsupervised background process"},
+			want: []string{"detached background process", "not persistent across logout or reboot"},
 		},
 		{name: "nothing", want: []string{"none: no collector is running"}},
 	}
@@ -994,6 +1069,118 @@ func TestSetupWithoutSystemdSaysSo(t *testing.T) {
 	}
 	if unitExists(dir, service.CollectUnit) {
 		t.Error("setup wrote a unit with no service manager to run it")
+	}
+}
+
+func TestSetupAndDoctorUseLaunchdOnDarwin(t *testing.T) {
+	f, dir := stubLaunchdSupervisor(t)
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "usage.db")
+	cfg := offlineConfig(t)
+	args := []string{"--home", home, "--db", db, "--config", cfg}
+
+	out, err := runCmd(t, append(args, "setup")...)
+	if err != nil {
+		t.Fatalf("Darwin setup: %v\n%s", err, out)
+	}
+	path := filepath.Join(dir, service.CollectPlist)
+	if !unitExists(dir, service.CollectPlist) || !f.loaded || !f.running {
+		t.Fatalf("Darwin setup left plist=%t loaded=%t running=%t\n%s", unitExists(dir, service.CollectPlist), f.loaded, f.running, out)
+	}
+	for _, want := range []string{"supervised by launchd", "GUI login", service.CollectLabel} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Darwin setup output missing %q:\n%s", want, out)
+		}
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "<string>--home</string>") || !strings.Contains(string(body), "<string>"+home+"</string>") {
+		t.Fatalf("LaunchAgent did not preserve explicit setup flags:\n%s", body)
+	}
+
+	out, err = runCmd(t, append(args, "--no-daemon", "doctor")...)
+	if err != nil {
+		t.Fatalf("Darwin doctor: %v\n%s", err, out)
+	}
+	for _, want := range []string{"launchd LaunchAgent:", "installed, loaded, running", "at GUI login", "stops at logout"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Darwin doctor output missing %q:\n%s", want, out)
+		}
+	}
+
+	out, err = runCmd(t, append(args, "setup", "--remove")...)
+	if err != nil {
+		t.Fatalf("Darwin setup --remove: %v\n%s", err, out)
+	}
+	if unitExists(dir, service.CollectPlist) || f.loaded {
+		t.Fatal("Darwin removal left the plist or loaded job")
+	}
+}
+
+func TestSetupWithoutDarwinGUIChangesNothing(t *testing.T) {
+	f, dir := stubLaunchdSupervisor(t)
+	f.available = false
+	out, err := runCmd(t, "--home", t.TempDir(), "--config", offlineConfig(t), "setup")
+	if err != nil {
+		t.Fatalf("setup without GUI domain: %v\n%s", err, out)
+	}
+	for _, want := range []string{"no macOS GUI launch domain", "GUI login session", "not persistent across logout or reboot"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unavailable launchd notice missing %q:\n%s", want, out)
+		}
+	}
+	if unitExists(dir, service.CollectPlist) || unitExists(filepath.Dir(dir), filepath.Base(dir)) {
+		t.Fatal("unavailable GUI domain created a persistent LaunchAgent path")
+	}
+}
+
+func TestSetupRestoresDetachedCollectorAfterLaunchdActivationFailure(t *testing.T) {
+	f, dir := stubLaunchdSupervisor(t)
+	f.fail["bootstrap"] = errors.New("bootstrap refused")
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	home := t.TempDir()
+	pidPath := filepath.Join(home, ".local", "state", "aiusage", "aiusage.pid")
+	release, err := daemon.AcquireCollectionLock(pidPath, "detached-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			release()
+		}
+	})
+
+	prevStop := stopDaemon
+	stopped := 0
+	stopDaemon = func(config.Config, int) error {
+		stopped++
+		if !released {
+			release()
+			released = true
+		}
+		return nil
+	}
+	t.Cleanup(func() { stopDaemon = prevStop })
+	spawns, restoreSpawn := stubSpawn(t)
+	defer restoreSpawn()
+
+	out, err := runCmd(t, "--home", home, "--config", offlineConfig(t), "setup")
+	if err == nil {
+		t.Fatalf("failed launchd activation reported success:\n%s", out)
+	}
+	if stopped != 1 || *spawns != 1 {
+		t.Fatalf("promotion rollback stopped=%d spawned=%d, want one each\n%s", stopped, *spawns, out)
+	}
+	if !strings.Contains(out, "restored the detached collector") {
+		t.Fatalf("promotion rollback was not reported:\n%s", out)
+	}
+	if unitExists(dir, service.CollectPlist) || f.loaded {
+		t.Fatal("failed launchd promotion left a native job behind")
 	}
 }
 

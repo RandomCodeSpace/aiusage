@@ -14,6 +14,13 @@ import (
 // lock.
 const CollectUnit = "aiusage-collect.service"
 
+// CollectLabel and CollectPlist are the fixed identity and file name of the
+// macOS per-user LaunchAgent.
+const (
+	CollectLabel = "io.github.randomcodespace.aiusage.collect"
+	CollectPlist = CollectLabel + ".plist"
+)
+
 // docURL is the Documentation= line the unit carries.
 const docURL = "https://github.com/RandomCodeSpace/aiusage"
 
@@ -25,7 +32,9 @@ const docURL = "https://github.com/RandomCodeSpace/aiusage"
 // edited since - and a --remove that deleted those would be taking back
 // something it never gave. The stamp is what tells the two apart; systemd
 // ignores comment lines, so carrying it costs nothing.
-const unitStamp = "# aiusage-generated-unit"
+const stampToken = "aiusage-generated-unit"
+
+const unitStamp = "# " + stampToken
 
 // generatedNote heads every rendered unit. Install is create-if-missing, so
 // once a file exists it belongs to whoever edits it next; the note says where
@@ -54,7 +63,8 @@ func hasStamp(path string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(head), unitStamp)
+	body := string(head)
+	return strings.Contains(body, unitStamp) || strings.Contains(body, launchdStamp)
 }
 
 // hardening is the unit's sandbox. It is copied from the hand-written unit this
@@ -86,6 +96,13 @@ type Options struct {
 	// so the directories, not the files, have to be writable.
 	DataDir  string
 	StateDir string
+
+	// WorkingDir is the account home used by launchd. LogPath is the resolved
+	// daemon log path wired to the LaunchAgent's stdout and stderr. systemd uses
+	// its own %h working-directory expansion and journal output, so these values
+	// do not alter the existing Linux unit.
+	WorkingDir string
+	LogPath    string
 
 	// Force rewrites a unit file that already exists. Left off, install is
 	// create-if-missing and a unit the user has edited stays theirs.

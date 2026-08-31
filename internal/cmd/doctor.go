@@ -115,11 +115,10 @@ func runDoctor(c *cobra.Command) error {
 // printSupervision reports how the collector is being kept alive, which is the
 // question behind every complaint that numbers stopped updating.
 //
-// There are three honest answers and doctor gives whichever holds: systemd user
-// units (named, with each one's enabled and running state), an unsupervised
-// background process (collecting now, gone at the next reboot), or nothing at
-// all. It never installs anything - doctor is in daemonSkip precisely so a
-// diagnostic has no side effects.
+// There are three honest answers and doctor gives whichever holds: the native
+// per-user service, a detached background process, or nothing. It never installs
+// anything - doctor is in daemonSkip precisely so a diagnostic has no side
+// effects.
 //
 // The whole block shares one deadline, for the reason ensureDaemon has one. It
 // is several calls into the service manager - availability, then enabled and
@@ -140,6 +139,7 @@ func printSupervision(c *cobra.Command, cfg config.Config) {
 
 	m := newSupervisor()
 	if m.Available(ctx) {
+		kind := m.Kind()
 		units := m.Status(ctx)
 		installed := false
 		for _, u := range units {
@@ -148,9 +148,20 @@ func printSupervision(c *cobra.Command, cfg config.Config) {
 			}
 		}
 		if installed {
-			fmt.Fprintln(out, "systemd user units:")
+			if kind == "launchd" {
+				fmt.Fprintln(out, "launchd LaunchAgent:")
+			} else {
+				fmt.Fprintln(out, "systemd user service:")
+			}
 			for _, u := range units {
-				fmt.Fprintf(out, "  %-24s %s\n", u.Name, unitState(u))
+				state := unitState(u)
+				if kind == "launchd" {
+					state = launchdUnitState(u)
+				}
+				fmt.Fprintf(out, "  %-42s %s\n", u.Name, state)
+				if u.Installed {
+					fmt.Fprintf(out, "  persistence: %s\n", persistenceBoundary(kind, u.Persistence))
+				}
 			}
 			if ctx.Err() != nil {
 				fmt.Fprintf(out, "  (the service manager stopped answering within %s; states above may be incomplete)\n",
@@ -166,7 +177,7 @@ func printSupervision(c *cobra.Command, cfg config.Config) {
 	// lock is a local file and answers instantly, so whatever it says is still
 	// worth printing.
 	if ctx.Err() != nil {
-		fmt.Fprintf(out, "unknown: the service manager did not answer within %s\n", supervisionBudget)
+		fmt.Fprintf(out, "unknown: the native service manager did not answer within %s\n", supervisionBudget)
 		if running, pid := daemon.Status(cfg); running {
 			fmt.Fprintf(out, "a collector is running right now regardless (pid %d)\n", pid)
 		}
@@ -175,11 +186,40 @@ func printSupervision(c *cobra.Command, cfg config.Config) {
 	}
 
 	if running, pid := daemon.Status(cfg); running {
-		fmt.Fprintf(out, "unsupervised background process (pid %d); `aiusage setup` installs systemd user units\n\n", pid)
+		fmt.Fprintf(out, "detached background process (pid %d); not persistent across logout or reboot; `aiusage setup` installs the native user service\n\n", pid)
 		return
 	}
 	fmt.Fprintln(out, "none: no collector is running")
 	fmt.Fprintln(out)
+}
+
+func launchdUnitState(u service.UnitStatus) string {
+	switch {
+	case !u.Installed:
+		return "not installed"
+	case !u.StateKnown:
+		return "installed, state unknown (no answer from launchd)"
+	case !u.Loaded:
+		return "installed, not loaded"
+	case u.Active:
+		return "installed, loaded, running"
+	default:
+		return "installed, loaded, not running"
+	}
+}
+
+func persistenceBoundary(kind, state string) string {
+	if kind == "launchd" {
+		return "at GUI login; starts after reboot login and stops at logout"
+	}
+	switch state {
+	case service.PersistenceLingerConfirmed:
+		return "linger confirmed; starts at boot and survives logout"
+	case service.PersistenceLingerNotEnabled:
+		return "linger not enabled; starts at login and may stop after the last logout"
+	default:
+		return "linger unknown; logout and pre-login reboot continuity are not confirmed"
+	}
 }
 
 // unitState renders one unit's state for the supervision block.
