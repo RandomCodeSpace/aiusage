@@ -295,7 +295,14 @@ func (m Model) cycleRange() (Model, tea.Cmd) {
 	m.syncStepKeys()
 	m.persistUI()
 	if m.view == ViewOverview && !m.data.timelineWarm(m.data.now(), m.span(), m.crumbs) {
-		cmd := m.startLoadAfter(rangeLoadSettle)
+		// A rapid cycle may return to the range whose last good frame is still
+		// visible. Refresh that range immediately; only unseen intermediate
+		// windows need the settle delay.
+		delay := rangeLoadSettle
+		if m.overview.RangeLbl == m.spanLabel() {
+			delay = 0
+		}
+		cmd := m.startLoadAfter(delay)
 		return m, cmd
 	}
 	cmd := m.startLoad()

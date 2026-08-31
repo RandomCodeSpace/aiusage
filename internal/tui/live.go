@@ -59,11 +59,12 @@ import (
 // CPU near zero while still feeling live for a usage dashboard.
 const (
 	refreshInterval = 10 * time.Second
-	// A cold Overview range load waits briefly before touching SQLite. This is
-	// shorter than a deliberate pause but long enough that a 120 ms rapid-cycle
-	// cadence gives a superseded query only a small head start. Warm revisits
-	// bypass it entirely.
-	rangeLoadSettle = 75 * time.Millisecond
+	// A cold Overview range load waits for a rapid key sequence to settle before
+	// touching SQLite. A single press still loads promptly, while unseen
+	// intermediate windows in a 120 ms range cycle are cancelled before
+	// allocating results. Warm revisits and the range already on screen bypass
+	// the delay entirely.
+	rangeLoadSettle = 150 * time.Millisecond
 )
 
 // dataLoadedMsg signals that a background load finished warming the query cache
