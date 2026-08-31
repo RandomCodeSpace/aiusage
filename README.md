@@ -107,6 +107,7 @@ together as one total.
 | `aiusage sources` | Discovered source files and their status |
 | `aiusage doctor` | Setup and health checks |
 | `aiusage export` | JSON or CSV export |
+| `aiusage db` | Back up, verify, restore, or safely reset the database |
 | `aiusage setup` | Install background collection |
 | `aiusage version` | Build and schema version |
 
@@ -156,6 +157,27 @@ aiusage --no-daemon     # report without starting a collector
 ~~~
 
 Only one collector writes to a database at a time.
+
+## Protect your history
+
+Create a complete backup while collection keeps running:
+
+~~~console
+aiusage db backup
+~~~
+
+Check the live database or any backup without changing it:
+
+~~~console
+aiusage db verify
+aiusage db verify /path/to/backup.db
+~~~
+
+`aiusage db restore BACKUP --replace` validates a staging copy and creates a
+safety backup before replacing an existing database. If no usable backup
+exists, `aiusage db reset --quarantine` preserves the database and its SQLite
+sidecars before starting fresh. Neither command silently discards the old
+files.
 
 ## Configuration
 
