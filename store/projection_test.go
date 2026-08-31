@@ -116,3 +116,99 @@ func TestListEventsProjectsRowID(t *testing.T) {
 		}
 	}
 }
+
+// TestListEventsEventTimeKeysetPreservesDefaultOrder pins the cursor used by
+// streaming exports. A later-observed row may describe an older event, and
+// several rows may share the same second, so only (event_time,id) can page the
+// historical output without skipping, duplicating or reordering it.
+func TestListEventsEventTimeKeysetPreservesDefaultOrder(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+
+	fixtures := []model.UsageEvent{
+		rollupEvent("inserted-first", model.ToolCodex, "gpt-5", "/w/a", base.Add(10*time.Minute), -1),
+		rollupEvent("late-old-a", model.ToolCodex, "gpt-5", "/w/a", base, -1),
+		rollupEvent("late-old-b", model.ToolCodex, "gpt-5", "/w/a", base, -1),
+		rollupEvent("inserted-last", model.ToolCodex, "gpt-5", "/w/a", base.Add(20*time.Minute), -1),
+	}
+	for i := range fixtures {
+		fixtures[i].ObservedTime = base.Add(time.Duration(i+1) * time.Hour)
+		fixtures[i].Raw = "raw-" + fixtures[i].DedupKey
+	}
+	if _, err := st.InsertEvents(ctx, fixtures); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	defaultRows, err := st.ListEvents(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("default list: %v", err)
+	}
+	wantEventOrder := []string{"late-old-a", "late-old-b", "inserted-first", "inserted-last"}
+	if got := eventKeys(defaultRows); strings.Join(got, ",") != strings.Join(wantEventOrder, ",") {
+		t.Fatalf("default order = %v, want %v", got, wantEventOrder)
+	}
+
+	// afterID zero is the documented first-page token: the timestamp is ignored
+	// so callers do not need a special zero-time branch.
+	first, err := st.ListEvents(ctx, Filter{},
+		WithEventTimeKeyset(base.Add(24*time.Hour), 0, 1), WithRaw())
+	if err != nil {
+		t.Fatalf("first cursor page: %v", err)
+	}
+	if len(first) != 1 || first[0].DedupKey != wantEventOrder[0] {
+		t.Fatalf("first cursor page = %v, want %s", eventKeys(first), wantEventOrder[0])
+	}
+
+	var walked []model.UsageEvent
+	var afterTime time.Time
+	var afterID int64
+	for range len(wantEventOrder) + 1 {
+		page, err := st.ListEvents(ctx, Filter{},
+			WithEventTimeKeyset(afterTime, afterID, 1), WithRaw())
+		if err != nil {
+			t.Fatalf("cursor page after (%s,%d): %v", afterTime, afterID, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		walked = append(walked, page...)
+		last := page[len(page)-1]
+		afterTime, afterID = last.EventTime, last.ID
+	}
+	if got := eventKeys(walked); strings.Join(got, ",") != strings.Join(wantEventOrder, ",") {
+		t.Fatalf("event-time cursor order = %v, want %v", got, wantEventOrder)
+	}
+	for _, e := range walked {
+		if e.Raw != "raw-"+e.DedupKey {
+			t.Errorf("event-time cursor lost WithRaw for %s: %q", e.DedupKey, e.Raw)
+		}
+	}
+
+	// The older cursor keeps its independent id-order contract.
+	var idWalk []model.UsageEvent
+	afterID = 0
+	for range len(fixtures) + 1 {
+		page, err := st.ListEvents(ctx, Filter{}, WithKeyset(afterID, 2))
+		if err != nil {
+			t.Fatalf("id cursor page after %d: %v", afterID, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		idWalk = append(idWalk, page...)
+		afterID = page[len(page)-1].ID
+	}
+	wantIDOrder := []string{"inserted-first", "late-old-a", "late-old-b", "inserted-last"}
+	if got := eventKeys(idWalk); strings.Join(got, ",") != strings.Join(wantIDOrder, ",") {
+		t.Fatalf("id cursor order = %v, want %v", got, wantIDOrder)
+	}
+}
+
+func eventKeys(events []model.UsageEvent) []string {
+	out := make([]string, len(events))
+	for i := range events {
+		out[i] = events[i].DedupKey
+	}
+	return out
+}

@@ -132,6 +132,122 @@ func TestVersion1MachineFixtures(t *testing.T) {
 	}
 }
 
+// TestPagedEventWritersMatchBatchBytes proves paging is an implementation
+// detail, not a new machine format. Splitting between equal-time events,
+// writing an empty page, and closing twice must produce the exact v1 bytes the
+// original slice writers emit.
+func TestPagedEventWritersMatchBatchBytes(t *testing.T) {
+	events := sampleEvents()
+	events[0].Raw = `{"input_tokens":100,"text":"λ"}`
+	events[1].Raw = `{"input_tokens":7}`
+
+	tests := []struct {
+		name  string
+		batch func(*bytes.Buffer) error
+		paged func(*bytes.Buffer) (interface {
+			WritePage([]model.UsageEvent) error
+			Close() error
+		}, error)
+	}{
+		{
+			name:  "json",
+			batch: func(b *bytes.Buffer) error { return WriteEventsJSON(b, events) },
+			paged: func(b *bytes.Buffer) (interface {
+				WritePage([]model.UsageEvent) error
+				Close() error
+			}, error) {
+				return NewEventsJSONWriter(b, false)
+			},
+		},
+		{
+			name:  "json raw",
+			batch: func(b *bytes.Buffer) error { return WriteEventsJSONWithRaw(b, events) },
+			paged: func(b *bytes.Buffer) (interface {
+				WritePage([]model.UsageEvent) error
+				Close() error
+			}, error) {
+				return NewEventsJSONWriter(b, true)
+			},
+		},
+		{
+			name:  "csv",
+			batch: func(b *bytes.Buffer) error { return WriteEventsCSV(b, events) },
+			paged: func(b *bytes.Buffer) (interface {
+				WritePage([]model.UsageEvent) error
+				Close() error
+			}, error) {
+				return NewEventsCSVWriter(b, false)
+			},
+		},
+		{
+			name:  "csv raw",
+			batch: func(b *bytes.Buffer) error { return WriteEventsCSVWithRaw(b, events) },
+			paged: func(b *bytes.Buffer) (interface {
+				WritePage([]model.UsageEvent) error
+				Close() error
+			}, error) {
+				return NewEventsCSVWriter(b, true)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var want, got bytes.Buffer
+			if err := test.batch(&want); err != nil {
+				t.Fatalf("batch: %v", err)
+			}
+			stream, err := test.paged(&got)
+			if err != nil {
+				t.Fatalf("new stream: %v", err)
+			}
+			for _, page := range [][]model.UsageEvent{events[:1], nil, events[1:]} {
+				if err := stream.WritePage(page); err != nil {
+					t.Fatalf("write page: %v", err)
+				}
+			}
+			if err := stream.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			if err := stream.Close(); err != nil {
+				t.Fatalf("second close: %v", err)
+			}
+			if got.String() != want.String() {
+				t.Fatalf("paged bytes changed:\n--- want\n%s--- got\n%s", want.String(), got.String())
+			}
+		})
+	}
+}
+
+// TestPagedEventWritersEmitEnvelopeImmediately pins the streaming claim at
+// the writer boundary: JSON opens its array and CSV flushes its header before
+// a page is available.
+func TestPagedEventWritersEmitEnvelopeImmediately(t *testing.T) {
+	var jsonOut bytes.Buffer
+	jsonStream, err := NewEventsJSONWriter(&jsonOut, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := jsonOut.String(); got != "[" {
+		t.Fatalf("JSON constructor wrote %q, want opening bracket", got)
+	}
+	if err := jsonStream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var csvOut bytes.Buffer
+	csvStream, err := NewEventsCSVWriter(&csvOut, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := csvOut.String(); got != wantEventsCSVV1Empty {
+		t.Fatalf("CSV constructor wrote %q, want the canonical header", got)
+	}
+	if err := csvStream.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 const (
 	wantSummaryJSONV1EmptyGrouped = `{
   "GroupBy": [

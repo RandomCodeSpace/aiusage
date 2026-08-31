@@ -48,6 +48,22 @@ const activityTableDDL = `CREATE TABLE IF NOT EXISTS activity_events (
   CHECK (turn_seq >= 0 AND calls_in_turn >= 1 AND turn_seq < calls_in_turn)
 )`
 
+// activityUsageCountsTableDDL is the v8 set-based divisor. It is derived from
+// activity_events, carries only nonempty join keys, and is maintained in the
+// same transaction as every successful activity insert.
+const activityUsageCountsTableDDL = `CREATE TABLE IF NOT EXISTS activity_usage_counts (
+  usage_dedup_key TEXT    NOT NULL PRIMARY KEY,
+  activity_count  INTEGER NOT NULL,
+  CHECK (usage_dedup_key <> ''),
+  CHECK (activity_count > 0)
+) WITHOUT ROWID`
+
+const rebuildActivityUsageCountsSQL = `INSERT INTO activity_usage_counts (usage_dedup_key, activity_count)
+SELECT usage_dedup_key, COUNT(*)
+FROM activity_events
+WHERE usage_dedup_key <> ''
+GROUP BY usage_dedup_key`
+
 // activityIndexDDL and activityTriggerDDL complete the v5 step. The triggers are
 // what make this table append-only on the same terms as usage_events; the
 // indexes serve the four questions the activity surface asks (frequency over a
@@ -204,8 +220,8 @@ func (o ActivityOrder) orderExpr() (string, error) {
 }
 
 // activityDivisorSQL is the cost split's denominator: how many activity rows
-// actually share this call's usage row, COUNTED IN THE LEDGER rather than read
-// from the calls_in_turn stamp the adapter wrote.
+// actually share this call's usage row, materialized from the ledger rather
+// than read from the calls_in_turn stamp the adapter wrote.
 //
 // The stamp is what an adapter believed at insert time, and an append-only
 // table cannot correct a belief that later turns out to be low. Claude Code
@@ -216,20 +232,20 @@ func (o ActivityOrder) orderExpr() (string, error) {
 // stamp would then divide one turn's tokens by 1, 3 and 3 and attribute 167% of
 // it — an OVERSTATEMENT, the one direction this table promises never to go.
 //
-// Counting the rows removes the possibility instead of documenting it. The
-// divisor is always exactly the number of rows summing over that usage row, so
-// integer division makes the shares sum to AT MOST the turn's real total by
-// construction, whatever any adapter stamped, in whatever order the rows
-// landed, however many passes it took. It is the same rule the rollup lives
-// under: derived on read, never authoritative on disk. calls_in_turn stays in
-// the table as what the source reported, which is worth keeping and is not the
-// same claim.
+// activity_usage_counts removes the possibility instead of documenting it.
+// Every successful activity insert increments its nonempty usage key in the
+// same transaction, and migration 8 fills the table set-wise from history. The
+// divisor is therefore exactly the number of rows summing over that usage row,
+// so integer division makes the shares sum to AT MOST the turn's real total by
+// construction, whatever any adapter stamped or how many passes it took.
+// calls_in_turn stays as what the source reported; it is useful evidence, just
+// not the denominator.
 //
-// The ” case never joins a usage row (LEFT JOIN gives NULL and the sums skip
-// it), so it short-circuits to 1 rather than counting every unattributed row in
-// the table. idx_activity_usage_key serves the lookup.
-const activityDivisorSQL = `(CASE WHEN a.usage_dedup_key = '' THEN 1 ELSE
-	(SELECT COUNT(*) FROM activity_events s WHERE s.usage_dedup_key = a.usage_dedup_key) END)`
+// The empty-key case never joins a usage row (LEFT JOIN gives NULL and the sums
+// skip it), so it short-circuits to 1. Empty keys are deliberately absent from
+// the count table.
+const activityDivisorSQL = `(CASE WHEN a.usage_dedup_key = '' THEN 1
+	ELSE COALESCE(c.activity_count, 1) END)`
 
 // The attribution expressions, in one place so SummarizeActivity and
 // TopActivity can never disagree about what "attributed" means. Integer
@@ -262,7 +278,8 @@ var activitySelectSQL = `COUNT(*),
 // LEFT JOIN keeps the call while contributing no tokens, where an inner join
 // would silently drop it from the frequency answer too.
 const activityFromSQL = ` FROM activity_events a
-	LEFT JOIN usage_events u ON u.dedup_key = a.usage_dedup_key`
+	LEFT JOIN usage_events u ON u.dedup_key = a.usage_dedup_key
+	LEFT JOIN activity_usage_counts c ON c.usage_dedup_key = a.usage_dedup_key`
 
 // buildActivityWhere builds the WHERE clause (with a leading " WHERE " when
 // non-empty) and the positional args for an ActivityFilter. Columns are
@@ -523,6 +540,7 @@ func insertActivityTx(ctx context.Context, tx *sql.Tx, acts []model.ActivityEven
 	defer stmt.Close()
 
 	skips := rowSkips{table: tableActivityEvents}
+	usageCountDelta := make(map[string]int64)
 	for _, a := range acts {
 		if err := ctx.Err(); err != nil {
 			return inserted, nil, err
@@ -547,9 +565,36 @@ func insertActivityTx(ctx context.Context, tx *sql.Tx, acts []model.ActivityEven
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
+			if a.UsageDedupKey != "" {
+				usageCountDelta[a.UsageDedupKey]++
+			}
 		}
 	}
+	if err := applyActivityUsageCountDelta(ctx, tx, usageCountDelta); err != nil {
+		return inserted, nil, err
+	}
 	return inserted, skips.err(len(acts)), nil
+}
+
+func applyActivityUsageCountDelta(ctx context.Context, tx *sql.Tx, delta map[string]int64) error {
+	if len(delta) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO activity_usage_counts (usage_dedup_key, activity_count)
+		VALUES (?, ?)
+		ON CONFLICT(usage_dedup_key) DO UPDATE SET
+			activity_count = activity_count + excluded.activity_count`)
+	if err != nil {
+		return fmt.Errorf("store: prepare activity usage count upsert: %w", err)
+	}
+	defer stmt.Close()
+	for key, count := range delta {
+		if _, err := stmt.ExecContext(ctx, key, count); err != nil {
+			return fmt.Errorf("store: update activity usage count %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // activityObservedUnix returns the observed timestamp in UTC seconds, falling

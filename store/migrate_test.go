@@ -204,6 +204,89 @@ func TestMigrateV2ToV3AddsCostColumns(t *testing.T) {
 	assertV3Columns(t, st)
 }
 
+// TestMigrateV7ToV8RebuildsOnlyDerivedState is the schema-8 boundary. Usage,
+// activity and turn-context rows are history and must survive byte-for-field;
+// the old rollup is discarded, its watermark cleared, and the small activity
+// divisor is rebuilt from the activity ledger before the version is stamped.
+func TestMigrateV7ToV8RebuildsOnlyDerivedState(t *testing.T) {
+	ctx := context.Background()
+	path := legacyDB(t, 7)
+	db := rawDB(t, path)
+	if _, err := db.Exec(`
+		INSERT INTO activity_events (
+			dedup_key, tool, kind, name, session_id, project, model,
+			event_time_unix, observed_time_unix, usage_dedup_key,
+			turn_seq, calls_in_turn
+		) VALUES
+			('legacy-activity-a', ?, 'tool', 'Read', 'legacy-session', '/legacy', 'legacy-model',
+			 1750000000, 1750000001, 'legacy-1', 0, 2),
+			('legacy-activity-b', ?, 'tool', 'Edit', 'legacy-session', '/legacy', 'legacy-model',
+			 1750000000, 1750000002, 'legacy-1', 1, 2)`,
+		model.ToolClaudeCode, model.ToolClaudeCode); err != nil {
+		t.Fatalf("seed v7 activity: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO usage_rollup (
+			bucket_start_unix, tool, model, project, input_tokens, output_tokens,
+			total_tokens, events, unpriced_events
+		) VALUES (1749999600, ?, 'claude-sonnet-4-6', '', 10, 20, 30, 1, 1)`,
+		model.ToolClaudeCode); err != nil {
+		t.Fatalf("seed v7 rollup: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta(key,value) VALUES(?, '1')`, rollupWatermarkKey); err != nil {
+		t.Fatalf("seed v7 watermark: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close v7 fixture: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate v7 database: %v", err)
+	}
+	defer st.Close()
+
+	if v, err := readSchemaVersion(ctx, st.db); err != nil || v != SchemaVersion {
+		t.Fatalf("post-migration version=%d err=%v want %d,nil", v, err, SchemaVersion)
+	}
+	events, err := st.ListEvents(ctx, Filter{})
+	if err != nil || len(events) != 1 || events[0].DedupKey != "legacy-1" || events[0].TotalTokens != 30 {
+		t.Fatalf("usage history after migration = %+v err=%v", events, err)
+	}
+	activity, err := st.ListActivity(ctx, ActivityFilter{})
+	if err != nil || len(activity) != 2 || activity[0].DedupKey != "legacy-activity-a" || activity[1].DedupKey != "legacy-activity-b" {
+		t.Fatalf("activity history after migration = %+v err=%v", activity, err)
+	}
+	var contexts int64
+	if err := st.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM usage_turn_context
+		WHERE usage_dedup_key='legacy-1' AND dimension='skill' AND value='legacy-skill'`).Scan(&contexts); err != nil || contexts != 1 {
+		t.Fatalf("turn context rows=%d err=%v want 1,nil", contexts, err)
+	}
+	var rollupRows int64
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_rollup`).Scan(&rollupRows); err != nil || rollupRows != 0 {
+		t.Fatalf("v8 rollup rows=%d err=%v want 0,nil", rollupRows, err)
+	}
+	if mark, err := rollupWatermark(ctx, st.db); err != nil || mark != -1 {
+		t.Fatalf("v8 rollup watermark=%d err=%v want -1,nil", mark, err)
+	}
+	assertActivityUsageCount(t, st, "legacy-1", 2)
+	assertActivityUsageCountRows(t, st, 1)
+
+	pattern := filepath.Join(filepath.Dir(path), "backups",
+		fmt.Sprintf("pre-migration-v7-to-v%d-*.db", SchemaVersion))
+	backups, err := filepath.Glob(pattern)
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("pre-migration backups=%v err=%v want one", backups, err)
+	}
+	backup, err := Verify(ctx, backups[0])
+	if err != nil || backup.State != VerificationIncompatible || backup.SchemaVersion != 7 ||
+		backup.RowCounts["usage_events"] != 1 || backup.RowCounts["activity_events"] != 2 ||
+		backup.RowCounts["usage_turn_context"] != 1 {
+		t.Fatalf("pre-migration backup=%+v err=%v", backup, err)
+	}
+}
+
 // assertV3Columns checks the post-migration behaviour of the cost columns: the
 // pre-existing legacy row is unpriced (NULL, not zero) with empty provider and
 // tier, and a freshly stamped event round-trips its cost.
@@ -336,7 +419,7 @@ ALTER TABLE usage_events ADD COLUMN price_source TEXT NOT NULL DEFAULT '';`
 // building a v4 database on top of the v3 one. It reuses the migration's own
 // DDL: a v4 file IS what that statement produces, so a copy here could only
 // ever be a way to test against a v4 that never existed.
-const legacyRollupDDL = "\n" + rollupTableDDL + ";"
+const legacyRollupDDL = "\n" + rollupV4TableDDL + ";"
 
 // legacyDB writes a database at the given historical schema version, holding
 // one usage row, and returns its path. It never goes through Open, so the file
@@ -368,6 +451,9 @@ func legacyDB(t *testing.T, version int) string {
 		// table they create.
 		ddl += strings.Join(skillContextV6Statements(), ";\n") + ";\n"
 	}
+	if version >= 7 {
+		ddl += strings.Join(turnContextV7Statements(), ";\n") + ";\n"
+	}
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatalf("create v%d schema: %v", version, err)
 	}
@@ -378,7 +464,7 @@ func legacyDB(t *testing.T, version int) string {
 		model.ToolClaudeCode); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
-	if version >= 6 {
+	if version == 6 {
 		// A populated skill-context table, so the v7 drop is exercised against
 		// rows rather than an empty shell, and a checkpoint, so the reset that
 		// makes the drop safe has something to clear.
@@ -393,6 +479,15 @@ func legacyDB(t *testing.T, version int) string {
 			VALUES (?, '/home/x/.claude', '{"stale":1}')`,
 			model.ToolClaudeCode); err != nil {
 			t.Fatalf("seed legacy checkpoint: %v", err)
+		}
+	}
+	if version >= 7 {
+		if _, err := db.Exec(`
+			INSERT INTO usage_turn_context (
+				usage_dedup_key, dimension, value, tool, event_time_unix, observed_time_unix
+			) VALUES ('legacy-1', 'skill', 'legacy-skill', ?, 1750000000, 1750000000)`,
+			model.ToolClaudeCode); err != nil {
+			t.Fatalf("seed legacy turn context: %v", err)
 		}
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta(key,value) VALUES('schema_version',?)`,

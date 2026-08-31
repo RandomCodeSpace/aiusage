@@ -82,11 +82,7 @@ func runSummary(c *cobra.Command, o summaryOpts) error {
 	// --csv reports the underlying raw events (the summary object has no CSV
 	// shape); JSON and the table render the grouped summary.
 	if o.csv {
-		evs, err := st.ListEvents(ctx, filter)
-		if err != nil {
-			return fmt.Errorf("list events: %w", err)
-		}
-		return report.WriteEventsCSV(c.OutOrStdout(), evs)
+		return streamEventExport(ctx, st.Reader, filter, "csv", false, c.OutOrStdout())
 	}
 
 	sum, err := st.Summarize(ctx, filter)

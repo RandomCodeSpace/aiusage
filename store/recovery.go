@@ -674,7 +674,11 @@ func schemaRequirements(version int) ([]requiredTable, []requiredIndex, []requir
 		tables = append(tables, requiredTable{"source_checkpoints", []string{"tool", "source_path", "size_bytes", "mtime_ns", "read_offset", "watermark", "state"}})
 	}
 	if version >= 4 {
-		tables = append(tables, requiredTable{"usage_rollup", []string{"bucket_start_unix", "tool", "model", "project", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "reasoning_tokens", "total_tokens", "events", "cost_micro_usd", "unpriced_events"}})
+		rollupColumns := []string{"bucket_start_unix", "tool", "model", "project", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "reasoning_tokens", "total_tokens", "events", "cost_micro_usd", "unpriced_events"}
+		if version >= 8 {
+			rollupColumns = []string{"bucket_start_unix", "tool", "model", "project", "session_id", "provider", "service_tier", "price_class", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "reasoning_tokens", "total_tokens", "events", "cost_micro_usd", "unpriced_events"}
+		}
+		tables = append(tables, requiredTable{"usage_rollup", rollupColumns})
 	}
 	if version >= 5 {
 		tables = append(tables, requiredTable{"activity_events", []string{"id", "dedup_key", "tool", "kind", "name", "session_id", "project", "model", "event_time_unix", "observed_time_unix", "usage_dedup_key", "message_id", "request_id", "turn_seq", "calls_in_turn", "source_path"}})
@@ -714,6 +718,9 @@ func schemaRequirements(version int) ([]requiredTable, []requiredIndex, []requir
 			requiredTrigger{"trg_turnctx_no_update", "usage_turn_context", "UPDATE"},
 			requiredTrigger{"trg_turnctx_no_delete", "usage_turn_context", "DELETE"},
 		)
+	}
+	if version >= 8 {
+		tables = append(tables, requiredTable{"activity_usage_counts", []string{"usage_dedup_key", "activity_count"}})
 	}
 	return tables, indexes, triggers
 }
@@ -759,6 +766,9 @@ func availableRowCounts(ctx context.Context, db *sql.DB, version int) (map[strin
 	}
 	if version >= 7 {
 		tables = append(tables, "usage_turn_context")
+	}
+	if version >= 8 {
+		tables = append(tables, "activity_usage_counts")
 	}
 	counts := make(map[string]int64, len(tables))
 	for _, table := range tables {

@@ -98,8 +98,11 @@ CREATE TABLE IF NOT EXISTS source_checkpoints (
 -- because every real-world UTC offset is a whole number of quarter hours:
 -- hourly keys misplace half-hour zones (Asia/Kolkata at +05:30 among them),
 -- where one hour bucket straddles two local buckets and would land wholly in
--- the earlier one. Session id, provider, service tier and resolution below the
--- bucket width are deliberately absent: those queries go to the ledger.
+-- the earlier one. Session id, provider, service tier, and price class remain
+-- in the key so every public summary dimension, distinct-session count,
+-- provenance marker, and unpriced component total can be derived exactly
+-- without scanning the immutable ledger. Resolution below the bucket width
+-- still goes to the ledger.
 --
 -- cost_micro_usd sums ONLY the costs actually stamped on events;
 -- unpriced_events counts the rows that carry none, so a partial cost can never
@@ -109,6 +112,10 @@ CREATE TABLE IF NOT EXISTS usage_rollup (
   tool                  TEXT    NOT NULL,
   model                 TEXT    NOT NULL DEFAULT '',
   project               TEXT    NOT NULL DEFAULT '',
+  session_id            TEXT    NOT NULL DEFAULT '',
+  provider              TEXT    NOT NULL DEFAULT '',
+  service_tier          TEXT    NOT NULL DEFAULT '',
+  price_class           TEXT    NOT NULL,
   input_tokens          INTEGER NOT NULL DEFAULT 0,
   output_tokens         INTEGER NOT NULL DEFAULT 0,
   cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
@@ -118,7 +125,11 @@ CREATE TABLE IF NOT EXISTS usage_rollup (
   events                INTEGER NOT NULL DEFAULT 0,
   cost_micro_usd        INTEGER NOT NULL DEFAULT 0,
   unpriced_events       INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (bucket_start_unix, tool, model, project)
+  PRIMARY KEY (
+    bucket_start_unix, tool, model, project, session_id,
+    provider, service_tier, price_class
+  ),
+  CHECK (price_class IN ('unpriced','computed','vendor'))
 ) WITHOUT ROWID;
 
 -- Agent activity ledger (v5): one row per observed tool call, skill invocation
@@ -184,6 +195,18 @@ BEGIN SELECT RAISE(ABORT, 'activity_events is append-only: UPDATE forbidden'); E
 CREATE TRIGGER IF NOT EXISTS trg_activity_no_delete
 BEFORE DELETE ON activity_events
 BEGIN SELECT RAISE(ABORT, 'activity_events is append-only: DELETE forbidden'); END;
+
+-- Derived set-based divisor (v8). Each row is the number of successfully
+-- inserted activity rows that name one nonempty usage turn. Activity queries
+-- join this one-row count instead of running a correlated COUNT for every
+-- activity row. It is mutable derived state, filled from activity_events by
+-- migration 8 and maintained in the same transaction as future inserts.
+CREATE TABLE IF NOT EXISTS activity_usage_counts (
+  usage_dedup_key TEXT    NOT NULL PRIMARY KEY,
+  activity_count  INTEGER NOT NULL,
+  CHECK (usage_dedup_key <> ''),
+  CHECK (activity_count > 0)
+) WITHOUT ROWID;
 
 -- usage_turn_context records what a turn was running UNDER, one row per
 -- (usage event, dimension). It answers "what did skill X / agent Y / server Z

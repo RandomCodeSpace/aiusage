@@ -82,9 +82,8 @@ func groupExpr(dim string) (string, error) {
 // produced it - the only way two surfaces reading different tables can be
 // compared at all. The fold is exact because the rollup's 15-minute UTC buckets
 // never straddle a local boundary: every UTC offset is a whole number of
-// quarter hours. The dimensions the rollup does not keep are refused by name
-// rather than silently answered from a table that cannot know: a session or
-// provider breakdown must go to the ledger.
+// quarter hours. Schema 8 carries every categorical summary dimension in the
+// key, including session and provider.
 func rollupGroupExpr(dim string) (string, error) {
 	switch dim {
 	case "hour":
@@ -99,10 +98,12 @@ func rollupGroupExpr(dim string) (string, error) {
 		return "tool", nil
 	case "model":
 		return "model", nil
+	case "provider":
+		return "provider", nil
 	case "project":
 		return "project", nil
-	case "session", "provider":
-		return "", fmt.Errorf("store: the rollup keeps no %q dimension; group the ledger instead", dim)
+	case "session":
+		return "session_id", nil
 	default:
 		return "", fmt.Errorf("store: invalid group dimension %q", dim)
 	}

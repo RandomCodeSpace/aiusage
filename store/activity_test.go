@@ -398,6 +398,65 @@ func TestActivityDedupIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestActivityUsageCountsTrackOnlyCommittedRows pins the derived divisor's
+// write contract. Duplicate, malformed and unjoinable activity rows must not
+// change a count that every attribution query trusts.
+func TestActivityUsageCountsTrackOnlyCommittedRows(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	when := time.Date(2026, 5, 5, 8, 0, 0, 0, time.UTC)
+
+	initial := []model.ActivityEvent{
+		act("count-a", "Read", model.ActivityTool, when, "usage-a", 0, 2),
+		act("count-b", "Edit", model.ActivityTool, when, "usage-a", 1, 2),
+		act("unjoined", "stop_hook", model.ActivityHook, when, "", 0, 1),
+	}
+	res, err := st.ApplyObservation(ctx, nil, initial, nil)
+	if err != nil || res.Activity != 3 {
+		t.Fatalf("initial apply = %+v err=%v, want 3 activity", res, err)
+	}
+	assertActivityUsageCount(t, st, "usage-a", 2)
+	assertActivityUsageCountRows(t, st, 1)
+
+	res, err = st.ApplyObservation(ctx, nil, initial, nil)
+	if err != nil || res.Activity != 0 {
+		t.Fatalf("duplicate apply = %+v err=%v, want 0 activity", res, err)
+	}
+	assertActivityUsageCount(t, st, "usage-a", 2)
+
+	bad := act("bad-count", "", model.ActivityTool, when, "usage-a", 0, 1)
+	good := act("count-c", "Bash", model.ActivityTool, when, "usage-a", 0, 1)
+	res, err = st.ApplyObservation(ctx, nil, []model.ActivityEvent{bad, good}, nil)
+	if err == nil || res.Activity != 1 {
+		t.Fatalf("mixed apply = %+v err=%v, want 1 activity and a row error", res, err)
+	}
+	assertActivityUsageCount(t, st, "usage-a", 3)
+	assertActivityUsageCountRows(t, st, 1)
+}
+
+func assertActivityUsageCount(t *testing.T, st *Ledger, key string, want int64) {
+	t.Helper()
+	var got int64
+	if err := st.db.QueryRow(`
+		SELECT activity_count FROM activity_usage_counts WHERE usage_dedup_key=?`, key).Scan(&got); err != nil {
+		t.Fatalf("read activity count for %s: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("activity count for %s = %d, want %d", key, got, want)
+	}
+}
+
+func assertActivityUsageCountRows(t *testing.T, st *Ledger, want int64) {
+	t.Helper()
+	var got int64
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM activity_usage_counts`).Scan(&got); err != nil {
+		t.Fatalf("count activity usage keys: %v", err)
+	}
+	if got != want {
+		t.Fatalf("activity usage count rows = %d, want %d", got, want)
+	}
+}
+
 // TestActivityRejectsMalformedRows checks the CHECK constraints do their job
 // and that a poison row is skipped rather than aborting the batch it rides in —
 // the same contract usage_events has, because activity is re-derived every

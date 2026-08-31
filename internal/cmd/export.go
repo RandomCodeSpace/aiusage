@@ -1,16 +1,26 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/RandomCodeSpace/aiusage/internal/report"
+	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
 )
+
+const exportPageSize = 4096
+
+type eventPageWriter interface {
+	WritePage([]model.UsageEvent) error
+	Close() error
+}
 
 // exportOpts holds the flags for the export command.
 type exportOpts struct {
@@ -71,35 +81,56 @@ func runExport(c *cobra.Command, o exportOpts) error {
 	}
 	defer st.Close()
 
-	// The raw column is projected only for --include-raw: it is the bulk of the
-	// ledger's bytes and every other consumer discards it.
-	var listOpts []store.ListOption
-	if o.includeRaw {
-		listOpts = append(listOpts, store.WithRaw())
-	}
-	evs, err := st.ListEvents(cmdContext(c), store.Filter{Since: since, Until: until}, listOpts...)
-	if err != nil {
-		return fmt.Errorf("list events: %w", err)
-	}
-
 	w, closeFn, err := exportWriter(c, o.out, o.includeRaw)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
+	return streamEventExport(cmdContext(c), st.Reader,
+		store.Filter{Since: since, Until: until}, format, o.includeRaw, w)
+}
 
+func streamEventExport(ctx context.Context, reader *store.Reader, filter store.Filter, format string, includeRaw bool, out io.Writer) error {
+	var stream eventPageWriter
+	var err error
 	switch format {
 	case "csv":
-		if o.includeRaw {
-			return report.WriteEventsCSVWithRaw(w, evs)
-		}
-		return report.WriteEventsCSV(w, evs)
+		stream, err = report.NewEventsCSVWriter(out, includeRaw)
 	default:
-		if o.includeRaw {
-			return report.WriteEventsJSONWithRaw(w, evs)
-		}
-		return report.WriteEventsJSON(w, evs)
+		stream, err = report.NewEventsJSONWriter(out, includeRaw)
 	}
+	if err != nil {
+		return err
+	}
+
+	var afterTime time.Time
+	var afterID int64
+	for {
+		listOpts := []store.ListOption{store.WithEventTimeKeyset(afterTime, afterID, exportPageSize)}
+		if includeRaw {
+			listOpts = append(listOpts, store.WithRaw())
+		}
+		page, err := reader.ListEvents(ctx, filter, listOpts...)
+		if err != nil {
+			return fmt.Errorf("list events: %w", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		if err := stream.WritePage(page); err != nil {
+			return err
+		}
+		last := page[len(page)-1]
+		if last.EventTime.Before(afterTime) ||
+			(last.EventTime.Equal(afterTime) && last.ID <= afterID) {
+			return fmt.Errorf("list events: event-time cursor did not advance past row %d", afterID)
+		}
+		afterTime, afterID = last.EventTime, last.ID
+		if len(page) < exportPageSize {
+			break
+		}
+	}
+	return stream.Close()
 }
 
 // exportWriter resolves the output target: stdout when out is empty, otherwise

@@ -14,8 +14,9 @@ import (
 )
 
 // migration is one ordered schema step bringing a database from version-1 to
-// version. Statements must be additive (ALTER TABLE ... ADD COLUMN, CREATE ...
-// IF NOT EXISTS): trg_events_no_update blocks UPDATE backfill on usage_events.
+// version. Authoritative ledgers are additive: trg_events_no_update blocks
+// UPDATE backfill on usage_events. Derived tables may be replaced because they
+// are reproducible, but the replacement still commits before the version stamp.
 type migration struct {
 	version    int
 	statements []string
@@ -39,6 +40,8 @@ type migration struct {
 //	     mcp_tool, mcp_server, plugin) in one table keyed by (usage event,
 //	     dimension); retires usage_skill_context, which it subsumes, and clears
 //	     the claude-code checkpoint so the next pass re-derives both
+//	v8 — enriched usage_rollup plus the activity_usage_counts derived divisor;
+//	     no authoritative ledger row changes
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -67,7 +70,7 @@ var migrations = []migration{
 	// the length of a rebuild on every upgrade. The collector detects the empty
 	// rollup against the ledger watermark on its next pass and rebuilds it
 	// there (EnsureRollup), where the cost is visible and non-fatal.
-	{version: 4, statements: []string{rollupTableDDL}},
+	{version: 4, statements: []string{rollupV4TableDDL}},
 	// v5 creates the activity ledger EMPTY, and there is nothing to backfill
 	// into it: activity is not derivable from usage_events (the ledger records
 	// what a turn cost, never which tools it called), so the rows can only come
@@ -115,6 +118,20 @@ var migrations = []migration{
 	// regardless. Rows land only where a re-read of the sources reaches — which
 	// is now the whole claude-code corpus, because of the line above.
 	{version: 7, statements: turnContextV7Statements()},
+	// v8 replaces only DERIVED state. usage_rollup is intentionally left empty
+	// with no watermark so the next collection pass performs the visible,
+	// repairable rebuild outside the migration transaction. Activity counts are
+	// small and required immediately by every activity query, so they are
+	// rebuilt set-wise from the append-only activity ledger here. The migration
+	// runner stamps v8 only after every statement succeeds.
+	{version: 8, statements: []string{
+		`DROP TABLE IF EXISTS usage_rollup`,
+		rollupTableDDL,
+		`DELETE FROM schema_meta WHERE key='rollup_watermark'`,
+		`DROP TABLE IF EXISTS activity_usage_counts`,
+		activityUsageCountsTableDDL,
+		rebuildActivityUsageCountsSQL,
+	}},
 }
 
 // ensureSchema reads the recorded schema version before touching anything and

@@ -20,8 +20,9 @@
 // nothing is ever rewritten, so a number this project once reported can always
 // be reproduced.
 //
-// aggregate_state, source_checkpoints and usage_rollup are the only mutable
-// data tables (schema_meta holds the version stamp and the rollup watermark).
+// aggregate_state, source_checkpoints, usage_rollup and activity_usage_counts
+// are the only mutable data tables (schema_meta holds the version stamp and the
+// rollup watermark).
 // They are working state, not history: losing any of them costs a re-read or a
 // rebuild, never a fact.
 //
@@ -213,11 +214,6 @@ type Bucket struct {
 	// harness (model.PriceProvenance). It is what lets a surface say the sum is
 	// an estimate: zero means every dollar in CostMicroUSD is one a vendor
 	// reported.
-	//
-	// It is always 0 in a RollupSummary, on the same terms as Sessions: the
-	// rollup keeps no price_source dimension, so provenance is not merely absent
-	// there but underivable, and a rollup-served figure must not be marked
-	// either way. See RollupSummary.
 	ComputedCostEvents int64
 }
 
@@ -253,15 +249,9 @@ type Summary struct {
 // produces, from the derived rollup instead of the ledger, plus the range those
 // buckets actually cover.
 //
-// Bucket.Sessions is always 0 here. The rollup keeps no session dimension, so
-// a distinct-session count is not merely absent but underivable - reading the
-// zero as "no sessions" would be a lie the shape cannot prevent, which is why
-// this is a distinct type and not a Summary.
-//
-// Bucket.ComputedCostEvents is always 0 here for the same reason: the rollup
-// keeps no price_source dimension either, so a rollup-served cost cannot say
-// whether a vendor reported it or this project estimated it. A caller that
-// needs the provenance mark must ask Summarize.
+// Schema 8 makes the bucket measures complete, including Sessions and
+// ComputedCostEvents. The distinct type remains for source compatibility and
+// because this method still reports its outward-snapped range explicitly.
 type RollupSummary struct {
 	GroupBy []string
 	Buckets []Bucket
@@ -279,10 +269,12 @@ type RollupSummary struct {
 type ListOption func(*listOptions)
 
 type listOptions struct {
-	includeRaw bool
-	keyset     bool
-	afterID    int64
-	limit      int
+	includeRaw      bool
+	keyset          bool
+	eventTimeKeyset bool
+	afterEventTime  time.Time
+	afterID         int64
+	limit           int
 }
 
 // WithKeyset turns ListEvents into one page of a keyset walk: at most limit rows
@@ -300,6 +292,22 @@ type listOptions struct {
 func WithKeyset(afterID int64, limit int) ListOption {
 	return func(o *listOptions) {
 		o.keyset = true
+		o.eventTimeKeyset = false
+		o.afterID = afterID
+		o.limit = limit
+	}
+}
+
+// WithEventTimeKeyset turns ListEvents into one page of its existing total
+// event-time order. Rows after (after, afterID) are returned, ordered by
+// (event_time_unix, id); afterID 0 starts the walk and ignores after. Export
+// uses this cursor so a late-observed old event keeps the same position the
+// unpaged public output has always used. Existing WithKeyset remains id-ordered.
+func WithEventTimeKeyset(after time.Time, afterID int64, limit int) ListOption {
+	return func(o *listOptions) {
+		o.keyset = false
+		o.eventTimeKeyset = true
+		o.afterEventTime = after
 		o.afterID = afterID
 		o.limit = limit
 	}

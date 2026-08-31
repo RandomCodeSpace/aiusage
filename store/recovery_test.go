@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -677,7 +678,8 @@ func TestMigrationPreflightCreatesVerifiedBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	backups, err := filepath.Glob(filepath.Join(filepath.Dir(path), "backups", "pre-migration-v3-to-v7-*.db"))
+	backups, err := filepath.Glob(filepath.Join(filepath.Dir(path), "backups",
+		fmt.Sprintf("pre-migration-v3-to-v%d-*.db", SchemaVersion)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +795,8 @@ func TestFailedMigrationRetainsCommittedStampAndRestorableSnapshot(t *testing.T)
 		t.Fatal(err)
 	}
 
-	backups, err := filepath.Glob(filepath.Join(filepath.Dir(path), "backups", "pre-migration-v3-to-v7-*.db"))
+	backups, err := filepath.Glob(filepath.Join(filepath.Dir(path), "backups",
+		fmt.Sprintf("pre-migration-v3-to-v%d-*.db", SchemaVersion)))
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("retained snapshots = %v err=%v, want one", backups, err)
 	}

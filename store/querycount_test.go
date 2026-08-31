@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -185,6 +186,121 @@ func TestSummarizeQueryCount(t *testing.T) {
 	})
 	if n != 2 {
 		t.Errorf("grouped Summarize ran %d statements, want exactly 2 (grouped pass + distinct sessions)", n)
+	}
+}
+
+// TestSummaryAccelerationRouting proves the fast path is conditional rather
+// than a semantic change: exact 15-minute bounds read the current rollup,
+// arbitrary-second bounds read the authoritative ledger, and a stale
+// watermark causes a rollup probe followed by the ledger fallback. The same
+// routing applies to the unpriced groups used for display-time costing.
+func TestSummaryAccelerationRouting(t *testing.T) {
+	st := openCounting(t)
+	seedTools(t, st)
+	ctx := context.Background()
+	aligned := Filter{
+		Since: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 8, 1, 12, 15, 0, 0, time.UTC),
+	}
+	arbitrary := aligned
+	arbitrary.Since = arbitrary.Since.Add(time.Second)
+
+	assertRoute := func(name string, queries []string, wantRollup []bool) {
+		t.Helper()
+		if len(queries) != len(wantRollup) {
+			t.Fatalf("%s prepared %d statements, want %d:\n%s", name, len(queries), len(wantRollup), strings.Join(queries, "\n---\n"))
+		}
+		for i, want := range wantRollup {
+			got := strings.Contains(queries[i], "FROM usage_rollup")
+			if got != want {
+				t.Errorf("%s statement %d rollup=%v want %v:\n%s", name, i, got, want, queries[i])
+			}
+		}
+	}
+
+	q := queriesDuring(func() {
+		if _, err := st.Summarize(ctx, aligned); err != nil {
+			t.Fatalf("aligned Summarize: %v", err)
+		}
+	})
+	assertRoute("aligned summary", q, []bool{true})
+
+	q = queriesDuring(func() {
+		if _, err := st.Summarize(ctx, arbitrary); err != nil {
+			t.Fatalf("arbitrary Summarize: %v", err)
+		}
+	})
+	assertRoute("arbitrary summary", q, []bool{false})
+
+	q = queriesDuring(func() {
+		if _, err := st.UnpricedGroups(ctx, aligned); err != nil {
+			t.Fatalf("aligned UnpricedGroups: %v", err)
+		}
+	})
+	assertRoute("aligned unpriced", q, []bool{true})
+
+	q = queriesDuring(func() {
+		if _, err := st.UnpricedGroups(ctx, arbitrary); err != nil {
+			t.Fatalf("arbitrary UnpricedGroups: %v", err)
+		}
+	})
+	assertRoute("arbitrary unpriced", q, []bool{false})
+
+	if _, err := st.db.ExecContext(ctx,
+		`UPDATE schema_meta SET value='0' WHERE key=?`, rollupWatermarkKey); err != nil {
+		t.Fatalf("stale watermark: %v", err)
+	}
+	q = queriesDuring(func() {
+		if _, err := st.Summarize(ctx, aligned); err != nil {
+			t.Fatalf("stale Summarize: %v", err)
+		}
+	})
+	assertRoute("stale summary", q, []bool{true, false})
+
+	q = queriesDuring(func() {
+		if _, err := st.UnpricedGroups(ctx, aligned); err != nil {
+			t.Fatalf("stale UnpricedGroups: %v", err)
+		}
+	})
+	// A stale rollup yields no grouped rows, so UnpricedGroups resolves that
+	// ambiguous empty result with one scalar watermark read before falling back.
+	assertRoute("stale unpriced", q, []bool{true, false, false})
+}
+
+// TestActivityAttributionUsesMaterializedCounts keeps the hot attribution
+// query set-based. The divisor is joined once from activity_usage_counts; a
+// correlated COUNT over activity_events would rescan the ledger per call.
+func TestActivityAttributionUsesMaterializedCounts(t *testing.T) {
+	st := openCounting(t)
+	ctx := context.Background()
+	at := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	e := ev("usage-counted", model.ToolClaudeCode, at, 900)
+	acts := []model.ActivityEvent{
+		act("activity-counted-a", "Read", model.ActivityTool, at, e.DedupKey, 0, 2),
+		act("activity-counted-b", "Edit", model.ActivityTool, at, e.DedupKey, 1, 2),
+	}
+	if _, err := st.ApplyObservation(ctx, []model.UsageEvent{e}, acts, nil); err != nil {
+		t.Fatalf("seed activity: %v", err)
+	}
+
+	queries := queriesDuring(func() {
+		sum, err := st.SummarizeActivity(ctx, ActivityFilter{})
+		if err != nil {
+			t.Fatalf("SummarizeActivity: %v", err)
+		}
+		if sum.Totals.AttributedTotal != 900 {
+			t.Fatalf("attributed total = %d, want 900", sum.Totals.AttributedTotal)
+		}
+	})
+	if len(queries) != 1 {
+		t.Fatalf("SummarizeActivity prepared %d statements, want 1:\n%s", len(queries), strings.Join(queries, "\n---\n"))
+	}
+	q := strings.ToLower(queries[0])
+	if !strings.Contains(q, "join activity_usage_counts") {
+		t.Fatalf("activity query does not join materialized counts:\n%s", queries[0])
+	}
+	if strings.Contains(q, "select count(*) from activity_events") {
+		t.Fatalf("activity query restored a correlated divisor scan:\n%s", queries[0])
 	}
 }
 

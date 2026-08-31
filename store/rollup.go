@@ -34,11 +34,10 @@ import (
 	"github.com/RandomCodeSpace/aiusage/model"
 )
 
-// rollupTableDDL is the rollup's CREATE TABLE as the v4 migration applies it.
-// schema.sql carries the same table (it always describes the full latest
-// schema) and TestRollupTableMatchesFreshSchema compares the two, so a migrated
-// database and a fresh one can never carry different tables under one version.
-const rollupTableDDL = `CREATE TABLE IF NOT EXISTS usage_rollup (
+// rollupV4TableDDL is frozen migration history. Version 4 did not carry the
+// dimensions version 8 needs, so old files must first reach the layout their
+// recorded version promises before migration 8 replaces this derived table.
+const rollupV4TableDDL = `CREATE TABLE IF NOT EXISTS usage_rollup (
   bucket_start_unix     INTEGER NOT NULL,
   tool                  TEXT    NOT NULL,
   model                 TEXT    NOT NULL DEFAULT '',
@@ -54,6 +53,41 @@ const rollupTableDDL = `CREATE TABLE IF NOT EXISTS usage_rollup (
   unpriced_events       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (bucket_start_unix, tool, model, project)
 ) WITHOUT ROWID`
+
+// rollupTableDDL is the current v8 rollup. schema.sql carries the same table
+// and TestRollupTableMatchesFreshSchema compares fresh and migrated databases.
+// The deeper key makes every public summary measure exactly derivable while
+// keeping the immutable usage ledger as the only source of truth.
+const rollupTableDDL = `CREATE TABLE IF NOT EXISTS usage_rollup (
+  bucket_start_unix     INTEGER NOT NULL,
+  tool                  TEXT    NOT NULL,
+  model                 TEXT    NOT NULL DEFAULT '',
+  project               TEXT    NOT NULL DEFAULT '',
+  session_id            TEXT    NOT NULL DEFAULT '',
+  provider              TEXT    NOT NULL DEFAULT '',
+  service_tier          TEXT    NOT NULL DEFAULT '',
+  price_class           TEXT    NOT NULL,
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens      INTEGER NOT NULL DEFAULT 0,
+  total_tokens          INTEGER NOT NULL DEFAULT 0,
+  events                INTEGER NOT NULL DEFAULT 0,
+  cost_micro_usd        INTEGER NOT NULL DEFAULT 0,
+  unpriced_events       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (
+    bucket_start_unix, tool, model, project, session_id,
+    provider, service_tier, price_class
+  ),
+  CHECK (price_class IN ('unpriced','computed','vendor'))
+) WITHOUT ROWID`
+
+const (
+	priceClassUnpriced = "unpriced"
+	priceClassComputed = "computed"
+	priceClassVendor   = "vendor"
+)
 
 // rollupWatermarkKey names the schema_meta row holding the highest
 // usage_events.id folded into the rollup. schema_meta is bookkeeping, not a
@@ -77,13 +111,24 @@ func bucketStartUnix(sec int64) int64 {
 // bucketStartSQL is bucketStartUnix as a SQL expression over event_time_unix.
 const bucketStartSQL = `(event_time_unix - ((event_time_unix % 900) + 900) % 900)`
 
-// rollupKey is one rollup row's identity: the UTC bucket plus the three
-// categorisation dimensions the rollup keeps.
+// rollupPriceClassSQL is eventPriceClass expressed over usage_events. Both use
+// the same closed vendor vocabulary, so rebuilding cannot move a row between
+// provenance classes compared with the incremental path.
+var rollupPriceClassSQL = `CASE
+	WHEN cost_micro_usd IS NULL THEN '` + priceClassUnpriced + `'
+	WHEN ` + vendorPriceSourceSQL("price_source") + ` THEN '` + priceClassVendor + `'
+	ELSE '` + priceClassComputed + `' END`
+
+// rollupKey is one v8 rollup row's identity.
 type rollupKey struct {
-	bucket  int64
-	tool    string
-	model   string
-	project string
+	bucket      int64
+	tool        string
+	model       string
+	project     string
+	session     string
+	provider    string
+	serviceTier string
+	priceClass  string
 }
 
 // rollupCell accumulates the measures of one rollup row.
@@ -112,10 +157,14 @@ func (d *rollupDelta) add(e model.UsageEvent, id int64) {
 		d.cells = make(map[rollupKey]*rollupCell)
 	}
 	k := rollupKey{
-		bucket:  bucketStartUnix(e.EventTime.UTC().Unix()),
-		tool:    e.Tool,
-		model:   e.Model,
-		project: e.Project,
+		bucket:      bucketStartUnix(e.EventTime.UTC().Unix()),
+		tool:        e.Tool,
+		model:       e.Model,
+		project:     e.Project,
+		session:     e.SessionID,
+		provider:    e.Provider,
+		serviceTier: e.ServiceTier,
+		priceClass:  eventPriceClass(e),
 	}
 	c := d.cells[k]
 	if c == nil {
@@ -139,6 +188,16 @@ func (d *rollupDelta) add(e model.UsageEvent, id int64) {
 	}
 }
 
+func eventPriceClass(e model.UsageEvent) string {
+	if _, ok := e.Cost(); !ok {
+		return priceClassUnpriced
+	}
+	if model.PriceProvenance(e.PriceSource) == model.CostVendor {
+		return priceClassVendor
+	}
+	return priceClassComputed
+}
+
 func (d *rollupDelta) empty() bool { return len(d.cells) == 0 }
 
 // rollupUpsertSQL adds a delta onto the matching rollup row, creating it when
@@ -146,11 +205,15 @@ func (d *rollupDelta) empty() bool { return len(d.cells) == 0 }
 // of the SET are the stored row's current values.
 const rollupUpsertSQL = `
 	INSERT INTO usage_rollup (
-		bucket_start_unix, tool, model, project,
+		bucket_start_unix, tool, model, project, session_id,
+		provider, service_tier, price_class,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		reasoning_tokens, total_tokens, events, cost_micro_usd, unpriced_events
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-	ON CONFLICT(bucket_start_unix, tool, model, project) DO UPDATE SET
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	ON CONFLICT(
+		bucket_start_unix, tool, model, project, session_id,
+		provider, service_tier, price_class
+	) DO UPDATE SET
 		input_tokens          = input_tokens          + excluded.input_tokens,
 		output_tokens         = output_tokens         + excluded.output_tokens,
 		cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
@@ -176,7 +239,8 @@ func (d *rollupDelta) apply(ctx context.Context, tx *sql.Tx) error {
 
 	for k, c := range d.cells {
 		if _, err := stmt.ExecContext(ctx,
-			k.bucket, k.tool, k.model, k.project,
+			k.bucket, k.tool, k.model, k.project, k.session,
+			k.provider, k.serviceTier, k.priceClass,
 			c.input, c.output, c.cacheCreation, c.cacheRead,
 			c.reasoning, c.total, c.events, c.costMicroUSD, c.unpriced,
 		); err != nil {
@@ -238,11 +302,13 @@ func (l *Ledger) RebuildRollup(ctx context.Context) error {
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO usage_rollup (
-			bucket_start_unix, tool, model, project,
+			bucket_start_unix, tool, model, project, session_id,
+			provider, service_tier, price_class,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			reasoning_tokens, total_tokens, events, cost_micro_usd, unpriced_events
 		)
-		SELECT `+bucketStartSQL+`, tool, model, project,
+		SELECT `+bucketStartSQL+`, tool, model, project, session_id,
+			provider, service_tier, `+rollupPriceClassSQL+`,
 			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 			COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
 			COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
@@ -250,7 +316,7 @@ func (l *Ledger) RebuildRollup(ctx context.Context) error {
 			COALESCE(SUM(cost_micro_usd),0),
 			COALESCE(SUM(CASE WHEN cost_micro_usd IS NULL THEN 1 ELSE 0 END),0)
 		FROM usage_events
-		GROUP BY 1, 2, 3, 4`); err != nil {
+		GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`); err != nil {
 		return fmt.Errorf("store: fill rollup: %w", err)
 	}
 
@@ -341,32 +407,70 @@ func (s *Reader) RollupStale(ctx context.Context) (bool, error) {
 // must yield identical numbers to Summarize over the same range, which
 // TestRollupMatchesLedger pins through store queries on both sides.
 //
-// Differences from Summarize, all forced by what the rollup keeps:
+// The public contract remains the one version 4 exposed: Since/Until are
+// snapped OUTWARD to whole UTC buckets (15 minutes), because
 //
-//   - Bucket.Sessions is always 0 and Filter.Sessions is rejected. Distinct
-//     session counting needs the session dimension, which the rollup does not
-//     carry; ask the ledger.
-//   - The "session" and "provider" group dimensions are rejected for the same
-//     reason.
-//   - Since/Until are snapped OUTWARD to whole UTC buckets (15 minutes), because
-//     a bucket is the finest thing the table knows. The snapped bounds come back
-//     in the result so a caller can label what it actually got instead of
-//     implying it asked for it.
+//	a bucket is the finest thing the table knows. The snapped bounds come back
+//	in the result so a caller can label what it actually got instead of
+//	implying it asked for it.
 func (s *Reader) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary, error) {
-	if len(f.Sessions) > 0 {
-		return nil, fmt.Errorf("store: rollup keeps no session dimension; filter sessions against the ledger")
+	since, until := snapRollupRange(f.Since, f.Until)
+	sum, _, err := s.summarizeRollup(ctx, f, since, until, false)
+	if err != nil {
+		return nil, err
 	}
+	return &RollupSummary{
+		GroupBy: sum.GroupBy,
+		Buckets: sum.Buckets,
+		Totals:  sum.Totals,
+		Since:   since,
+		Until:   until,
+	}, nil
+}
+
+// rollupCurrentSQL is embedded in accelerated aggregate statements so checking
+// the watermark does not add a round trip. A missing watermark means zero,
+// which is current only for an empty ledger.
+const rollupCurrentSQL = `(COALESCE((
+	SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='rollup_watermark'
+),0) = (SELECT COALESCE(MAX(id),0) FROM usage_events))`
+
+func rollupRangeAligned(since, until time.Time) bool {
+	aligned := func(t time.Time) bool {
+		return t.IsZero() || (t.Nanosecond() == 0 && bucketStartUnix(t.UTC().Unix()) == t.UTC().Unix())
+	}
+	return aligned(since) && aligned(until)
+}
+
+func (s *Reader) summarizeCurrentRollup(ctx context.Context, f Filter) (*Summary, bool, error) {
+	return s.summarizeRollup(ctx, f, f.Since, f.Until, true)
+}
+
+// summarizeRollup answers from the v8 derived table. requireCurrent embeds the
+// watermark check into the aggregate so Summarize keeps its existing one-query
+// ungrouped and two-query grouped contract. A grouped query with no rows falls
+// back to the ledger: that is correct for both an empty current result and a
+// stale table, and avoids a separate status query on the hot path.
+func (s *Reader) summarizeRollup(ctx context.Context, f Filter, since, until time.Time, requireCurrent bool) (*Summary, bool, error) {
 	groupExprs := make([]string, 0, len(f.GroupBy))
 	for _, dim := range f.GroupBy {
 		expr, err := rollupGroupExpr(dim)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		groupExprs = append(groupExprs, expr)
 	}
 
-	since, until := snapRollupRange(f.Since, f.Until)
 	where, args := buildRollupWhere(f, since, until)
+	statusExpr := "1"
+	if requireCurrent {
+		statusExpr = rollupCurrentSQL
+		if where == "" {
+			where = " WHERE " + rollupCurrentSQL
+		} else {
+			where += " AND " + rollupCurrentSQL
+		}
+	}
 
 	var sb strings.Builder
 	sb.WriteString("SELECT ")
@@ -375,10 +479,14 @@ func (s *Reader) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary,
 		sb.WriteString(", ")
 	}
 	sb.WriteString(`COALESCE(SUM(events),0),
+		COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END),
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
 		COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
-		COALESCE(SUM(cost_micro_usd),0), COALESCE(SUM(unpriced_events),0)
+		COALESCE(SUM(cost_micro_usd),0), COALESCE(SUM(unpriced_events),0),
+		COALESCE(SUM(CASE WHEN price_class='computed' THEN events ELSE 0 END),0), `)
+	sb.WriteString(statusExpr)
+	sb.WriteString(`
 		FROM usage_rollup`)
 	sb.WriteString(where)
 	if len(groupExprs) > 0 {
@@ -390,27 +498,28 @@ func (s *Reader) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary,
 
 	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: summarize rollup: %w", err)
+		return nil, false, fmt.Errorf("store: summarize rollup: %w", err)
 	}
 	defer rows.Close()
 
-	out := &RollupSummary{
+	out := &Summary{
 		GroupBy: append([]string{}, f.GroupBy...),
-		Since:   since,
-		Until:   until,
 	}
+	current := !requireCurrent
 	for rows.Next() {
 		keyVals := make([]string, len(f.GroupBy))
-		dest := make([]any, 0, len(f.GroupBy)+9)
+		dest := make([]any, 0, len(f.GroupBy)+12)
 		for i := range keyVals {
 			dest = append(dest, &keyVals[i])
 		}
 		var b Bucket
-		dest = append(dest, &b.Events, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead,
-			&b.Reasoning, &b.Total, &b.CostMicroUSD, &b.UnpricedEvents)
+		var status int
+		dest = append(dest, &b.Events, &b.Sessions, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead,
+			&b.Reasoning, &b.Total, &b.CostMicroUSD, &b.UnpricedEvents, &b.ComputedCostEvents, &status)
 		if err := rows.Scan(dest...); err != nil {
-			return nil, fmt.Errorf("store: scan rollup row: %w", err)
+			return nil, false, fmt.Errorf("store: scan rollup row: %w", err)
 		}
+		current = status != 0
 		if len(f.GroupBy) > 0 {
 			b.Keys = make(map[string]string, len(f.GroupBy))
 			b.OrderedKeys = append([]string{}, f.GroupBy...)
@@ -421,17 +530,20 @@ func (s *Reader) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary,
 		out.Buckets = append(out.Buckets, b)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: rollup rows: %w", err)
+		return nil, false, fmt.Errorf("store: rollup rows: %w", err)
+	}
+	if requireCurrent && !current {
+		return out, false, nil
 	}
 
-	// Ungrouped, the single result row IS the total. Grouped, every measure the
-	// rollup carries is additive across buckets (the one that is not - distinct
-	// sessions - is not in the table at all), so the totals need no second pass.
+	// Ungrouped, the single result row IS the total. Grouped, every measure but
+	// distinct sessions adds across buckets; that one gets the same narrow
+	// second query the authoritative ledger path uses.
 	if len(f.GroupBy) == 0 {
 		if len(out.Buckets) == 1 {
 			out.Totals = out.Buckets[0]
 		}
-		return out, nil
+		return out, current, nil
 	}
 	for _, b := range out.Buckets {
 		out.Totals.Events += b.Events
@@ -443,8 +555,105 @@ func (s *Reader) SummarizeRollup(ctx context.Context, f Filter) (*RollupSummary,
 		out.Totals.Total += b.Total
 		out.Totals.CostMicroUSD += b.CostMicroUSD
 		out.Totals.UnpricedEvents += b.UnpricedEvents
+		out.Totals.ComputedCostEvents += b.ComputedCostEvents
 	}
-	return out, nil
+	if len(out.Buckets) > 0 {
+		n, err := s.distinctRollupSessions(ctx, where, args)
+		if err != nil {
+			return nil, false, err
+		}
+		out.Totals.Sessions = n
+	}
+	return out, current, nil
+}
+
+func (s *Reader) distinctRollupSessions(ctx context.Context, where string, args []any) (int64, error) {
+	var n int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END)
+		FROM usage_rollup`+where, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: distinct rollup sessions: %w", err)
+	}
+	return n, nil
+}
+
+// unpricedGroupsCurrentRollup is UnpricedGroups' exact aligned-range fast
+// path. The enriched key carries every field a display-time price lookup needs,
+// so no component is inferred from a priced neighbour.
+func (s *Reader) unpricedGroupsCurrentRollup(ctx context.Context, f Filter) ([]UnpricedGroup, bool, error) {
+	groupExprs := make([]string, 0, len(f.GroupBy))
+	for _, dim := range f.GroupBy {
+		expr, err := rollupGroupExpr(dim)
+		if err != nil {
+			return nil, false, err
+		}
+		groupExprs = append(groupExprs, expr)
+	}
+	where, args := buildRollupWhere(f, f.Since, f.Until)
+	condition := "price_class='" + priceClassUnpriced + "' AND " + rollupCurrentSQL
+	if where == "" {
+		where = " WHERE " + condition
+	} else {
+		where += " AND " + condition
+	}
+	cols := append(append([]string{}, groupExprs...), "tool", "model", "provider", "service_tier")
+	q := "SELECT " + strings.Join(cols, ", ") + `,
+		COALESCE(SUM(events),0),
+		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+		COALESCE(SUM(reasoning_tokens),0), ` + rollupCurrentSQL + `
+		FROM usage_rollup` + where +
+		" GROUP BY " + strings.Join(cols, ", ") +
+		" ORDER BY " + strings.Join(cols, ", ")
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: unpriced rollup groups: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UnpricedGroup
+	for rows.Next() {
+		keyVals := make([]string, len(f.GroupBy))
+		dest := make([]any, 0, len(f.GroupBy)+11)
+		for i := range keyVals {
+			dest = append(dest, &keyVals[i])
+		}
+		var g UnpricedGroup
+		var current int
+		dest = append(dest, &g.Tool, &g.Model, &g.Provider, &g.ServiceTier,
+			&g.Events, &g.Input, &g.Output, &g.CacheCreation, &g.CacheRead, &g.Reasoning, &current)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, false, fmt.Errorf("store: scan unpriced rollup group: %w", err)
+		}
+		if current == 0 {
+			return nil, false, nil
+		}
+		if len(f.GroupBy) > 0 {
+			g.Keys = make(map[string]string, len(f.GroupBy))
+			g.OrderedKeys = append([]string{}, f.GroupBy...)
+			for i, dim := range f.GroupBy {
+				g.Keys[dim] = keyVals[i]
+			}
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: unpriced rollup rows: %w", err)
+	}
+	if len(out) > 0 {
+		return out, true, nil
+	}
+
+	// No matching unpriced row is a valid answer on a current rollup and is
+	// indistinguishable from a stale empty table in the grouped query above.
+	// Resolve that uncommon edge with one scalar read rather than charging every
+	// summary an extra round trip.
+	var current int
+	if err := s.db.QueryRowContext(ctx, "SELECT "+rollupCurrentSQL).Scan(&current); err != nil {
+		return nil, false, fmt.Errorf("store: check unpriced rollup watermark: %w", err)
+	}
+	return nil, current != 0, nil
 }
 
 // snapRollupRange widens the requested bounds to the whole UTC buckets that
@@ -495,6 +704,7 @@ func buildRollupWhere(f Filter, since, until time.Time) (string, []any) {
 	addIn("tool", f.Tools)
 	addIn("model", f.Models)
 	addIn("project", f.Projects)
+	addIn("session_id", f.Sessions)
 
 	if len(conds) == 0 {
 		return "", nil

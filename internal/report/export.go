@@ -164,15 +164,14 @@ func providerLabel(keys map[string]string) string {
 // thing in their own vocabulary, and neither substitutes 0, which would claim
 // the request was free. The key set is pinned by a test, like the CSV header.
 func WriteEventsJSON(w io.Writer, evs []model.UsageEvent) error {
-	if evs == nil {
-		evs = []model.UsageEvent{}
+	stream, err := NewEventsJSONWriter(w, false)
+	if err != nil {
+		return err
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(evs); err != nil {
-		return fmt.Errorf("encode events json: %w", err)
+	if err := stream.WritePage(evs); err != nil {
+		return err
 	}
-	return nil
+	return stream.Close()
 }
 
 // eventWithRaw restores the Raw payload that UsageEvent's json:"-" tag strips.
@@ -187,16 +186,88 @@ type eventWithRaw struct {
 // Only the export --include-raw path may call it: Raw can carry full
 // transcript content.
 func WriteEventsJSONWithRaw(w io.Writer, evs []model.UsageEvent) error {
-	wrapped := make([]eventWithRaw, len(evs))
-	for i, e := range evs {
-		wrapped[i] = eventWithRaw{UsageEvent: e, Raw: e.Raw}
+	stream, err := NewEventsJSONWriter(w, true)
+	if err != nil {
+		return err
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(wrapped); err != nil {
-		return fmt.Errorf("encode events json: %w", err)
+	if err := stream.WritePage(evs); err != nil {
+		return err
+	}
+	return stream.Close()
+}
+
+// EventsJSONWriter emits one indented JSON array across any number of pages.
+// It writes the opening bracket immediately, retains no prior event, and closes
+// the array exactly once. The byte shape matches WriteEventsJSON and its raw
+// variant, including PascalCase field names and the empty [] result.
+type EventsJSONWriter struct {
+	w          io.Writer
+	includeRaw bool
+	wroteEvent bool
+	closed     bool
+}
+
+func NewEventsJSONWriter(w io.Writer, includeRaw bool) (*EventsJSONWriter, error) {
+	stream := &EventsJSONWriter{w: w, includeRaw: includeRaw}
+	if err := writeExportString(w, "["); err != nil {
+		return nil, fmt.Errorf("open events json array: %w", err)
+	}
+	return stream, nil
+}
+
+func (w *EventsJSONWriter) WritePage(evs []model.UsageEvent) error {
+	if w.closed {
+		return fmt.Errorf("write events json page: writer is closed")
+	}
+	for _, e := range evs {
+		var value any = e
+		if w.includeRaw {
+			value = eventWithRaw{UsageEvent: e, Raw: e.Raw}
+		}
+		encoded, err := json.MarshalIndent(value, "  ", "  ")
+		if err != nil {
+			return fmt.Errorf("encode events json row: %w", err)
+		}
+		separator := "\n  "
+		if w.wroteEvent {
+			separator = ",\n  "
+		}
+		if err := writeExportString(w.w, separator); err != nil {
+			return fmt.Errorf("write events json separator: %w", err)
+		}
+		n, err := w.w.Write(encoded)
+		if err == nil && n != len(encoded) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return fmt.Errorf("write events json row: %w", err)
+		}
+		w.wroteEvent = true
 	}
 	return nil
+}
+
+func (w *EventsJSONWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	ending := "]\n"
+	if w.wroteEvent {
+		ending = "\n]\n"
+	}
+	if err := writeExportString(w.w, ending); err != nil {
+		return fmt.Errorf("close events json array: %w", err)
+	}
+	return nil
+}
+
+func writeExportString(w io.Writer, value string) error {
+	n, err := io.WriteString(w, value)
+	if err == nil && n != len(value) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 // WriteEventsCSV writes a slice of usage events as CSV with a stable header.
@@ -212,25 +283,67 @@ func WriteEventsCSVWithRaw(w io.Writer, evs []model.UsageEvent) error {
 }
 
 func writeEventsCSV(w io.Writer, evs []model.UsageEvent, includeRaw bool) error {
+	stream, err := NewEventsCSVWriter(w, includeRaw)
+	if err != nil {
+		return err
+	}
+	if err := stream.WritePage(evs); err != nil {
+		return err
+	}
+	return stream.Close()
+}
+
+// EventsCSVWriter emits the canonical header once and flushes every page so
+// callers never retain the whole export before the first byte is visible.
+type EventsCSVWriter struct {
+	cw         *csv.Writer
+	includeRaw bool
+	closed     bool
+}
+
+func NewEventsCSVWriter(w io.Writer, includeRaw bool) (*EventsCSVWriter, error) {
 	header := csvHeader
 	if includeRaw {
 		header = append(append([]string{}, csvHeader...), "raw")
 	}
 	cw := csv.NewWriter(w)
 	if err := cw.Write(header); err != nil {
-		return fmt.Errorf("write csv header: %w", err)
-	}
-	for _, e := range evs {
-		rec := eventRecord(e)
-		if includeRaw {
-			rec = append(rec, e.Raw)
-		}
-		if err := cw.Write(rec); err != nil {
-			return fmt.Errorf("write csv row: %w", err)
-		}
+		return nil, fmt.Errorf("write csv header: %w", err)
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
+		return nil, fmt.Errorf("flush csv header: %w", err)
+	}
+	return &EventsCSVWriter{cw: cw, includeRaw: includeRaw}, nil
+}
+
+func (w *EventsCSVWriter) WritePage(evs []model.UsageEvent) error {
+	if w.closed {
+		return fmt.Errorf("write csv page: writer is closed")
+	}
+	for _, e := range evs {
+		rec := eventRecord(e)
+		if w.includeRaw {
+			rec = append(rec, e.Raw)
+		}
+		if err := w.cw.Write(rec); err != nil {
+			return fmt.Errorf("write csv row: %w", err)
+		}
+	}
+	w.cw.Flush()
+	if err := w.cw.Error(); err != nil {
+		return fmt.Errorf("flush csv: %w", err)
+	}
+	return nil
+}
+
+func (w *EventsCSVWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	w.cw.Flush()
+	if err := w.cw.Error(); err != nil {
 		return fmt.Errorf("flush csv: %w", err)
 	}
 	return nil

@@ -26,7 +26,7 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 // Reader is the READ handle: every query, summary, listing and ranking this
 // package answers, and NOT ONE METHOD THAT WRITES. That absence is the point.
@@ -573,6 +573,22 @@ func upsertState(ctx context.Context, db execer, st model.AggregateSnapshot) err
 // dimensions (hour/day/week/month) are bucketed in the local timezone so "today"
 // matches the wall clock; categorical dimensions group by their stored value.
 func (s *Reader) Summarize(ctx context.Context, f Filter) (*Summary, error) {
+	if rollupRangeAligned(f.Since, f.Until) {
+		sum, current, err := s.summarizeCurrentRollup(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		if current {
+			return sum, nil
+		}
+	}
+	return s.summarizeLedger(ctx, f)
+}
+
+// summarizeLedger is Summarize's direct authoritative path. Tests compare it
+// field for field with the accelerated path; arbitrary-second bounds always
+// reach it because a 15-minute row cannot answer them exactly.
+func (s *Reader) summarizeLedger(ctx context.Context, f Filter) (*Summary, error) {
 	where, args := buildWhere(f)
 
 	groupExprs := make([]string, 0, len(f.GroupBy))
@@ -680,6 +696,19 @@ func (s *Reader) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 // The grouping columns are appended AFTER the caller's dimensions so the
 // returned Keys align one-to-one with Summarize's buckets.
 func (s *Reader) UnpricedGroups(ctx context.Context, f Filter) ([]UnpricedGroup, error) {
+	if rollupRangeAligned(f.Since, f.Until) {
+		groups, current, err := s.unpricedGroupsCurrentRollup(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		if current {
+			return groups, nil
+		}
+	}
+	return s.unpricedGroupsLedger(ctx, f)
+}
+
+func (s *Reader) unpricedGroupsLedger(ctx context.Context, f Filter) ([]UnpricedGroup, error) {
 	where, args := buildWhere(f)
 	if where == "" {
 		where = " WHERE cost_micro_usd IS NULL"
@@ -766,7 +795,8 @@ const eventColumnsNoRaw = `id, tool, model, session_id, project, event_time_unix
 // ListEvents returns events matching Filter, ordered by event_time then row id
 // (a total order, which keyset pagination will need). The projection names its
 // columns and EXCLUDES raw; pass WithRaw to include it (export --include-raw
-// only). WithKeyset switches it to one page of an id-ordered walk.
+// only). WithKeyset switches it to one page of an id-ordered walk;
+// WithEventTimeKeyset pages without changing the default total order.
 func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) ([]model.UsageEvent, error) {
 	var lo listOptions
 	for _, fn := range opts {
@@ -779,7 +809,22 @@ func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) (
 	}
 	order := " ORDER BY event_time_unix, id"
 	limit := ""
-	if lo.keyset {
+	if lo.eventTimeKeyset {
+		if lo.afterID > 0 {
+			cursor := "(event_time_unix > ? OR (event_time_unix = ? AND id > ?))"
+			if where == "" {
+				where = " WHERE " + cursor
+			} else {
+				where += " AND " + cursor
+			}
+			afterUnix := lo.afterEventTime.UTC().Unix()
+			args = append(args, afterUnix, afterUnix, lo.afterID)
+		}
+		if lo.limit > 0 {
+			limit = " LIMIT ?"
+			args = append(args, lo.limit)
+		}
+	} else if lo.keyset {
 		if lo.afterID > 0 {
 			if where == "" {
 				where = " WHERE id > ?"
@@ -803,6 +848,9 @@ func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) (
 	defer rows.Close()
 
 	var out []model.UsageEvent
+	if lo.limit > 0 {
+		out = make([]model.UsageEvent, 0, lo.limit)
+	}
 	for rows.Next() {
 		var (
 			e            model.UsageEvent

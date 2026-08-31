@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,11 +51,20 @@ func utcOffsetSeconds(t *testing.T, st *Ledger, at time.Time) int64 {
 
 // rollupEvent builds one ledger event. cost < 0 leaves it unpriced.
 func rollupEvent(key, tool, mdl, project string, at time.Time, cost int64) model.UsageEvent {
+	provider := model.ProviderGoogle
+	switch tool {
+	case model.ToolClaudeCode:
+		provider = model.ProviderAnthropic
+	case model.ToolCodex:
+		provider = model.ProviderOpenAI
+	}
 	e := model.UsageEvent{
 		Tool:                tool,
 		Model:               mdl,
 		Project:             project,
 		SessionID:           "sess-" + tool,
+		Provider:            provider,
+		ServiceTier:         "standard",
 		EventTime:           at,
 		InputTokens:         11,
 		OutputTokens:        7,
@@ -91,8 +101,12 @@ func seedLedger(t *testing.T, st *Ledger) {
 		if i%2 == 0 {
 			cost = int64(100 + i)
 		}
-		evs = append(evs, rollupEvent(
-			"seed-"+strconv.Itoa(i), tools[i%3], models[(i/2)%3], projects[(i/5)%3], at, cost))
+		e := rollupEvent(
+			"seed-"+strconv.Itoa(i), tools[i%3], models[(i/2)%3], projects[(i/5)%3], at, cost)
+		if cost >= 0 && i%4 == 0 {
+			e.SetCost(cost, "goose-provider_reported")
+		}
+		evs = append(evs, e)
 	}
 	if _, err := st.InsertEvents(context.Background(), evs); err != nil {
 		t.Fatalf("seed ledger: %v", err)
@@ -107,7 +121,7 @@ func assertRollupMatchesLedger(t *testing.T, st *Ledger, f Filter) {
 	t.Helper()
 	ctx := context.Background()
 
-	want, err := st.Summarize(ctx, f)
+	want, err := st.summarizeLedger(ctx, f)
 	if err != nil {
 		t.Fatalf("summarize ledger %v: %v", f.GroupBy, err)
 	}
@@ -116,8 +130,8 @@ func assertRollupMatchesLedger(t *testing.T, st *Ledger, f Filter) {
 		t.Fatalf("summarize rollup %v: %v", f.GroupBy, err)
 	}
 
-	label := fmt.Sprintf("group=%v tools=%v models=%v projects=%v since=%v until=%v",
-		f.GroupBy, f.Tools, f.Models, f.Projects, f.Since, f.Until)
+	label := fmt.Sprintf("group=%v tools=%v models=%v projects=%v sessions=%v since=%v until=%v",
+		f.GroupBy, f.Tools, f.Models, f.Projects, f.Sessions, f.Since, f.Until)
 
 	if len(got.Buckets) != len(want.Buckets) {
 		t.Fatalf("%s: rollup returned %d buckets, ledger %d", label, len(got.Buckets), len(want.Buckets))
@@ -135,9 +149,9 @@ func assertRollupMatchesLedger(t *testing.T, st *Ledger, f Filter) {
 	assertBucketMeasures(t, label+" totals", want.Totals, got.Totals)
 }
 
-// assertBucketMeasures compares every measure the rollup carries. Sessions is
-// deliberately absent: the rollup keeps no session dimension, which is why
-// SummarizeRollup returns its own type.
+// assertBucketMeasures compares every public summary measure. Schema 8 keeps
+// the session and price-provenance dimensions needed to derive the two
+// non-token measures instead of returning plausible-looking zeros.
 func assertBucketMeasures(t *testing.T, label string, want, got Bucket) {
 	t.Helper()
 	cmp := []struct {
@@ -145,6 +159,7 @@ func assertBucketMeasures(t *testing.T, label string, want, got Bucket) {
 		want, got_ int64
 	}{
 		{"events", want.Events, got.Events},
+		{"sessions", want.Sessions, got.Sessions},
 		{"input", want.Input, got.Input},
 		{"output", want.Output, got.Output},
 		{"cache_creation", want.CacheCreation, got.CacheCreation},
@@ -153,14 +168,12 @@ func assertBucketMeasures(t *testing.T, label string, want, got Bucket) {
 		{"total", want.Total, got.Total},
 		{"cost_micro_usd", want.CostMicroUSD, got.CostMicroUSD},
 		{"unpriced_events", want.UnpricedEvents, got.UnpricedEvents},
+		{"computed_cost_events", want.ComputedCostEvents, got.ComputedCostEvents},
 	}
 	for _, c := range cmp {
 		if c.want != c.got_ {
 			t.Errorf("%s: %s = %d (rollup) want %d (ledger)", label, c.name, c.got_, c.want)
 		}
-	}
-	if got.Sessions != 0 {
-		t.Errorf("%s: rollup reported %d sessions; it keeps no session dimension", label, got.Sessions)
 	}
 }
 
@@ -186,7 +199,9 @@ func TestRollupMatchesLedger(t *testing.T) {
 		{GroupBy: []string{"month"}},
 		{GroupBy: []string{"tool"}},
 		{GroupBy: []string{"model"}},
+		{GroupBy: []string{"provider"}},
 		{GroupBy: []string{"project"}},
+		{GroupBy: []string{"session"}},
 		{GroupBy: []string{"day", "tool"}},
 		{GroupBy: []string{"month", "tool", "model"}},
 		{Since: since, Until: until, GroupBy: []string{"day"}},
@@ -195,12 +210,56 @@ func TestRollupMatchesLedger(t *testing.T) {
 		{Tools: []string{model.ToolCodex}, GroupBy: []string{"day"}},
 		{Models: []string{"gpt-5", "grok-9"}, GroupBy: []string{"month", "model"}},
 		{Projects: []string{"/w/alpha"}, GroupBy: []string{"day", "tool"}},
+		{Sessions: []string{"sess-" + model.ToolCodex}, GroupBy: []string{"provider", "session"}},
 		{Since: since, Until: mid, Tools: []string{model.ToolClaudeCode},
 			Projects: []string{"/w/beta"}, GroupBy: []string{"day", "model"}},
 		{Tools: []string{"no-such-tool"}, GroupBy: []string{"day"}},
 	}
 	for _, f := range filters {
 		assertRollupMatchesLedger(t, st, f)
+	}
+}
+
+// TestUnpricedGroupsRollupMatchesLedger covers the other cost query that now
+// uses the rollup. Provider, service tier and every token component are inputs
+// to display-time pricing, so equality of only the event count would still
+// permit a wrong dollar result.
+func TestUnpricedGroupsRollupMatchesLedger(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	at := time.Date(2026, 3, 4, 12, 0, 0, 0, time.UTC)
+
+	events := []model.UsageEvent{
+		rollupEvent("unpriced-a", model.ToolCodex, "gpt-5", "/w/alpha", at, -1),
+		rollupEvent("unpriced-b", model.ToolCodex, "gpt-5", "/w/alpha", at.Add(time.Minute), -1),
+		rollupEvent("unpriced-c", model.ToolClaudeCode, "claude-sonnet-4-6", "/w/beta", at.Add(15*time.Minute), -1),
+		rollupEvent("priced", model.ToolCodex, "gpt-5", "/w/alpha", at.Add(2*time.Minute), 99),
+	}
+	events[1].ServiceTier = "priority"
+	events[2].SessionID = "another-session"
+	if _, err := st.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	filters := []Filter{
+		{},
+		{GroupBy: []string{"tool"}},
+		{GroupBy: []string{"provider", "session"}},
+		{Sessions: []string{"sess-" + model.ToolCodex}, GroupBy: []string{"model", "project"}},
+		{Since: at, Until: at.Add(30 * time.Minute), GroupBy: []string{"provider"}},
+	}
+	for _, f := range filters {
+		want, err := st.unpricedGroupsLedger(ctx, f)
+		if err != nil {
+			t.Fatalf("ledger groups %v: %v", f, err)
+		}
+		got, err := st.UnpricedGroups(ctx, f)
+		if err != nil {
+			t.Fatalf("rollup groups %v: %v", f, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("unpriced groups %v differ:\nrollup: %#v\nledger: %#v", f, got, want)
+		}
 	}
 }
 
@@ -537,21 +596,20 @@ func rollupColumnSpec(t *testing.T, st *Ledger) string {
 	return spec
 }
 
-// TestRollupRefusesDimensionsItCannotServe pins the refusals. Answering a
-// session or provider breakdown from a table that keeps neither would be a
-// wrong answer delivered confidently; the error names the dimension and sends
-// the caller to the ledger.
-func TestRollupRefusesDimensionsItCannotServe(t *testing.T) {
+// TestRollupServesEverySummaryDimension pins schema 8's deeper key. Session and
+// provider used to be refused because the old rollup could not derive them;
+// both now have to match the authoritative ledger, while unknown dimensions
+// remain caller errors.
+func TestRollupServesEverySummaryDimension(t *testing.T) {
 	st := openTemp(t)
-	ctx := context.Background()
+	seedLedger(t, st)
 	for _, dim := range []string{"session", "provider"} {
-		if _, err := st.SummarizeRollup(ctx, Filter{GroupBy: []string{dim}}); err == nil {
-			t.Errorf("SummarizeRollup grouped by %q without complaint", dim)
-		}
+		assertRollupMatchesLedger(t, st, Filter{GroupBy: []string{dim}})
 	}
-	if _, err := st.SummarizeRollup(ctx, Filter{Sessions: []string{"s1"}}); err == nil {
-		t.Errorf("SummarizeRollup filtered by session without complaint")
-	}
+	assertRollupMatchesLedger(t, st, Filter{
+		Sessions: []string{"sess-" + model.ToolCodex}, GroupBy: []string{"provider", "session"},
+	})
+	ctx := context.Background()
 	if _, err := st.SummarizeRollup(ctx, Filter{GroupBy: []string{"nonsense"}}); err == nil {
 		t.Errorf("SummarizeRollup accepted an invalid dimension")
 	}
@@ -669,10 +727,12 @@ func TestRebuildIsIdempotent(t *testing.T) {
 func rollupDump(t *testing.T, st *Ledger) string {
 	t.Helper()
 	rows, err := st.db.Query(`
-		SELECT bucket_start_unix, tool, model, project, input_tokens, output_tokens,
+		SELECT bucket_start_unix, tool, model, project, session_id, provider,
+			service_tier, price_class, input_tokens, output_tokens,
 			cache_creation_tokens, cache_read_tokens, reasoning_tokens, total_tokens,
 			events, cost_micro_usd, unpriced_events
-		FROM usage_rollup ORDER BY bucket_start_unix, tool, model, project`)
+		FROM usage_rollup ORDER BY bucket_start_unix, tool, model, project,
+			session_id, provider, service_tier, price_class`)
 	if err != nil {
 		t.Fatalf("dump rollup: %v", err)
 	}
@@ -680,17 +740,20 @@ func rollupDump(t *testing.T, st *Ledger) string {
 	var out string
 	for rows.Next() {
 		var (
-			bucket                            int64
-			tool, mdl, project                string
-			in, outTok, cc, cr, reason, total int64
-			events, cost, unpriced            int64
+			bucket                              int64
+			tool, mdl, project                  string
+			session, provider, tier, priceClass string
+			in, outTok, cc, cr, reason, total   int64
+			events, cost, unpriced              int64
 		)
-		if err := rows.Scan(&bucket, &tool, &mdl, &project, &in, &outTok, &cc, &cr,
+		if err := rows.Scan(&bucket, &tool, &mdl, &project, &session, &provider, &tier, &priceClass,
+			&in, &outTok, &cc, &cr,
 			&reason, &total, &events, &cost, &unpriced); err != nil {
 			t.Fatalf("scan rollup row: %v", err)
 		}
-		out += fmt.Sprintf("%d|%s|%s|%s|%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-			bucket, tool, mdl, project, in, outTok, cc, cr, reason, total, events, cost, unpriced)
+		out += fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+			bucket, tool, mdl, project, session, provider, tier, priceClass,
+			in, outTok, cc, cr, reason, total, events, cost, unpriced)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rollup dump rows: %v", err)
