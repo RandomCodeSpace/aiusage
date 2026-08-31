@@ -242,6 +242,8 @@ Release binaries are built with CGO disabled.
 
 The project uses semantic version tags. Database migrations are automatic and
 forward-only, so back up the database before opening it with an older build.
+While aiusage is at v0.x, breaking Go API changes are limited to minor
+releases; patch releases preserve consumer compatibility.
 
 ## License
 
