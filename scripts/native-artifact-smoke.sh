@@ -17,6 +17,8 @@ readonly archive="$asset_dir/$archive_name"
 readonly checksums="$asset_dir/checksums.txt"
 repo_root="$(git rev-parse --show-toplevel)"
 readonly repo_root
+worktree_before="$(git -C "$repo_root" status --porcelain --untracked-files=all)"
+readonly worktree_before
 
 if [[ "$archive_version" == "$version" || -z "$archive_version" ]]; then
 	echo "version must begin with v" >&2
@@ -151,7 +153,7 @@ fi
 for report in summary today; do
 	"${clean_env[@]}" "$binary" "${global_args[@]}" "$report" --json >"$smoke_root/$report.json"
 	jq -e '
-	  (.Buckets | length) == 0 and
+	  (.Buckets | type) == "array" and
 	  .Totals.Events == 0 and .Totals.Sessions == 0 and
 	  .Totals.Input == 0 and .Totals.Output == 0 and
 	  .Totals.CacheCreation == 0 and .Totals.CacheRead == 0 and
@@ -186,9 +188,10 @@ if pgrep -f "$binary run" >/dev/null; then
 	echo "native smoke left a collector process" >&2
 	exit 1
 fi
-if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]]; then
+worktree_after="$(git -C "$repo_root" status --porcelain --untracked-files=all)"
+if [[ "$worktree_after" != "$worktree_before" ]]; then
 	echo "native smoke changed the checked-out candidate" >&2
-	git -C "$repo_root" status --short --untracked-files=all >&2
+	printf '%s\n' "$worktree_after" >&2
 	exit 1
 fi
 
