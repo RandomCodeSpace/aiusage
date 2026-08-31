@@ -55,12 +55,12 @@ mkdir -p \
 	"$artifact_dir/candidate/process" "$artifact_dir/candidate/query" \
 	"$artifact_dir/fixtures" "$artifact_dir/benchmarks"
 
-usage_count=$((1_000_000 / scale))
-activity_count=$((250_000 / scale))
-context_count=$((100_000 / scale))
-small_usage=$((100_000 / scale))
-small_activity=$((25_000 / scale))
-small_context=$((10_000 / scale))
+usage_count=$((1000000 / scale))
+activity_count=$((250000 / scale))
+context_count=$((100000 / scale))
+small_usage=$((100000 / scale))
+small_activity=$((25000 / scale))
+small_context=$((10000 / scale))
 usage_count=$((usage_count > 1000 ? usage_count : 1000))
 activity_count=$((activity_count > 250 ? activity_count : 250))
 context_count=$((context_count > 100 ? context_count : 100))
