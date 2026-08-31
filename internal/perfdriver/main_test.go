@@ -27,7 +27,13 @@ func TestGenerateAndQueryScaledLongLedger(t *testing.T) {
 	if manifest.UnpricedEvents != 2 || manifest.RawEvents != 20 || manifest.RawBytesPerEvent != 400 {
 		t.Fatalf("fixture proportions = %+v", manifest)
 	}
-	if len(manifest.BoundaryInstants) != len(fixtureBoundaryTimes()) || manifest.DatabaseSHA256 == "" {
+	if manifest.RecentUsage != 100 || manifest.RecentActivity != 40 || manifest.RecentContexts != 20 ||
+		manifest.Sessions != 1 || manifest.Tools != 1 || manifest.Models != 1 ||
+		manifest.Projects != 1 || manifest.Providers != 1 || manifest.ServiceTiers != 1 {
+		t.Fatalf("scaled fixture cardinality = %+v", manifest)
+	}
+	if manifest.RollupRows == 0 || manifest.EventsPerRollup <= 0 ||
+		len(manifest.BoundaryInstants) != len(fixtureBoundaryTimes()) || manifest.DatabaseSHA256 == "" {
 		t.Fatalf("fixture evidence incomplete: %+v", manifest)
 	}
 
@@ -62,16 +68,31 @@ func TestFixtureShapeAndValidation(t *testing.T) {
 	if raw := fixtureRawPayload(); len(raw) != 400 || !json.Valid([]byte(raw)) {
 		t.Fatalf("raw fixture length/JSON = %d/%v", len(raw), json.Valid([]byte(raw)))
 	}
-	previous := time.Time{}
-	for i := len(fixtureBoundaryTimes()); i < 10_000; i++ {
+	const count = 10_000
+	recent := 0
+	boundaries := make(map[time.Time]bool, len(fixtureBoundaryTimes()))
+	for i := 0; i < count; i++ {
 		at := fixtureEventTime(i, 10_000)
-		if !previous.IsZero() && at.Before(previous) {
-			t.Fatalf("fixture time moved backwards at %d: %s before %s", i, at, previous)
+		if at.Before(longLedgerClock.AddDate(-1, 0, 0)) || !at.Before(longLedgerClock) {
+			t.Fatalf("fixture time outside the production year at %d: %s", i, at)
 		}
-		previous = at
+		if fixtureIsRecent(at) {
+			recent++
+		}
+		boundaries[at] = true
 	}
-	if previous.After(longLedgerClock) {
-		t.Fatalf("fixture extends past clock: %s", previous)
+	if recent != count/2 {
+		t.Fatalf("recent usage = %d, want %d", recent, count/2)
+	}
+	for _, boundary := range fixtureBoundaryTimes() {
+		if !boundaries[boundary] {
+			t.Errorf("missing boundary %s", boundary)
+		}
+	}
+	first := fixtureEventTime(200, count).Unix() / 900
+	last := fixtureEventTime(399, count).Unix() / 900
+	if first != last {
+		t.Fatalf("one session spans rollup buckets: %d then %d", first, last)
 	}
 
 	dir := t.TempDir()
@@ -89,6 +110,46 @@ func TestFixtureShapeAndValidation(t *testing.T) {
 		if tc.err == nil {
 			t.Errorf("%s unexpectedly succeeded", tc.name)
 		}
+	}
+}
+
+func TestProductionFixtureIdentityCardinality(t *testing.T) {
+	tools := map[string]bool{}
+	models := map[string]bool{}
+	projects := map[string]bool{}
+	sessions := map[string]bool{}
+	providers := map[string]bool{}
+	tiers := map[string]bool{}
+	for session := 0; session < 5000; session++ {
+		identity := fixtureUsageIdentity(session * fixtureEventsPerSession)
+		tools[identity.tool] = true
+		models[identity.model] = true
+		projects[identity.project] = true
+		sessions[identity.session] = true
+		providers[identity.provider] = true
+		tiers[identity.serviceTier] = true
+	}
+	if len(tools) != 15 || len(models) != 32 || len(projects) != 256 || len(sessions) != 5000 ||
+		len(providers) != 9 || len(tiers) != 3 {
+		t.Fatalf("production cardinality = tools:%d models:%d projects:%d sessions:%d providers:%d tiers:%d",
+			len(tools), len(models), len(projects), len(sessions), len(providers), len(tiers))
+	}
+}
+
+func TestGenerateRepresentativeRollupShape(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.json")
+	if err := generateLongLedger(filepath.Join(dir, "usage.db"), manifestPath, fixtureRollupCheckRows, 0, 0); err != nil {
+		t.Fatalf("generate representative fixture: %v", err)
+	}
+	var manifest longLedgerManifest
+	readJSONFile(t, manifestPath, &manifest)
+	if manifest.RollupRows*100 < int64(manifest.UsageEvents) ||
+		manifest.RollupRows*100 > int64(manifest.UsageEvents)*2 {
+		t.Fatalf("rollup density = %d/%d", manifest.RollupRows, manifest.UsageEvents)
+	}
+	if manifest.RecentUsage != manifest.UsageEvents/2 {
+		t.Fatalf("recent usage = %d/%d", manifest.RecentUsage, manifest.UsageEvents)
 	}
 }
 

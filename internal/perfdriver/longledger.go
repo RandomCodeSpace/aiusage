@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,12 +18,14 @@ import (
 )
 
 const (
-	longLedgerProfile      = "long-ledger-v1"
-	longLedgerSeed         = int64(0x5eed82)
-	longLedgerUsageEvents  = 1_000_000
-	longLedgerActivityRows = 250_000
-	longLedgerTurnContexts = 100_000
-	fixtureBatchSize       = 4096
+	longLedgerProfile       = "long-ledger-v1"
+	longLedgerSeed          = int64(0x5eed82)
+	longLedgerUsageEvents   = 1_000_000
+	longLedgerActivityRows  = 250_000
+	longLedgerTurnContexts  = 100_000
+	fixtureBatchSize        = 4096
+	fixtureEventsPerSession = 200
+	fixtureRollupCheckRows  = 20_000
 )
 
 var longLedgerClock = time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
@@ -41,7 +44,26 @@ var fixtureProviders = []string{
 
 var fixtureTiers = []string{"", "standard", "priority"}
 
-var fixtureDimensions = model.TurnDimensions()
+var fixtureTurnDimensions = model.TurnDimensions()
+
+var fixtureRecentBoundaries = [...]time.Time{
+	time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+	time.Date(2026, 8, 30, 12, 14, 59, 0, time.UTC),
+	time.Date(2026, 8, 30, 12, 15, 0, 0, time.UTC),
+	time.Date(2026, 8, 30, 12, 59, 59, 0, time.UTC),
+	time.Date(2026, 8, 30, 13, 0, 0, 0, time.UTC),
+	time.Date(2026, 8, 30, 18, 29, 59, 0, time.UTC), // Kolkata local midnight - 1s
+	time.Date(2026, 8, 30, 18, 30, 0, 0, time.UTC),
+}
+
+var fixtureHistoricalBoundaries = [...]time.Time{
+	time.Date(2025, 11, 2, 5, 59, 59, 0, time.UTC), // New York DST fold
+	time.Date(2025, 11, 2, 6, 0, 0, 0, time.UTC),
+	time.Date(2026, 3, 8, 6, 59, 59, 0, time.UTC), // New York DST gap
+	time.Date(2026, 3, 8, 7, 0, 0, 0, time.UTC),
+	time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+}
 
 type longLedgerManifest struct {
 	Profile          string    `json:"profile"`
@@ -51,8 +73,10 @@ type longLedgerManifest struct {
 	UsageEvents      int       `json:"usage_events"`
 	RecentUsage      int       `json:"recent_usage_events"`
 	ActivityRows     int       `json:"activity_rows"`
+	RecentActivity   int       `json:"recent_activity_rows"`
 	UnattributedRows int       `json:"unattributed_activity_rows"`
 	TurnContexts     int       `json:"turn_context_rows"`
+	RecentContexts   int       `json:"recent_turn_context_rows"`
 	Tools            int       `json:"tools"`
 	Models           int       `json:"models"`
 	Projects         int       `json:"projects"`
@@ -62,6 +86,8 @@ type longLedgerManifest struct {
 	UnpricedEvents   int       `json:"unpriced_events"`
 	RawEvents        int       `json:"raw_events"`
 	RawBytesPerEvent int       `json:"raw_bytes_per_event"`
+	RollupRows       int64     `json:"rollup_rows"`
+	EventsPerRollup  float64   `json:"usage_events_per_rollup_row"`
 	DatabaseBytes    int64     `json:"database_bytes"`
 	DatabaseSHA256   string    `json:"database_sha256"`
 	BoundaryInstants []string  `json:"boundary_instants"`
@@ -94,11 +120,17 @@ func generateLongLedger(dbPath, manifestPath string, usageCount, activityCount, 
 	raw := fixtureRawPayload()
 	unpriced := 0
 	rawEvents := 0
+	recentUsage := 0
+	recentActivity := 0
+	recentContexts := 0
 	for start := 0; start < usageCount; start += fixtureBatchSize {
 		end := min(start+fixtureBatchSize, usageCount)
 		batch := make([]model.UsageEvent, 0, end-start)
 		for i := start; i < end; i++ {
 			e := fixtureUsageEvent(i, usageCount, raw)
+			if fixtureIsRecent(e.EventTime) {
+				recentUsage++
+			}
 			if _, ok := e.Cost(); !ok {
 				unpriced++
 			}
@@ -122,13 +154,21 @@ func generateLongLedger(dbPath, manifestPath string, usageCount, activityCount, 
 		if start < activityCount {
 			batch.Activity = make([]model.ActivityEvent, 0, endActivity-start)
 			for i := start; i < endActivity; i++ {
-				batch.Activity = append(batch.Activity, fixtureActivityEvent(i, usageCount))
+				e := fixtureActivityEvent(i, activityCount, usageCount)
+				if fixtureIsRecent(e.EventTime) {
+					recentActivity++
+				}
+				batch.Activity = append(batch.Activity, e)
 			}
 		}
 		if start < contextCount {
 			batch.TurnContexts = make([]model.TurnContext, 0, endContexts-start)
 			for i := start; i < endContexts; i++ {
-				batch.TurnContexts = append(batch.TurnContexts, fixtureTurnContext(i, usageCount))
+				turnContext := fixtureTurnContext(i, contextCount, usageCount)
+				if fixtureIsRecent(turnContext.EventTime) {
+					recentContexts++
+				}
+				batch.TurnContexts = append(batch.TurnContexts, turnContext)
 			}
 		}
 		applied, applyErr := ledger.ApplyBatch(ctx, batch)
@@ -150,6 +190,13 @@ func generateLongLedger(dbPath, manifestPath string, usageCount, activityCount, 
 	if err := ledger.Close(); err != nil {
 		return fmt.Errorf("close fixture store: %w", err)
 	}
+	rollupRows, err := fixtureRollupRows(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	if err := validateFixtureRollup(usageCount, rollupRows, store.SchemaVersion); err != nil {
+		return err
+	}
 
 	info, err := os.Stat(dbPath)
 	if err != nil {
@@ -159,26 +206,30 @@ func generateLongLedger(dbPath, manifestPath string, usageCount, activityCount, 
 	if err != nil {
 		return err
 	}
-	recent := usageCount / 2
+	sessions := min(5000, (usageCount+fixtureEventsPerSession-1)/fixtureEventsPerSession)
 	manifest := longLedgerManifest{
 		Profile:          longLedgerProfile,
 		Seed:             longLedgerSeed,
 		Clock:            longLedgerClock,
 		SchemaVersion:    store.SchemaVersion,
 		UsageEvents:      usageCount,
-		RecentUsage:      recent,
+		RecentUsage:      recentUsage,
 		ActivityRows:     activityCount,
+		RecentActivity:   recentActivity,
 		UnattributedRows: activityCount / 2,
 		TurnContexts:     contextCount,
-		Tools:            len(fixtureTools),
-		Models:           32,
-		Projects:         256,
-		Sessions:         5000,
-		Providers:        len(fixtureProviders),
-		ServiceTiers:     len(fixtureTiers),
+		RecentContexts:   recentContexts,
+		Tools:            min(len(fixtureTools), sessions),
+		Models:           min(32, sessions),
+		Projects:         min(256, sessions),
+		Sessions:         sessions,
+		Providers:        min(len(fixtureProviders), sessions),
+		ServiceTiers:     min(len(fixtureTiers), sessions),
 		UnpricedEvents:   unpriced,
 		RawEvents:        rawEvents,
 		RawBytesPerEvent: len(raw),
+		RollupRows:       rollupRows,
+		EventsPerRollup:  float64(usageCount) / float64(rollupRows),
 		DatabaseBytes:    info.Size(),
 		DatabaseSHA256:   digest,
 		BoundaryInstants: fixtureBoundaryStrings(),
@@ -191,18 +242,19 @@ func generateLongLedger(dbPath, manifestPath string, usageCount, activityCount, 
 
 func fixtureUsageEvent(i, count int, raw string) model.UsageEvent {
 	at := fixtureEventTime(i, count)
+	identity := fixtureUsageIdentity(i)
 	input := int64(100 + i%10_000)
 	output := int64(20 + i%2_000)
 	cacheCreate := int64(i % 97)
 	cacheRead := int64(i % 389)
 	reasoning := int64(i % 43)
 	e := model.UsageEvent{
-		Tool:                fixtureTools[i%len(fixtureTools)],
-		Model:               fmt.Sprintf("model-%02d", i%32),
-		Provider:            fixtureProviders[i%len(fixtureProviders)],
-		ServiceTier:         fixtureTiers[i%len(fixtureTiers)],
-		SessionID:           fmt.Sprintf("session-%04d", i%5000),
-		Project:             fmt.Sprintf("/fixture/project-%03d", i%256),
+		Tool:                identity.tool,
+		Model:               identity.model,
+		Provider:            identity.provider,
+		ServiceTier:         identity.serviceTier,
+		SessionID:           identity.session,
+		Project:             identity.project,
 		EventTime:           at,
 		ObservedTime:        longLedgerClock.Add(time.Duration(i%3600) * time.Second),
 		InputTokens:         input,
@@ -230,24 +282,29 @@ func fixtureUsageEvent(i, count int, raw string) model.UsageEvent {
 	return e
 }
 
-func fixtureActivityEvent(i, usageCount int) model.ActivityEvent {
+func fixtureActivityEvent(i, activityCount, usageCount int) model.ActivityEvent {
 	linked := i%2 == 0
 	usageKey := ""
 	seq, calls := 0, 1
+	usageIndex := scaledFixtureIndex(i, activityCount, usageCount)
 	if linked {
 		linkedIndex := i / 2
-		usageKey = fixtureUsageKey((linkedIndex / 2) % usageCount)
+		turns := ((activityCount + 1) / 2) + 1
+		turns /= 2
+		usageIndex = scaledFixtureIndex(linkedIndex/2, turns, usageCount)
+		usageKey = fixtureUsageKey(usageIndex)
 		seq, calls = linkedIndex%2, 2
 	}
-	at := fixtureEventTime(i%usageCount, usageCount)
+	identity := fixtureUsageIdentity(usageIndex)
+	at := fixtureEventTime(usageIndex, usageCount)
 	kinds := []model.ActivityKind{model.ActivityTool, model.ActivitySkill, model.ActivityHook}
 	return model.ActivityEvent{
-		Tool:          fixtureTools[i%len(fixtureTools)],
+		Tool:          identity.tool,
 		Kind:          kinds[i%len(kinds)],
 		Name:          fmt.Sprintf("activity-%03d", i%128),
-		SessionID:     fmt.Sprintf("session-%04d", i%5000),
-		Project:       fmt.Sprintf("/fixture/project-%03d", i%256),
-		Model:         fmt.Sprintf("model-%02d", i%32),
+		SessionID:     identity.session,
+		Project:       identity.project,
+		Model:         identity.model,
 		EventTime:     at,
 		ObservedTime:  longLedgerClock.Add(time.Duration(i%3600) * time.Second),
 		UsageDedupKey: usageKey,
@@ -260,16 +317,18 @@ func fixtureActivityEvent(i, usageCount int) model.ActivityEvent {
 	}
 }
 
-func fixtureTurnContext(i, usageCount int) model.TurnContext {
-	at := fixtureEventTime(i%usageCount, usageCount)
+func fixtureTurnContext(i, contextCount, usageCount int) model.TurnContext {
+	usageIndex := scaledFixtureIndex(i, contextCount, usageCount)
+	identity := fixtureUsageIdentity(usageIndex)
+	at := fixtureEventTime(usageIndex, usageCount)
 	return model.TurnContext{
-		UsageDedupKey: fixtureUsageKey(i % usageCount),
-		Tool:          fixtureTools[i%len(fixtureTools)],
-		Dimension:     fixtureDimensions[i%len(fixtureDimensions)],
+		UsageDedupKey: fixtureUsageKey(usageIndex),
+		Tool:          identity.tool,
+		Dimension:     fixtureTurnDimensions[i%len(fixtureTurnDimensions)],
 		Value:         fmt.Sprintf("context-%03d", i%128),
-		SessionID:     fmt.Sprintf("session-%04d", i%5000),
-		Project:       fmt.Sprintf("/fixture/project-%03d", i%256),
-		Model:         fmt.Sprintf("model-%02d", i%32),
+		SessionID:     identity.session,
+		Project:       identity.project,
+		Model:         identity.model,
 		EventTime:     at,
 		ObservedTime:  longLedgerClock.Add(time.Duration(i%3600) * time.Second),
 		SourcePath:    fmt.Sprintf("/fixture/source-%04d.jsonl", i%2500),
@@ -278,42 +337,93 @@ func fixtureTurnContext(i, usageCount int) model.TurnContext {
 
 func fixtureUsageKey(i int) string { return fmt.Sprintf("usage-row-%07d", i) }
 
+type fixtureIdentity struct {
+	tool        string
+	model       string
+	provider    string
+	serviceTier string
+	session     string
+	project     string
+}
+
+func fixtureUsageIdentity(i int) fixtureIdentity {
+	session := (i / fixtureEventsPerSession) % 5000
+	return fixtureIdentity{
+		tool:        fixtureTools[session%len(fixtureTools)],
+		model:       fmt.Sprintf("model-%02d", session%32),
+		provider:    fixtureProviders[session%len(fixtureProviders)],
+		serviceTier: fixtureTiers[session%len(fixtureTiers)],
+		session:     fmt.Sprintf("session-%04d", session),
+		project:     fmt.Sprintf("/fixture/project-%03d", session%256),
+	}
+}
+
+func scaledFixtureIndex(i, count, usageCount int) int {
+	if count <= 0 || usageCount <= 0 {
+		return 0
+	}
+	return i * usageCount / count
+}
+
 func fixtureEventTime(i, count int) time.Time {
-	edges := fixtureBoundaryTimes()
-	if i < len(edges) {
-		return edges[i]
+	if i < len(fixtureHistoricalBoundaries) {
+		return fixtureHistoricalBoundaries[i]
 	}
 	half := count / 2
-	if i < half {
-		start := longLedgerClock.AddDate(-1, 0, 0)
-		spanSeconds := int64(longLedgerClock.AddDate(0, 0, -30).Sub(start) / time.Second)
-		offsetSeconds := spanSeconds * int64(i) / int64(max(half, 1))
-		return start.Add(time.Duration(offsetSeconds) * time.Second)
+	if i >= half && i-half < len(fixtureRecentBoundaries) {
+		return fixtureRecentBoundaries[i-half]
 	}
-	recentIndex := i - half
-	recentCount := max(count-half, 1)
-	start := longLedgerClock.AddDate(0, 0, -30)
-	spanSeconds := int64(longLedgerClock.Sub(start) / time.Second)
-	offsetSeconds := spanSeconds * int64(recentIndex) / int64(recentCount)
-	return start.Add(time.Duration(offsetSeconds) * time.Second)
+	start := longLedgerClock.AddDate(-1, 0, 0)
+	end := longLedgerClock.AddDate(0, 0, -30)
+	eraIndex := i
+	eraCount := half
+	if i >= half {
+		start = end
+		end = longLedgerClock
+		eraIndex = i - half
+		eraCount = count - half
+	}
+	session := eraIndex / fixtureEventsPerSession
+	sessions := max(1, (eraCount+fixtureEventsPerSession-1)/fixtureEventsPerSession)
+	spanSeconds := int64(end.Sub(start) / time.Second)
+	anchor := start.Add(time.Duration(spanSeconds*int64(session)/int64(sessions)) * time.Second)
+	anchor = time.Unix(anchor.Unix()-anchor.Unix()%900, 0).UTC()
+	return anchor.Add(time.Duration(eraIndex%fixtureEventsPerSession) * time.Second)
 }
 
 func fixtureBoundaryTimes() []time.Time {
-	return []time.Time{
-		time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
-		time.Date(2026, 8, 30, 12, 14, 59, 0, time.UTC),
-		time.Date(2026, 8, 30, 12, 15, 0, 0, time.UTC),
-		time.Date(2026, 8, 30, 12, 59, 59, 0, time.UTC),
-		time.Date(2026, 8, 30, 13, 0, 0, 0, time.UTC),
-		time.Date(2026, 8, 30, 18, 29, 59, 0, time.UTC), // Kolkata local midnight - 1s
-		time.Date(2026, 8, 30, 18, 30, 0, 0, time.UTC),
-		time.Date(2025, 11, 2, 5, 59, 59, 0, time.UTC), // New York DST fold
-		time.Date(2025, 11, 2, 6, 0, 0, 0, time.UTC),
-		time.Date(2026, 3, 8, 6, 59, 59, 0, time.UTC), // New York DST gap
-		time.Date(2026, 3, 8, 7, 0, 0, 0, time.UTC),
-		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	out := make([]time.Time, 0, len(fixtureRecentBoundaries)+len(fixtureHistoricalBoundaries))
+	out = append(out, fixtureRecentBoundaries[:]...)
+	out = append(out, fixtureHistoricalBoundaries[:]...)
+	return out
+}
+
+func fixtureIsRecent(at time.Time) bool {
+	return !at.Before(longLedgerClock.AddDate(0, 0, -30)) && at.Before(longLedgerClock)
+}
+
+func fixtureRollupRows(ctx context.Context, path string) (int64, error) {
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro&_pragma=query_only(1)")
+	if err != nil {
+		return 0, fmt.Errorf("open fixture rollup: %w", err)
 	}
+	defer db.Close()
+	var rows int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_rollup`).Scan(&rows); err != nil {
+		return 0, fmt.Errorf("count fixture rollup: %w", err)
+	}
+	return rows, nil
+}
+
+func validateFixtureRollup(usageCount int, rollupRows int64, schemaVersion int) error {
+	if schemaVersion < 8 || usageCount < fixtureRollupCheckRows {
+		return nil
+	}
+	usage := int64(usageCount)
+	if rollupRows*100 < usage || rollupRows*100 > usage*2 {
+		return fmt.Errorf("fixture rollup has %d rows for %d events; want 1-2%% representative density", rollupRows, usageCount)
+	}
+	return nil
 }
 
 func fixtureBoundaryStrings() []string {
