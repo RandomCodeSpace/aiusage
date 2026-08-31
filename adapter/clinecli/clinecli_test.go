@@ -151,6 +151,36 @@ func TestLiveFixtureExactEvents(t *testing.T) {
 	}
 }
 
+// TestLive306FixtureExactEvent replays a bounded Cline CLI 3.0.60 session
+// captured in an isolated data directory. The prompt, response, system prompt,
+// process identity, and workspace path were sanitized; the writer shape,
+// timestamps, model identity, message identity, and counters are unchanged.
+func TestLive306FixtureExactEvent(t *testing.T) {
+	obs := collectAll(t, "testdata/live-3.0.60")
+	if len(obs.Events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(obs.Events), obs.Events)
+	}
+
+	got := obs.Events[0]
+	got.SourcePath = ""
+	got.Raw = ""
+	want := model.UsageEvent{
+		Tool: model.ToolCline, Model: "gemma4:31b-cloud", Provider: "openai-compatible",
+		SessionID: "1788188806371_l6qgw", Project: "/workspace/capture",
+		EventTime:   time.UnixMilli(1788188809496).UTC(),
+		InputTokens: 4860, OutputTokens: 2, TotalTokens: 4862,
+		MessageID: "msg_BFDjZVbl",
+		DedupKey:  "cline|1788188806371_l6qgw|lead|msg_BFDjZVbl",
+		Kind:      model.KindUsage,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("event:\n got %+v\nwant %+v", got, want)
+	}
+	if len(obs.Activity) != 0 || len(obs.TurnContexts) != 0 {
+		t.Fatalf("activity/turn context = %d/%d, want 0/0", len(obs.Activity), len(obs.TurnContexts))
+	}
+}
+
 // TestRawIsTheUsageObjectAllowList checks the audit payload is re-marshalled
 // from the allow-list rather than carried as source bytes: it holds the usage
 // object, the model identity and the message identity, and nothing else.

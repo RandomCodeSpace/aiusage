@@ -315,16 +315,20 @@
     {
       "tool": "cline",
       "harness": "Cline CLI",
-      "version": "3.0.55",
-      "captured_at": "",
-      "goos": "unrecorded",
-      "goarch": "unrecorded",
-      "status": "pending",
-      "recipe": [],
-      "sanitization": "Conversation text was replaced while counters, timestamps, identifiers, model/provider values, record order, and whole-file rewrite behavior were retained.",
+      "version": "3.0.60",
+      "captured_at": "2026-08-31T15:06:46Z",
+      "goos": "linux",
+      "goarch": "amd64",
+      "status": "ready",
+      "recipe": [
+        "cline --version",
+        "Create a mode-700 temporary capture root with empty work and data directories, then copy only the existing providers.json into data/settings with mode 600 so no session history is visible.",
+        "cline --plan --json --auto-approve false --cwd '<empty temporary work directory>' --data-dir '<temporary data directory>' --provider openai-compatible --model gemma4:31b-cloud --timeout 60 '<bounded arithmetic prompt that explicitly forbids tools>'"
+      ],
+      "sanitization": "The 3.0.60 fixture replaces prompt, response, system prompt, process identity, team identity, and workspace paths while retaining the writer shape, timestamps, session/message identifiers, model/provider values, and token counters. The earlier 3.0.55 fixture retains its existing conversation-text replacements and exact-join shape. Provider credentials and settings were never copied into the repository fixture.",
       "surfaces": [
         {
-          "name": "session messages JSON",
+          "name": "session messages JSON with tool activity",
           "origin": "live",
           "fixture": "adapter/clinecli/testdata/live",
           "package": "./adapter/clinecli",
@@ -339,6 +343,23 @@
             "turn_context": false,
             "reasoning": false
           }
+        },
+        {
+          "name": "session messages JSON (3.0.60)",
+          "origin": "live",
+          "fixture": "adapter/clinecli/testdata/live-3.0.60",
+          "package": "./adapter/clinecli",
+          "oracle": "TestLive306FixtureExactEvent",
+          "discriminator": "assistant message with metrics from an isolated bounded run",
+          "required_anchors": ["id", "role", "ts", "modelInfo", "metrics"],
+          "evidence": {
+            "nonzero_usage": true,
+            "nonzero_vendor_cost": false,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
         }
       ],
       "traps": [
@@ -346,10 +367,7 @@
         {"name": "cumulative-vs-event", "package": "./adapter/clinecli", "test": "TestSessionAccumulatorIsNeverRead"},
         {"name": "assigned-not-accumulated", "package": "./adapter/clinecli", "test": "TestActivityDivisorCountsOnlyEmittedRows"}
       ],
-      "gaps": [
-        "exact UTC capture time and platform were not recorded",
-        "the bounded capture recipe was not recorded"
-      ]
+      "gaps": []
     },
     {
       "tool": "crush",
