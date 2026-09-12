@@ -167,6 +167,9 @@ type CycleStats struct {
 	// adapter and source being processed are already counted — so a truncated
 	// cycle must never be read (or logged) as a completed one.
 	Canceled bool
+
+	// CodeChangesUpdated counts per-turn snapshots inserted or changed.
+	CodeChangesUpdated int
 }
 
 // AllFailed reports whether the cycle produced only errors: every discovered
@@ -292,11 +295,12 @@ func RunOnce(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.Di
 			stats.ActivityInserted += applied.Activity
 			stats.TurnContextsSeen += len(obs.TurnContexts)
 			stats.TurnContextsInserted += applied.TurnContexts
+			stats.CodeChangesUpdated += applied.CodeChanges
 			if sErr != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("insert events %s %s: %v", ad.ID(), src.Path, sErr))
 			}
-			if applied.Events > 0 || applied.Activity > 0 ||
-				(sErr == nil && (len(obs.Events) > 0 || len(obs.Activity) > 0)) {
+			if applied.Events > 0 || applied.Activity > 0 || applied.CodeChanges > 0 ||
+				(sErr == nil && (len(obs.Events) > 0 || len(obs.Activity) > 0 || len(obs.CodeChanges) > 0)) {
 				progressed = true
 			}
 
@@ -379,7 +383,7 @@ func collectSource(ctx context.Context, ad adapter.Adapter, st Store, src adapte
 // step with the ladder.
 func storeObservation(ctx context.Context, st Store, obs adapter.Observation, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
 	events, activity, contexts := obs.Events, obs.Activity, obs.TurnContexts
-	if len(events) == 0 && len(activity) == 0 && len(contexts) == 0 && cp == nil {
+	if len(events) == 0 && len(activity) == 0 && len(contexts) == 0 && len(obs.CodeChanges) == 0 && cp == nil {
 		return store.Applied{}, nil
 	}
 	stamped := make([]model.UsageEvent, len(events))
@@ -410,8 +414,15 @@ func storeObservation(ctx context.Context, st Store, obs adapter.Observation, ob
 		}
 		ctxs[i] = c
 	}
+	changes := make([]model.CodeChange, len(obs.CodeChanges))
+	for i, change := range obs.CodeChanges {
+		if change.ObservedTime.IsZero() {
+			change.ObservedTime = observedAt
+		}
+		changes[i] = change
+	}
 	return st.ApplyBatch(ctx, store.ObservationBatch{
-		Events: stamped, Activity: acts, TurnContexts: ctxs, Checkpoint: cp,
+		Events: stamped, Activity: acts, TurnContexts: ctxs, CodeChanges: changes, Checkpoint: cp,
 	})
 }
 

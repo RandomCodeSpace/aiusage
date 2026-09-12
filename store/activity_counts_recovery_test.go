@@ -182,7 +182,7 @@ func TestActivityCountsDetectRepairAndReadFallback(t *testing.T) {
 				t.Fatal("rebuild changed authoritative history")
 			}
 			assertActivityCountsAnswers(t, st.Reader)
-			if result, err := Verify(ctx, path); err != nil || result.State != VerificationOK || result.SchemaVersion != 8 {
+			if result, err := Verify(ctx, path); err != nil || result.State != VerificationOK || result.SchemaVersion != SchemaVersion {
 				t.Fatalf("repaired verification=%+v err=%v", result, err)
 			}
 		})

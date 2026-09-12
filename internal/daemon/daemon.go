@@ -130,6 +130,9 @@ func run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapte
 		if stats.RollupRebuilt {
 			logger.Printf("rebuilt the derived rollup from the ledger")
 		}
+		if stats.CodeChangesUpdated > 0 {
+			logger.Printf("code changes: updated=%d", stats.CodeChangesUpdated)
+		}
 		if stats.PricesSynced > 0 {
 			logger.Printf("price sync: updated=%d", stats.PricesSynced)
 		}

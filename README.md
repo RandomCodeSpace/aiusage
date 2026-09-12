@@ -108,6 +108,13 @@ Activity dimensions overlap. A single agent turn can read a file, run a
 command, and call another tool, so activity columns should not be added
 together as one total.
 
+In Sessions, drill through OpenCode, model and project, then select a session
+to see its recorded lines added and removed. These are lifetime session totals from saved turn snapshots, across
+models and outside the selected date range. Counts refresh when OpenCode
+revises a snapshot; they are not a repository diff or a measure of authored
+code. Missing snapshots and unsupported tools show unknown; partial totals
+are marked. No source text or patches are stored for this feature.
+
 ## Everyday commands
 
 | Command | What it gives you |

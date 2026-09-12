@@ -589,6 +589,7 @@ func (m *Model) loadBrowsePreview() {
 	if m.view != ViewBrowse {
 		return
 	}
+	m.loadBrowseCodeChanges(false)
 	dim := m.browse.Dim()
 	val, ok := m.browse.SelectedValue()
 	if !ok {
@@ -614,6 +615,7 @@ func (m *Model) syncBrowsePreview() {
 	if m.view != ViewBrowse {
 		return
 	}
+	m.loadBrowseCodeChanges(true)
 	dim := m.browse.Dim()
 	val, ok := m.browse.SelectedValue()
 	if !ok {
@@ -628,6 +630,41 @@ func (m *Model) syncBrowsePreview() {
 	} else {
 		m.detailWanted = true
 	}
+}
+
+// loadBrowseCodeChanges shares the detail flight and its cache-only UI twin.
+// The selected session's identity intentionally excludes model and time range.
+func (m *Model) loadBrowseCodeChanges(cacheOnly bool) {
+	session, selected := m.browse.SelectedValue()
+	if m.browse.Dim() != "session" || !selected {
+		m.browse.SetCodeChanges(store.CodeChangeSummary{}, false, false)
+		return
+	}
+	var tool, project string
+	for _, crumb := range m.crumbs {
+		switch crumb.Dim {
+		case "tool":
+			tool = crumb.Value
+		case "project":
+			project = crumb.Value
+		}
+	}
+	if tool == "" || session == "" {
+		// A model-first drill can combine tools. Its row does not identify
+		// one harness session, so no exact code-change query is available.
+		m.browse.SetCodeChanges(store.CodeChangeSummary{}, true, false)
+		return
+	}
+	if cacheOnly {
+		summary, err, ready := m.data.SessionCodeChangesCached(tool, session, project)
+		m.browse.SetCodeChanges(summary, ready, err != nil)
+		if !ready {
+			m.detailWanted = true
+		}
+		return
+	}
+	summary, err := m.data.SessionCodeChanges(m.qctx(), tool, session, project)
+	m.browse.SetCodeChanges(summary, true, err != nil)
 }
 
 // syncScrub re-prices the Overview KPI tiles + side bars to the scrubbed bucket

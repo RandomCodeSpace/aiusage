@@ -287,3 +287,21 @@ CREATE TABLE IF NOT EXISTS aggregate_state (
   raw                   TEXT,
   PRIMARY KEY (tool, acc_key)
 );
+
+-- Latest mutable line-count snapshot per source change (v9). Undo may reduce
+-- these counts. No token usage, patch text, file content or tool arguments.
+CREATE TABLE IF NOT EXISTS code_changes (
+  tool               TEXT    NOT NULL CHECK (tool <> ''),
+  change_id          TEXT    NOT NULL CHECK (change_id <> ''),
+  session_id         TEXT    NOT NULL CHECK (session_id <> ''),
+  project            TEXT    NOT NULL DEFAULT '',
+  known              INTEGER NOT NULL CHECK (known IN (0, 1)),
+  lines_added        INTEGER NOT NULL CHECK (lines_added >= 0),
+  lines_removed      INTEGER NOT NULL CHECK (lines_removed >= 0),
+  updated_at_unix_ms INTEGER NOT NULL,
+  observed_time_unix INTEGER NOT NULL,
+  PRIMARY KEY (tool, change_id),
+  CHECK (known = 1 OR (lines_added = 0 AND lines_removed = 0))
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_code_changes_session ON code_changes(tool, session_id, project);

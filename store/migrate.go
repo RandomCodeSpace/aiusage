@@ -42,6 +42,7 @@ type migration struct {
 //	     the claude-code checkpoint so the next pass re-derives both
 //	v8 — enriched usage_rollup plus the activity_usage_counts derived divisor;
 //	     no authoritative ledger row changes
+//	v9 — mutable code_changes snapshots, independent of usage and checkpoints
 var migrations = []migration{
 	{version: 2, statements: []string{
 		`CREATE TABLE IF NOT EXISTS source_checkpoints (
@@ -132,6 +133,9 @@ var migrations = []migration{
 		activityUsageCountsTableDDL,
 		rebuildActivityUsageCountsSQL,
 	}},
+	// Source adapters read these snapshots independently of usage checkpoints.
+	// No history rewrite or checkpoint reset is needed to populate them.
+	{version: 9, statements: []string{codeChangesTableDDL, codeChangesSessionIndexDDL}},
 }
 
 // ensureSchema reads the recorded schema version before touching anything and

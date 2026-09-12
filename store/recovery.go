@@ -746,6 +746,10 @@ func schemaRequirements(version int) ([]requiredTable, []requiredIndex, []requir
 	if version >= 8 {
 		tables = append(tables, requiredTable{"activity_usage_counts", []string{"usage_dedup_key", "activity_count"}})
 	}
+	if version >= 9 {
+		tables = append(tables, requiredTable{"code_changes", []string{"tool", "change_id", "session_id", "project", "known", "lines_added", "lines_removed", "updated_at_unix_ms", "observed_time_unix"}})
+		indexes = append(indexes, requiredIndex{"idx_code_changes_session", "code_changes", []string{"tool", "session_id", "project"}})
+	}
 	return tables, indexes, triggers
 }
 
@@ -793,6 +797,9 @@ func availableRowCounts(ctx context.Context, db *sql.DB, version int) (map[strin
 	}
 	if version >= 8 {
 		tables = append(tables, "activity_usage_counts")
+	}
+	if version >= 9 {
+		tables = append(tables, "code_changes")
 	}
 	counts := make(map[string]int64, len(tables))
 	for _, table := range tables {

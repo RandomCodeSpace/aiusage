@@ -249,8 +249,10 @@ func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoi
 
 	// Both timestamps identify the supported mutable family. A partial modern
 	// schema must not silently fall back to legacy finality assumptions.
-	var anchors int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('message') WHERE name IN ('time_created','time_updated')`).Scan(&anchors); err != nil {
+	var anchors, sessionAnchors int
+	if err := tx.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM pragma_table_info('message') WHERE name IN ('time_created','time_updated')),
+		(SELECT COUNT(*) FROM pragma_table_info('session') WHERE name IN ('id','directory'))`).Scan(&anchors, &sessionAnchors); err != nil {
 		return adapter.Observation{}, fmt.Errorf("opencode: schema %s: %w", src.Path, err)
 	}
 	if anchors == 1 {
@@ -277,7 +279,14 @@ func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoi
 		}
 	}
 	pendingJSON, _ := json.Marshal(state.Pending)
-	rows, err := tx.QueryContext(ctx, `SELECT rowid, id, session_id, data FROM message
+	payload := "data"
+	if modern {
+		// User summaries contain patches. Usage needs only their role to
+		// advance the rowid cursor; count collection selects scalars below.
+		payload = `CASE WHEN CASE WHEN json_valid(data) THEN json_extract(data, '$.role') END = 'user'
+			THEN '{"role":"user"}' ELSE data END`
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT rowid, id, session_id, `+payload+` FROM message
  WHERE rowid > ? OR rowid IN (SELECT value FROM json_each(?)) ORDER BY rowid`, watermark, string(pendingJSON))
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("opencode: query %s: %w", src.Path, err)
@@ -345,6 +354,13 @@ func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoi
 		if err != nil {
 			return obs, errors.Join(diagnostics, fmt.Errorf("opencode: parts %s: %w", src.Path, err))
 		}
+	}
+	if modern && sessionAnchors == 2 {
+		// Summaries update existing user messages after assistant completion.
+		// Read their scalar counts independently of the usage rowid cursor, also
+		// recovering historical counts without replaying token history.
+		obs.CodeChanges, err = collectCodeChanges(ctx, tx)
+		diagnostics = errors.Join(diagnostics, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return obs, errors.Join(diagnostics, fmt.Errorf("opencode: snapshot %s: %w", src.Path, err))

@@ -71,6 +71,9 @@ func printCycleStats(c *cobra.Command, s collect.CycleStats) {
 	if s.RollupRebuilt {
 		fmt.Fprintln(out, "rebuilt the derived rollup from the ledger")
 	}
+	if s.CodeChangesUpdated > 0 {
+		fmt.Fprintf(out, "updated line counts for %d turns\n", s.CodeChangesUpdated)
+	}
 	if s.PricesSynced > 0 {
 		fmt.Fprintf(out, "priced %d previously unpriced requests\n", s.PricesSynced)
 	}

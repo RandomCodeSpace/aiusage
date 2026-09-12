@@ -321,9 +321,8 @@ func WithRaw() ListOption {
 	return func(o *listOptions) { o.includeRaw = true }
 }
 
-// Applied reports what one ApplyObservation actually wrote: new dedup keys in
-// each of the two append-only ledgers. Rows that collided on an existing dedup
-// key count in neither.
+// Applied reports committed new ledger/context rows and changed code snapshots.
+// Duplicate ledger/context keys and unchanged code snapshots do not count.
 type Applied struct {
 	Events   int
 	Activity int
@@ -333,6 +332,9 @@ type Applied struct {
 	// pair already carrying a context counts here no more than a duplicate event
 	// counts in Events.
 	TurnContexts int
+	// CodeChanges counts inserted or updated source snapshots. Identical
+	// repeats and older source versions do not count.
+	CodeChanges int
 }
 
 // ObservationBatch is everything one read of one source commits together. It is
@@ -350,6 +352,9 @@ type ObservationBatch struct {
 	TurnContexts []model.TurnContext
 	// Checkpoint, when non-nil, is upserted in the same transaction.
 	Checkpoint *model.SourceCheckpoint
+	// CodeChanges replaces mutable per-change snapshots when their source
+	// version is not older than the stored version.
+	CodeChanges []model.CodeChange
 }
 
 // SourceStat summarises stored usage per tool for the `sources` command.

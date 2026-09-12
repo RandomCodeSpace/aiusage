@@ -26,22 +26,25 @@ import (
 // makes "rendered line i is row top+i" an invariant of this file instead of a
 // coincidence of the widget's scroll state.
 type Browse struct {
-	table      table.Model
-	ctx        Ctx
-	dim        string
-	rows       []store.Bucket
-	grand      int64
-	preview    []store.Bucket // selected row's daily trend
-	previewErr bool           // the preview trend query failed (distinct from "no rows")
-	cols       []table.Column // current columns (for per-cell right-alignment)
-	lay        Layout         // central responsive layout (drives widths + preview)
-	width      int
-	height     int
-	compact    bool
-	focused    int  // PaneBrowse* — which pane wears the ring
-	drillable  bool // rows still descend a level (chevron affordance)
-	cursor     int  // selected row, indexing rows (NOT the table's window)
-	top        int  // first row of the on-screen window, indexing rows
+	table             table.Model
+	ctx               Ctx
+	dim               string
+	rows              []store.Bucket
+	grand             int64
+	preview           []store.Bucket // selected row's daily trend
+	previewErr        bool           // the preview trend query failed (distinct from "no rows")
+	codeChanges       store.CodeChangeSummary
+	codeChangesReady  bool
+	codeChangesFailed bool
+	cols              []table.Column // current columns (for per-cell right-alignment)
+	lay               Layout         // central responsive layout (drives widths + preview)
+	width             int
+	height            int
+	compact           bool
+	focused           int  // PaneBrowse* — which pane wears the ring
+	drillable         bool // rows still descend a level (chevron affordance)
+	cursor            int  // selected row, indexing rows (NOT the table's window)
+	top               int  // first row of the on-screen window, indexing rows
 }
 
 // Browse view panes (pane 0 = rail).
@@ -98,8 +101,12 @@ func (b *Browse) SetCursor(i int) {
 		return
 	}
 	prev := b.top
+	previousCursor := b.cursor
 	b.cursor = i
 	b.reframe()
+	if b.cursor != previousCursor {
+		b.SetCodeChanges(store.CodeChangeSummary{}, false, false)
+	}
 	if b.top != prev {
 		// The window moved: the table is holding the wrong slice of rows.
 		b.applyRows()
@@ -173,6 +180,11 @@ func (b *Browse) SetPreviewErr(failed bool) { b.previewErr = failed }
 // the UI thread.
 func (b Browse) PreviewErr() bool { return b.previewErr }
 
+// SetCodeChanges replaces the selected session's lifetime recorded counts.
+func (b *Browse) SetCodeChanges(summary store.CodeChangeSummary, ready, failed bool) {
+	b.codeChanges, b.codeChangesReady, b.codeChangesFailed = summary, ready, failed
+}
+
 // SetLayout updates the render area + columns from the central responsive
 // layout. The preview pane shows only when the layout grants a side panel; the
 // table panel takes the primary column (or the whole body otherwise).
@@ -196,13 +208,20 @@ func (b *Browse) SetLayout(lay Layout) {
 	b.table.SetWidth(b.tablePanelW() - 4 - rowFocusGutter - rowDrillGutter)
 	// Card = title rule(1) + table(h) + padding(2); fit the table to bodyH so the
 	// card never exceeds the body region.
-	th := lay.BodyH - 3
+	b.setTableHeight()
+	b.applyColumns()
+	b.applyRows()
+}
+
+func (b *Browse) setTableHeight() {
+	th := b.height - 3
+	if b.compact && b.dim == "session" {
+		th -= 2 // lifetime label and counts below the narrow session table
+	}
 	if th < 1 {
 		th = 1
 	}
 	b.table.SetHeight(th)
-	b.applyColumns()
-	b.applyRows()
 }
 
 // tablePanelW is the total on-screen width (content + rounded border) of the
@@ -230,6 +249,8 @@ func (b *Browse) SetData(c Ctx, dim string, rows []store.Bucket, grand int64) {
 	b.rows = rows
 	b.grand = grand
 	b.ctx = c
+	b.SetCodeChanges(store.CodeChangeSummary{}, false, false)
+	b.setTableHeight()
 	// A cursor left over from a longer grouping is reset rather than clamped:
 	// row 7 of the previous dimension has nothing to do with row 7 of this one.
 	// (This is also why the cursor lives here and not in the widget — bubbles v2
@@ -326,6 +347,9 @@ func (b Browse) tablePanel() string {
 	elev := paneElev(focused)
 	c := b.ctx.On(elev)
 	body := b.markedRows(c)
+	if b.compact && b.dim == "session" {
+		body += "\n" + b.codeChangesText(c)
+	}
 	style := c.Block(elev).Width(b.tablePanelW())
 	return style.Render(c.titleRule(strings.ToUpper(title(b.dim)), b.tablePanelW()-4, focused) + "\n" + body)
 }
@@ -404,7 +428,27 @@ func (b Browse) previewPanel() string {
 	if cost := costText(c, sb.CostMicroUSD, sb.UnpricedEvents, sb.ComputedCostEvents, inner-7); cost != "" {
 		lines = append(lines, c.StatLabel.Render("cost   ")+c.Number.Render(cost))
 	}
+	if b.dim == "session" {
+		lines = append(lines, b.codeChangesText(c))
+	}
 	return c.mark(ZonePreview, style.Render(c.titleRule("PREVIEW", inner, pfocus)+"\n"+strings.Join(lines, "\n")))
+}
+
+func (b Browse) codeChangesText(c Ctx) string {
+	value := "not reported"
+	switch {
+	case b.codeChangesFailed:
+		value = "unavailable"
+	case !b.codeChangesReady:
+		value = "loading"
+	case b.codeChanges.KnownChanges > 0:
+		value = "+" + c.Humanize(b.codeChanges.LinesAdded) + "/-" + c.Humanize(b.codeChanges.LinesRemoved)
+		if b.codeChanges.UnknownChanges > 0 {
+			value += " partial"
+		}
+	}
+	return c.StatLabel.Render("Recorded session lines") + "\n" +
+		c.StatLabel.Render("Lifetime ") + c.Number.Render(value)
 }
 
 func (b *Browse) applyColumns() {

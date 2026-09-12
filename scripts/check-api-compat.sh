@@ -65,10 +65,26 @@ if (( apidiff_status != 0 )); then
 	cat "${api_tmp}/apidiff.stderr" >&2
 	exit "$apidiff_status"
 fi
+# The compatibility policy permits this one constant to advance with a tested
+# migration and pre-migration backup. All other incompatible changes still fail.
+schema_diff=""
+remaining_diff=""
+while IFS= read -r line; do
+	if [[ "$line" =~ ^-\ \./store\.SchemaVersion:\ value\ changed\ from\ ([0-9]+)\ to\ ([0-9]+)$ ]] &&
+		(( BASH_REMATCH[2] > BASH_REMATCH[1] )); then
+		schema_diff="$line"
+	else
+		remaining_diff+="${remaining_diff:+$'\n'}$line"
+	fi
+done <<<"$api_diff"
+api_diff="$remaining_diff"
 if [[ -n "$api_diff" ]]; then
 	echo "public Go API is incompatible with ${compat_base}:" >&2
 	echo "$api_diff" >&2
 	exit 1
+fi
+if [[ -n "$schema_diff" ]]; then
+	echo "accepted database schema advance (migration and backup checks required): ${schema_diff#- }"
 fi
 
 echo "public Go API is compatible with ${compat_base}"

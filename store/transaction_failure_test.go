@@ -38,6 +38,7 @@ func failureBatch() ObservationBatch {
 		Events:       []model.UsageEvent{ev("u1", model.ToolClaudeCode, at, 100), ev("u2", model.ToolClaudeCode, at, 200)},
 		Activity:     []model.ActivityEvent{act("a1", "Read", model.ActivityTool, at, "u1", 0, 1), act("a2", "Edit", model.ActivityTool, at, "u2", 0, 1)},
 		TurnContexts: []model.TurnContext{turnCtx("u1", model.DimensionSkill, "read", at), turnCtx("u2", model.DimensionSkill, "edit", at)},
+		CodeChanges:  []model.CodeChange{codeChange("c1", 4, 2), codeChange("c2", 1, 0)},
 		Checkpoint:   &model.SourceCheckpoint{Tool: model.ToolClaudeCode, SourcePath: "/synthetic/source", Offset: 2},
 	}
 }
@@ -55,7 +56,7 @@ func assertBatchRolledBack(t *testing.T, st *Ledger, err error, applied Applied)
 	if err == nil || errors.As(err, &skipped) || applied != (Applied{}) {
 		t.Fatalf("rollback returned applied=%+v error=%v", applied, err)
 	}
-	for _, table := range []string{"usage_events", "activity_events", "usage_turn_context", "usage_rollup", "activity_usage_counts"} {
+	for _, table := range []string{"usage_events", "activity_events", "usage_turn_context", "usage_rollup", "activity_usage_counts", "code_changes"} {
 		var n int
 		if err := st.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil || n != 0 {
 			t.Fatalf("%s rows=%d err=%v", table, n, err)
@@ -79,7 +80,7 @@ func seedFailureCheckpoint(t *testing.T, st *Ledger) {
 func assertBatchReplay(t *testing.T, st *Ledger) {
 	t.Helper()
 	ctx := context.Background()
-	want := Applied{Events: 2, Activity: 2, TurnContexts: 2}
+	want := Applied{Events: 2, Activity: 2, TurnContexts: 2, CodeChanges: 2}
 	if got, err := st.ApplyBatch(ctx, failureBatch()); err != nil || got != want {
 		t.Fatalf("retry=%+v err=%v", got, err)
 	}
@@ -100,6 +101,7 @@ func TestApplyBatchFatalFailuresRollbackAllStreams(t *testing.T) {
 		{"usage", "usage_events", "NEW.dedup_key='u2'"},
 		{"activity", "activity_events", "NEW.dedup_key='a2'"},
 		{"context", "usage_turn_context", "NEW.usage_dedup_key='u2'"},
+		{"code change", "code_changes", "NEW.change_id='c2'"},
 		{"checkpoint", "source_checkpoints", "NEW.read_offset=2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,7 +208,7 @@ func TestApplyBatchCheckSkipsCommitGoodRowsAndCheckpoint(t *testing.T) {
 	keylessContext.UsageDedupKey = ""
 	batch.TurnContexts = append(batch.TurnContexts, badContext, keylessContext)
 	got, err := st.ApplyBatch(context.Background(), batch)
-	if got != (Applied{Events: 2, Activity: 2, TurnContexts: 2}) {
+	if got != (Applied{Events: 2, Activity: 2, TurnContexts: 2, CodeChanges: 2}) {
 		t.Fatalf("applied=%+v err=%v", got, err)
 	}
 	joined, ok := err.(interface{ Unwrap() []error })

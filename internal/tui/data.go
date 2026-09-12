@@ -350,20 +350,31 @@ type Data struct {
 	// dollars, and one cache holding both under one key would serve a skill
 	// ranking to an agent pivot — the exact cross-partition confusion the store
 	// refuses to express in SQL, reintroduced in memory.
-	tctx   *lru[*store.TurnContextSummary]
-	tcRank *lru[[]store.TurnContextBucket]
+	tctx        *lru[*store.TurnContextSummary]
+	tcRank      *lru[[]store.TurnContextBucket]
+	codeChanges *lru[sessionCodeChangesResult]
+}
+
+type sessionCodeChangesResult struct {
+	summary store.CodeChangeSummary
+	err     error
+}
+
+type sessionCodeChangesSource interface {
+	SessionCodeChanges(context.Context, string, string, string) (store.CodeChangeSummary, error)
 }
 
 // NewData builds a Data over src.
 func NewData(src DataSource) *Data {
 	return &Data{
-		src:    src,
-		now:    time.Now,
-		cache:  newLRU[*store.Summary](summaryCacheCap),
-		act:    newLRU[*store.ActivitySummary](summaryCacheCap),
-		rank:   newLRU[[]store.ActivityBucket](summaryCacheCap),
-		tctx:   newLRU[*store.TurnContextSummary](summaryCacheCap),
-		tcRank: newLRU[[]store.TurnContextBucket](summaryCacheCap),
+		src:         src,
+		now:         time.Now,
+		cache:       newLRU[*store.Summary](summaryCacheCap),
+		act:         newLRU[*store.ActivitySummary](summaryCacheCap),
+		rank:        newLRU[[]store.ActivityBucket](summaryCacheCap),
+		tctx:        newLRU[*store.TurnContextSummary](summaryCacheCap),
+		tcRank:      newLRU[[]store.TurnContextBucket](summaryCacheCap),
+		codeChanges: newLRU[sessionCodeChangesResult](summaryCacheCap),
 	}
 }
 
@@ -380,6 +391,52 @@ func (d *Data) Invalidate() {
 	d.rank = newLRU[[]store.ActivityBucket](summaryCacheCap)
 	d.tctx = newLRU[*store.TurnContextSummary](summaryCacheCap)
 	d.tcRank = newLRU[[]store.TurnContextBucket](summaryCacheCap)
+	d.codeChanges = newLRU[sessionCodeChangesResult](summaryCacheCap)
+}
+
+func sessionCodeChangesKey(tool, session, project string) string {
+	return strconv.Quote(tool) + "|" + strconv.Quote(session) + "|" + strconv.Quote(project)
+}
+
+// SessionCodeChanges reads lifetime recorded counts, independent of model and
+// reporting window. Optional sources that cannot report them remain unknown.
+func (d *Data) SessionCodeChanges(ctx context.Context, tool, session, project string) (store.CodeChangeSummary, error) {
+	src, supported := d.src.(sessionCodeChangesSource)
+	if !supported {
+		return store.CodeChangeSummary{}, nil
+	}
+	k := sessionCodeChangesKey(tool, session, project)
+	d.mu.Lock()
+	cache := d.codeChanges
+	result, ok := cache.get(k)
+	d.mu.Unlock()
+	if ok {
+		return result.summary, result.err
+	}
+	if err := ctx.Err(); err != nil {
+		return store.CodeChangeSummary{}, err
+	}
+	result.summary, result.err = src.SessionCodeChanges(ctx, tool, session, project)
+	if ctx.Err() == nil {
+		d.mu.Lock()
+		// Capture before querying so invalidation discards late results. Keep
+		// failures until refresh too: the UI can show unavailable without an
+		// automatic retry loop or a synchronous query.
+		cache.put(k, result)
+		d.mu.Unlock()
+	}
+	return result.summary, result.err
+}
+
+// SessionCodeChangesCached never queries, including on unsupported sources.
+func (d *Data) SessionCodeChangesCached(tool, session, project string) (store.CodeChangeSummary, error, bool) {
+	if _, supported := d.src.(sessionCodeChangesSource); !supported {
+		return store.CodeChangeSummary{}, nil, true
+	}
+	d.mu.Lock()
+	result, ok := d.codeChanges.get(sessionCodeChangesKey(tool, session, project))
+	d.mu.Unlock()
+	return result.summary, result.err, ok
 }
 
 type snapshotGenerationKey struct{}

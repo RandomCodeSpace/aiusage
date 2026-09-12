@@ -218,6 +218,10 @@ type Observation struct {
 	// persists it in the same transaction as this observation's data; nil
 	// leaves any stored checkpoint untouched.
 	Checkpoint *model.SourceCheckpoint
+	// CodeChanges carries the latest per-turn line-count snapshots reported
+	// by a harness. These mutable counts are independent of token accounting;
+	// missing data must remain unknown. No source patch text is retained.
+	CodeChanges []model.CodeChange
 }
 
 // DiscoverConfig carries discovery roots and per-tool path overrides.

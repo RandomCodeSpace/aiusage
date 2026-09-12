@@ -2,7 +2,7 @@
 // modernc.org/sqlite (CGO_ENABLED=0). The append-only guarantee is enforced by
 // schema.sql (UNIQUE(dedup_key) + no-UPDATE/no-DELETE triggers); this file only
 // ever appends to usage_events (INSERT .. ON CONFLICT(dedup_key) DO NOTHING)
-// and upserts mutable accumulator state into aggregate_state.
+// and upserts mutable accumulator and code-change state.
 package store
 
 import (
@@ -27,7 +27,7 @@ var schemaSQL string
 // SchemaVersion is the schema version this binary creates fresh databases at
 // and can open. Bump when the schema changes, keep schema.sql describing the
 // full latest schema, and add the matching step to migrations (migrate.go).
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 // Reader is the READ handle: every query, summary, listing and ranking this
 // package answers, and NOT ONE METHOD THAT WRITES. That absence is the point.
@@ -51,7 +51,7 @@ type Reader struct {
 // Ledger is the FULL handle: a Reader plus the appends. It is what Open returns
 // and what the collector holds, and it is the only type in this package that
 // can add a row to any of the three append-only tables, upsert accumulator
-// state or rebuild the derived rollup.
+// state or code-change snapshots, or rebuild the derived rollup.
 //
 // The Reader is embedded by pointer so a caller that only reads can be handed
 // l.Reader by name rather than by an interface conversion, and so the two
@@ -404,14 +404,14 @@ func (l *Ledger) ApplyObservation(ctx context.Context, events []model.UsageEvent
 	return l.ApplyBatch(ctx, ObservationBatch{Events: events, Activity: activity, Checkpoint: cp})
 }
 
-// ApplyBatch is ApplyObservation plus the turn contexts, and is what a collection
-// cycle actually calls. Same single transaction, same ordering (events first, so
+// ApplyBatch is ApplyObservation plus turn contexts and code-change snapshots.
+// It uses the same transaction and ordering (events first, so
 // the rows naming them by dedup key find them present), same idempotence: a turn
 // context conflicts on (usage dedup key, dimension) and does nothing, which is
 // what stops a re-read serving a turn's cost twice.
 func (l *Ledger) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, error) {
 	events, activity, ctxs, cp := b.Events, b.Activity, b.TurnContexts, b.Checkpoint
-	if len(events) == 0 && len(activity) == 0 && len(ctxs) == 0 && cp == nil {
+	if len(events) == 0 && len(activity) == 0 && len(ctxs) == 0 && len(b.CodeChanges) == 0 && cp == nil {
 		return Applied{}, nil
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
@@ -433,6 +433,10 @@ func (l *Ledger) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, e
 	}
 	ctxInserted, ctxSkipErr, err := insertTurnContextsTx(ctx, tx, ctxs)
 	out.TurnContexts = ctxInserted
+	if err != nil {
+		return Applied{}, err
+	}
+	out.CodeChanges, err = upsertCodeChangesTx(ctx, tx, b.CodeChanges)
 	if err != nil {
 		return Applied{}, err
 	}
