@@ -30,19 +30,8 @@ func zoneCenter(m Model, id string) (x, y int, ok bool) {
 	return (z.StartX + z.EndX) / 2, (z.StartY + z.EndY) / 2, true
 }
 
-// pressZone sends a real mouse press of button at the centre of the named zone
-// through Update, driving any dispatched load to completion.
-func pressZone(t *testing.T, m Model, id string, button tea.MouseButton) (Model, bool) {
-	t.Helper()
-	x, y, ok := zoneCenter(m, id)
-	if !ok {
-		return m, false
-	}
-	return step(t, m, tea.MouseClickMsg{Button: button, X: x, Y: y}), true
-}
-
-// mustPress is pressZone with a hard failure when the zone is not on screen —
-// an interactive surface that cannot be hit is the bug this suite exists for.
+// mustPress fails when the zone is not on screen: an interactive surface that
+// cannot be hit is the bug this suite exists for.
 func mustPress(t *testing.T, m Model, id string, button tea.MouseButton) Model {
 	t.Helper()
 	z, frame, elapsed := resolveCurrentZone(m, id)

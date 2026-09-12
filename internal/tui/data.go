@@ -383,6 +383,9 @@ func (d *Data) Invalidate() {
 }
 
 type snapshotGenerationKey struct{}
+type snapshotReadOnlyKey struct{}
+
+var snapshotReadContext = context.WithValue(context.Background(), snapshotReadOnlyKey{}, true)
 
 // loadContext binds a background flight to the cache instance at dispatch.
 // Invalidation swaps that instance, so an obsolete flight cannot set the new
@@ -394,20 +397,19 @@ func (d *Data) loadContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, snapshotGenerationKey{}, generation)
 }
 
-// A nil context is a cache-only lookup: it can read the cap but never set it.
+// Cache-only lookups can read the cap but never set it.
 func (d *Data) snapshotClock(ctx context.Context, now time.Time) time.Time {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if ctx != nil {
-		generation, _ := ctx.Value(snapshotGenerationKey{}).(*lru[*store.Summary])
-		if ctx.Err() != nil || (generation != nil && generation != d.cache) {
-			return now
-		}
+	readOnly, _ := ctx.Value(snapshotReadOnlyKey{}).(bool)
+	generation, _ := ctx.Value(snapshotGenerationKey{}).(*lru[*store.Summary])
+	if ctx.Err() != nil || (generation != nil && generation != d.cache) {
+		return now
 	}
 	y, m, day := now.Date()
 	sy, sm, sd := d.snapshotNow.Date()
 	if d.snapshotNow.IsZero() || y != sy || m != sm || day != sd {
-		if ctx != nil {
+		if !readOnly {
 			d.snapshotNow = now
 		}
 		return now
@@ -535,7 +537,7 @@ func (d *Data) Totals(ctx context.Context, now time.Time, sp Span, crumbs []Crum
 
 // TotalsCached is the cache-only twin of Totals.
 func (d *Data) TotalsCached(now time.Time, sp Span, crumbs []Crumb) (store.Bucket, bool) {
-	s, ok := d.cachedSummary(d.filterFor(nil, now, sp, crumbs, nil))
+	s, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, nil))
 	if !ok {
 		return store.Bucket{}, false
 	}
@@ -556,7 +558,7 @@ func (d *Data) GroupBy(ctx context.Context, now time.Time, sp Span, crumbs []Cru
 
 // GroupByCached is the cache-only twin of GroupBy.
 func (d *Data) GroupByCached(now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, bool) {
-	s, ok := d.cachedSummary(d.filterFor(nil, now, sp, crumbs, []string{dim}))
+	s, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, []string{dim}))
 	if !ok {
 		return nil, false
 	}
@@ -839,7 +841,7 @@ func (d *Data) Timeline(ctx context.Context, now time.Time, sp Span, crumbs []Cr
 // TimelineCached is the cache-only twin of Timeline.
 func (d *Data) TimelineCached(now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, bool) {
 	dim := timelineDim(sp.R)
-	s, ok := d.cachedSummary(d.filterFor(nil, now, sp, crumbs, []string{dim}))
+	s, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, []string{dim}))
 	if !ok {
 		return nil, dim, false
 	}
@@ -854,7 +856,7 @@ func (d *Data) TimelineCached(now time.Time, sp Span, crumbs []Crumb) (*store.Su
 // so rapid presses cancel before opening work they will discard.
 func (d *Data) timelineWarm(now time.Time, sp Span, crumbs []Crumb) bool {
 	dim := timelineDim(sp.R)
-	_, ok := d.cachedSummary(d.filterFor(nil, now, sp, crumbs, []string{dim}))
+	_, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, []string{dim}))
 	return ok
 }
 

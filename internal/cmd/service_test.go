@@ -918,14 +918,18 @@ func TestDoctorReportsSupervision(t *testing.T) {
 			home := t.TempDir()
 			state := t.TempDir()
 			t.Setenv("XDG_STATE_HOME", state)
-			args := []string{"--home", home, "--config", offlineConfig(t),
-				"--db", filepath.Join(t.TempDir(), "usage.db"), "--no-daemon", "doctor"}
+			configPath := offlineConfig(t)
+			dbPath := filepath.Join(t.TempDir(), "usage.db")
+			args := []string{"--home", home, "--config", configPath,
+				"--db", dbPath, "--no-daemon", "doctor"}
 
 			if tc.daemon {
-				// The lock has to sit exactly where loadConfig derives PIDPath
-				// from XDG_STATE_HOME, or doctor looks for a daemon elsewhere.
-				rel, err := daemon.AcquireCollectionLock(
-					filepath.Join(state, "aiusage", "aiusage.pid"), buildinfo.Identity())
+				// The lock must use the same per-database path as doctor.
+				cfg, err := loadConfigFlags(globalFlags{home: home, config: configPath, db: dbPath})
+				if err != nil {
+					t.Fatalf("load config: %v", err)
+				}
+				rel, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
 				if err != nil {
 					t.Fatalf("acquire lock: %v", err)
 				}

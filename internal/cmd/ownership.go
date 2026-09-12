@@ -205,7 +205,7 @@ func acquireCollectorStartupLock(ctx context.Context, cfg config.Config) (releas
 
 // The Darwin file supplies the kernel's argument bytes. Other platforms retain
 // this error so tests can inject the native format without calling a host tool.
-var readDarwinProcessArgs = func(int) ([]byte, error) { return nil, errors.New("Darwin process arguments unavailable") }
+var readDarwinProcessArgs = func(int) ([]byte, error) { return nil, errors.New("darwin process arguments unavailable") }
 
 func darwinCollectorProcess(ctx context.Context, pid int) (string, bool) {
 	if pid <= 0 || ctx.Err() != nil {

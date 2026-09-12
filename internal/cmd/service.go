@@ -191,32 +191,6 @@ func reportSupervision(warn io.Writer, res service.Result) {
 	}
 }
 
-// superviseRestart resolves a build mismatch through the native service manager,
-// which is the supervised equivalent of stopping a daemon and spawning a new one.
-//
-// It restarts only what is already running, so it answers false whenever the
-// running collector is not the unit - a detached daemon from before the unit
-// existed, say - leaving the stop-and-respawn path to the caller.
-func superviseRestart(ctx context.Context, f globalFlags, warn io.Writer) bool {
-	m := newSupervisor()
-	if !autoInstall(f) {
-		return false
-	}
-	ctx, cancel := supervisionContext(ctx)
-	defer cancel()
-
-	if !m.Available(ctx) {
-		return false
-	}
-	res, err := m.Restart(ctx)
-	if err != nil {
-		fmt.Fprintf(warn, "notice: could not restart the aiusage service: %v\n", err)
-		return false
-	}
-	reportSupervision(warn, res)
-	return res.Collecting
-}
-
 func waitCollectorRelease(ctx context.Context, cfg config.Config) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

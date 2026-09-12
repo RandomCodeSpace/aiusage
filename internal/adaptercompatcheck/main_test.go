@@ -12,6 +12,9 @@ import (
 	"github.com/RandomCodeSpace/aiusage/model"
 )
 
+// Repository evidence is validated at its checked-in September capture snapshot.
+const repositoryEvidenceNow = "2026-09-12T18:00:00Z"
+
 func TestMainWritesMachineReadableCIResult(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -34,7 +37,7 @@ func TestMainWritesMachineReadableCIResult(t *testing.T) {
 		"--root", root,
 		"--manifest", "adapter/compatibility.json",
 		"--mode", "ci",
-		"--now", "2026-08-31T16:00:00Z",
+		"--now", repositoryEvidenceNow,
 		"--out", outRel,
 	}
 
@@ -60,21 +63,21 @@ func TestRepositoryManifestCoversRegistryWithoutPretendingPendingEvidenceIsReady
 		t.Fatalf("read manifest: %v", err)
 	}
 
-	got := validate(root, m, raw, "ci", mustTime(t, "2026-08-31T16:00:00Z"))
+	got := validate(root, m, raw, "ci", mustTime(t, repositoryEvidenceNow))
 	if len(got.Errors) != 0 {
 		t.Fatalf("CI validation errors: %v", got.Errors)
 	}
 	if got.Registered != 15 || len(m.Entries) != got.Registered {
 		t.Fatalf("registered/manifest entries = %d/%d, want 15/15", got.Registered, len(m.Entries))
 	}
-	if got.Ready != 4 || len(got.Pending) != 11 || got.Complete {
-		t.Fatalf("ready/pending/complete = %d/%d/%v, want 4/11/false",
+	if got.Ready != 14 || len(got.Pending) != 1 || got.Complete {
+		t.Fatalf("ready/pending/complete = %d/%d/%v, want 14/1/false",
 			got.Ready, len(got.Pending), got.Complete)
 	}
 
-	claude := pendingFor(t, got, "claude-code")
-	if !contains(claude.Gaps, "no nonzero live usage evidence") {
-		t.Fatalf("constructed Claude fixture was accepted as live evidence: %v", claude.Gaps)
+	crush := pendingFor(t, got, "crush")
+	if !contains(crush.Gaps, "no nonzero live vendor-cost evidence") {
+		t.Fatalf("zero-cost Crush fixture was accepted as priced evidence: %v", crush.Gaps)
 	}
 }
 
@@ -85,7 +88,7 @@ func TestReleaseModeFailsClosedOnEveryPendingGap(t *testing.T) {
 		t.Fatalf("read manifest: %v", err)
 	}
 
-	got := validate(root, m, raw, "release", mustTime(t, "2026-08-31T16:00:00Z"))
+	got := validate(root, m, raw, "release", mustTime(t, repositoryEvidenceNow))
 	if len(got.Errors) == 0 || got.Complete {
 		t.Fatalf("release accepted pending compatibility evidence: complete=%v errors=%v",
 			got.Complete, got.Errors)
@@ -103,7 +106,7 @@ func TestManifestMustCoverEachRegisteredToolExactlyOnce(t *testing.T) {
 	}
 
 	m.Entries = append(m.Entries[:len(m.Entries)-1], m.Entries[0])
-	got := validate(root, m, raw, "ci", mustTime(t, "2026-08-31T16:00:00Z"))
+	got := validate(root, m, raw, "ci", mustTime(t, repositoryEvidenceNow))
 	if !containsSubstring(got.Errors, "duplicate tool entry") {
 		t.Fatalf("duplicate entry was accepted: %v", got.Errors)
 	}

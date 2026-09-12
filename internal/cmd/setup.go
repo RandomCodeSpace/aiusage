@@ -183,21 +183,6 @@ func runSetup(c *cobra.Command, sf setupFlags) error {
 	return nil
 }
 
-func nativeCollectorState(units []service.UnitStatus) (active, known bool) {
-	for _, unit := range units {
-		if !unit.Installed {
-			continue
-		}
-		if !unit.StateKnown {
-			return false, false
-		}
-		if unit.Active {
-			return true, true
-		}
-	}
-	return false, true
-}
-
 // printEnvNotice warns that this shell's environment moved something the units
 // will not inherit.
 //

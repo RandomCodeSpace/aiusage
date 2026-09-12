@@ -22,18 +22,22 @@ func keyFilter() store.Filter {
 	}
 }
 
-// joinedKey is the reference encoding cacheKey has always produced. It is spelt
+// joinedKey is the reference encoding, including model-filter presence. It is spelt
 // out here rather than reused so the two cannot drift together: the key is what
 // a load generation's warm handoff matches on, and a changed byte would send
 // the apply-side reload back to synchronous SQLite on the UI thread with no
 // error anywhere.
 func joinedKey(f store.Filter) string {
+	models := strings.Join(f.Models, ",")
+	if len(f.Models) > 0 {
+		models = "=" + models
+	}
 	return strings.Join([]string{
 		f.Since.Format(time.RFC3339),
 		f.Until.Format(time.RFC3339),
 		strings.Join(f.GroupBy, ","),
 		strings.Join(f.Tools, ","),
-		strings.Join(f.Models, ","),
+		models,
 		strings.Join(f.Projects, ","),
 		strings.Join(f.Sessions, ","),
 	}, "|")
@@ -45,6 +49,7 @@ func TestCacheKeyIsByteStable(t *testing.T) {
 		{Since: time.Date(2026, 8, 3, 0, 0, 0, 0, time.FixedZone("IST", 5*3600+1800))},
 		{GroupBy: []string{"hour"}},
 		keyFilter(),
+		{Models: []string{""}}, // an explicit unknown model is still a filter
 	} {
 		if got, want := cacheKey(f), joinedKey(f); got != want {
 			t.Errorf("cacheKey = %q, want %q", got, want)
