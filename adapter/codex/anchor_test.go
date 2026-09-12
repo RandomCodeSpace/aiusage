@@ -76,6 +76,25 @@ func TestUsageAnchorDriftHoldsCheckpoint(t *testing.T) {
 	}
 }
 
+func TestRejectedCumulativeAnchorDoesNotMutateState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.jsonl")
+	writeSession(t, path, []string{
+		`{"type":"turn_context","payload":{"model":"safe-model"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","model":"rejected-model","info":{"last_token_usage":{"input_tokens":500,"output_tokens":50,"total_tokens":550},"total_token_usage":{"input_tokens":1000,"output_tokens":"bad","total_tokens":1100}}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"output_tokens":20,"total_tokens":220}}}}`,
+	})
+	obs, err := (Adapter{}).Collect(context.Background(), adapter.Source{Tool: model.ToolCodex, Path: path})
+	if !errors.Is(err, adapter.ErrSourceFormat) || obs.Checkpoint != nil || len(obs.Events) != 2 {
+		t.Fatalf("rejected cumulative anchor=%+v,%v", obs, err)
+	}
+	for _, event := range obs.Events {
+		if event.Model != "safe-model" || event.TotalTokens != 110 {
+			t.Fatalf("rejected record changed model or cumulative baseline: %+v", event)
+		}
+	}
+}
+
 func TestUnknownAdditionsAliasesAndCumulativeUsage(t *testing.T) {
 	row, lines := anchorFixture(t)
 	path := filepath.Join(t.TempDir(), "source.jsonl")

@@ -312,11 +312,11 @@ func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *mode
 					case "session_meta", "turn_context", "event_msg", "response_item", "compacted":
 						recognized = true
 					}
-					if err := validateUsageShape(line); err != nil {
+					if usage, err := validateUsageShape(line); err != nil {
 						formatDrift = true
 						diagnostics = errors.Join(diagnostics, fmt.Errorf("codex: %s offset %d: %w", src.Path, consumed, err))
 					} else if lineIsInteresting(raw) {
-						if ev, ok := parseUsageLine(line, mtime, session, src.Path, &curModel, &prevTotal, &havePrev); ok {
+						if ev, ok := parseUsageLine(line, usage, mtime, session, src.Path, &curModel, &prevTotal, &havePrev); ok {
 							events = append(events, ev)
 						} else if a, ok := parseCallLine(line, mtime, session, src.Path, curModel); ok {
 							activity = append(activity, a)
@@ -363,34 +363,42 @@ func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *mode
 	}, diagnostics
 }
 
+// usageObjects keeps the objects decoded for validation available to accounting.
+// A token_count record must not decode payload, info, and both token maps twice.
+type usageObjects struct {
+	payload, info, last, total map[string]json.RawMessage
+}
+
 // validateUsageShape distinguishes known usage drift from unrelated additions.
-func validateUsageShape(line map[string]json.RawMessage) error {
+// No model or cumulative state changes until every present usage object passes.
+func validateUsageShape(line map[string]json.RawMessage) (usageObjects, error) {
 	typ := typeOf(line["type"])
 	payload := objOf(line["payload"])
 	payloadType := typeOf(payload["type"])
 	info := objOf(payload["info"])
+	decoded := usageObjects{payload: payload, info: info}
 	usageShape := payloadType == "token_count" || info["last_token_usage"] != nil || info["total_token_usage"] != nil
 	if typ != "event_msg" {
 		if usageShape {
-			return fmt.Errorf("%w: token usage requires type=event_msg", adapter.ErrSourceFormat)
+			return usageObjects{}, fmt.Errorf("%w: token usage requires type=event_msg", adapter.ErrSourceFormat)
 		}
-		return nil
+		return decoded, nil
 	}
 	if payload == nil || payloadType == "" {
-		return fmt.Errorf("%w: event_msg missing payload/type", adapter.ErrSourceFormat)
+		return usageObjects{}, fmt.Errorf("%w: event_msg missing payload/type", adapter.ErrSourceFormat)
 	}
 	if payloadType != "token_count" {
 		if usageShape {
-			return fmt.Errorf("%w: usage info requires payload.type=token_count", adapter.ErrSourceFormat)
+			return usageObjects{}, fmt.Errorf("%w: usage info requires payload.type=token_count", adapter.ErrSourceFormat)
 		}
-		return nil
+		return decoded, nil
 	}
 	if info == nil {
 		// A rate-limit update can explicitly carry no usage yet.
 		if bytes.Equal(bytes.TrimSpace(payload["info"]), []byte("null")) && objOf(payload["rate_limits"]) != nil {
-			return nil
+			return decoded, nil
 		}
-		return fmt.Errorf("%w: token_count missing info", adapter.ErrSourceFormat)
+		return usageObjects{}, fmt.Errorf("%w: token_count missing info", adapter.ErrSourceFormat)
 	}
 	found := false
 	for _, key := range []string{"last_token_usage", "total_token_usage"} {
@@ -400,7 +408,7 @@ func validateUsageShape(line map[string]json.RawMessage) error {
 		}
 		usage := objOf(raw)
 		if usage == nil {
-			return fmt.Errorf("%w: %s is not a token object", adapter.ErrSourceFormat, key)
+			return usageObjects{}, fmt.Errorf("%w: %s is not a token object", adapter.ErrSourceFormat, key)
 		}
 		for _, aliases := range [][]string{{"input_tokens", "prompt_tokens", "input"}, {"output_tokens", "completion_tokens", "output"}} {
 			numeric := false
@@ -411,21 +419,26 @@ func validateUsageShape(line map[string]json.RawMessage) error {
 				}
 			}
 			if !numeric {
-				return fmt.Errorf("%w: %s missing numeric %s", adapter.ErrSourceFormat, key, aliases[0])
+				return usageObjects{}, fmt.Errorf("%w: %s missing numeric %s", adapter.ErrSourceFormat, key, aliases[0])
 			}
+		}
+		if key == "last_token_usage" {
+			decoded.last = usage
+		} else {
+			decoded.total = usage
 		}
 		found = true
 	}
 	if !found {
-		return fmt.Errorf("%w: token_count info missing usage", adapter.ErrSourceFormat)
+		return usageObjects{}, fmt.Errorf("%w: token_count info missing usage", adapter.ErrSourceFormat)
 	}
-	return nil
+	return decoded, nil
 }
 
 // parseUsageLine handles one decoded JSONL line, updating the model
 // carry-forward and cumulative baseline in place. Returns a usage event when
 // the line is a non-zero token_count record.
-func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, path string,
+func parseUsageLine(line map[string]json.RawMessage, usage usageObjects, mtime time.Time, session, path string,
 	curModel *string, prevTotal *rawTokens, havePrev *bool) (model.UsageEvent, bool) {
 
 	typ := typeOf(line["type"])
@@ -441,11 +454,11 @@ func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, p
 		return model.UsageEvent{}, false
 	}
 
-	payload := objOf(line["payload"])
+	payload := usage.payload
 	if payload == nil || typeOf(payload["type"]) != "token_count" {
 		return model.UsageEvent{}, false
 	}
-	info := objOf(payload["info"])
+	info := usage.info
 	if info == nil {
 		return model.UsageEvent{}, false
 	}
@@ -463,10 +476,10 @@ func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, p
 		tok    rawTokens
 		usable bool
 	)
-	if last := objOf(info["last_token_usage"]); last != nil {
+	if last := usage.last; last != nil {
 		tok = readRaw(last)
 		usable = true
-	} else if cum := objOf(info["total_token_usage"]); cum != nil {
+	} else if cum := usage.total; cum != nil {
 		cur := readRaw(cum)
 		if *havePrev {
 			tok = cur.satSub(*prevTotal)
