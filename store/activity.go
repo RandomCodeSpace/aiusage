@@ -273,12 +273,12 @@ func (o ActivityOrder) orderExpr() (string, error) {
 // stamp would then divide one turn's tokens by 1, 3 and 3 and attribute 167% of
 // it — an OVERSTATEMENT, the one direction this table promises never to go.
 //
-// activity_usage_counts stores the divisor.
-// Every successful activity insert increments its nonempty usage key in the
-// same transaction, and migration 8 fills the table set-wise from history. The
-// read statement compares the counts with the grouped activity ledger and
-// falls back to that grouping if derived contents have drifted. The divisor
-// is therefore exactly the number of rows summing over that usage row,
+// Each read groups the authoritative activity ledger for the nonempty usage
+// keys in its selected rows. It counts ALL calls sharing those keys, including
+// calls outside the time/name/tool filter. The persisted activity_usage_counts
+// table remains derived maintenance state checked by EnsureRollup and Verify;
+// a read never trusts it. The divisor is therefore exactly the number of rows
+// summing over that usage row,
 // so integer division makes the shares sum to AT MOST the turn's real total by
 // construction, whatever any adapter stamped or how many passes it took.
 // calls_in_turn stays as what the source reported; it is useful evidence, just
@@ -320,9 +320,9 @@ var activitySelectSQL = `COUNT(*) AS calls,
 // a usage_events dedup key, since insertEventsTx rejects an empty one — and a
 // LEFT JOIN keeps the call while contributing no tokens, where an inner join
 // would silently drop it from the frequency answer too.
-const activityFromSQL = ` FROM activity_events a
+const activityFromSQL = ` FROM selected_activity a
 	LEFT JOIN usage_events u ON u.dedup_key = a.usage_dedup_key
-	LEFT JOIN activity_usage_counts c ON c.usage_dedup_key = a.usage_dedup_key`
+	LEFT JOIN expected_activity_counts c ON c.usage_dedup_key = a.usage_dedup_key`
 
 // buildActivityWhere builds the WHERE clause (with a leading " WHERE " when
 // non-empty) and the positional args for an ActivityFilter. Columns are
@@ -410,11 +410,12 @@ func activityGroupExprs(f ActivityFilter) ([]string, error) {
 	return out, nil
 }
 
-// Keep the healthy join on the materialized table's primary key. Combining
-// the two count relations first hides that uniqueness from SQLite and makes
-// filtered rankings scan activity by name instead of using the time index.
-// Both aggregate arms share one snapshot and one authoritative grouping.
-func activityBucketQuery(groupExprs []string, where string) string {
+// Select the filtered activity rows before deriving their usage keys. This
+// retains the filter's index plan instead of scanning unrelated rows to satisfy
+// DISTINCT/group ordering. Divisors then group all authoritative calls sharing
+// each selected key in the same statement, so out-of-window calls still divide
+// their turn's cost and stale derived counts cannot affect the answer.
+func activityBucketQuery(groupExprs []string, where, suffix string) string {
 	projection := activitySelectSQL
 	group := ""
 	if len(groupExprs) > 0 {
@@ -422,20 +423,27 @@ func activityBucketQuery(groupExprs []string, where string) string {
 		projection = joined + ", " + projection
 		group = " GROUP BY " + joined
 	}
-	if where == "" {
-		where = " WHERE "
-	} else {
-		where += " AND "
-	}
-	arm := func(from, condition string) string {
-		// WHERE skips the inactive scan. HAVING also suppresses the empty
-		// aggregate row an inactive ungrouped arm would otherwise return.
-		return "SELECT " + projection + from + where + condition + group + " HAVING " + condition
-	}
-	const stale = "(SELECT stale FROM activity_counts_status)"
-	fallbackFrom := strings.Replace(activityFromSQL, "activity_usage_counts", "expected_activity_counts", 1)
-	return activityCountsCTE + " " + arm(activityFromSQL, "NOT "+stale) +
-		" UNION ALL " + arm(fallbackFrom, stale)
+	const selected = `WITH selected_activity AS MATERIALIZED (
+ SELECT a.tool,a.kind,a.name,a.session_id,a.project,a.model,a.event_time_unix,a.usage_dedup_key
+ FROM activity_events a`
+	const counts = `
+), expected_activity_counts AS MATERIALIZED (
+ SELECT s.usage_dedup_key,COUNT(*) AS activity_count
+ FROM (SELECT DISTINCT usage_dedup_key FROM selected_activity WHERE usage_dedup_key<>'') k
+ CROSS JOIN activity_events s ON s.usage_dedup_key=k.usage_dedup_key
+ GROUP BY s.usage_dedup_key
+) SELECT `
+	var query strings.Builder
+	query.Grow(len(selected) + len(where) + len(counts) + len(projection) +
+		len(activityFromSQL) + len(group) + len(suffix))
+	query.WriteString(selected)
+	query.WriteString(where)
+	query.WriteString(counts)
+	query.WriteString(projection)
+	query.WriteString(activityFromSQL)
+	query.WriteString(group)
+	query.WriteString(suffix)
+	return query.String()
 }
 
 // SummarizeActivity aggregates agent activity (tool calls, skill invocations,
@@ -452,13 +460,13 @@ func (s *Reader) SummarizeActivity(ctx context.Context, f ActivityFilter) (*Acti
 	}
 	where, args := buildActivityWhere(f)
 
-	q := activityBucketQuery(groupExprs, where)
+	suffix := ""
 	if len(groupExprs) > 0 {
-		q += " ORDER BY " + strings.Join(groupExprs, ", ")
+		suffix = " ORDER BY " + strings.Join(groupExprs, ", ")
 	}
+	q := activityBucketQuery(groupExprs, where, suffix)
 
-	queryArgs := append(append([]any{}, args...), args...)
-	buckets, err := s.queryActivityBuckets(ctx, q, queryArgs, f.GroupBy)
+	buckets, err := s.queryActivityBuckets(ctx, q, args, f.GroupBy)
 	if err != nil {
 		return nil, err
 	}
@@ -514,15 +522,14 @@ func (s *Reader) TopActivity(ctx context.Context, f ActivityFilter, by ActivityO
 	where, args := buildActivityWhere(f)
 
 	joined := strings.Join(groupExprs, ", ")
-	q := activityBucketQuery(groupExprs, where) +
-		// The group expressions break ties, so a ranking is deterministic
-		// rather than at the mercy of scan order.
-		" ORDER BY " + order + " DESC, " + joined
-	args = append(args, args...)
+	// The group expressions break ties, so a ranking is deterministic
+	// rather than at the mercy of scan order.
+	suffix := " ORDER BY " + order + " DESC, " + joined
 	if limit > 0 {
-		q += " LIMIT ?"
+		suffix += " LIMIT ?"
 		args = append(args, limit)
 	}
+	q := activityBucketQuery(groupExprs, where, suffix)
 	return s.queryActivityBuckets(ctx, q, args, f.GroupBy)
 }
 

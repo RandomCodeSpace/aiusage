@@ -64,12 +64,11 @@ done
 for name in baseline-1m.json candidate-1m.json baseline-100k.json candidate-100k.json; do
 	require_file "$primary_dir/fixtures/$name"
 	require_file "$retry_dir/fixtures/$name"
-	# schema_meta timestamps make the raw SQLite file hash nondeterministic even
-	# when the fixed seed, clock, cardinalities, boundaries, and bytes agree.
-	# Compare every semantic manifest field and exclude only that opaque hash.
+	# Timestamps and page allocation can change the physical SQLite hash/size.
+	# Retain those measurements in artifacts; compare every semantic field here.
 	if ! diff -q \
-		<(jq -S 'del(.database_sha256)' "$primary_dir/fixtures/$name") \
-		<(jq -S 'del(.database_sha256)' "$retry_dir/fixtures/$name") >/dev/null; then
+		<(jq -S 'del(.database_sha256, .database_bytes)' "$primary_dir/fixtures/$name") \
+		<(jq -S 'del(.database_sha256, .database_bytes)' "$retry_dir/fixtures/$name") >/dev/null; then
 		echo "performance shard fixture mismatch: $name" >&2
 		exit 1
 	fi

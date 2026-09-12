@@ -117,6 +117,7 @@ func TestActivityCountsDetectRepairAndReadFallback(t *testing.T) {
 		{"reduced", `UPDATE activity_usage_counts SET activity_count=1 WHERE usage_dedup_key='count-u0'`},
 		{"increased", `UPDATE activity_usage_counts SET activity_count=8 WHERE usage_dedup_key='count-u0'`},
 		{"extra key", `INSERT INTO activity_usage_counts VALUES('orphan',3)`},
+		{"missing and extra same cardinality", `DELETE FROM activity_usage_counts WHERE usage_dedup_key='count-u0'; INSERT INTO activity_usage_counts VALUES('orphan',5)`},
 		{"equal total wrong groups", `UPDATE activity_usage_counts SET activity_count=CASE usage_dedup_key WHEN 'count-u0' THEN 2 ELSE 5 END`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,6 +199,16 @@ func TestActivityCountsEmptyAndFailedRebuild(t *testing.T) {
 	if sum, err := st.SummarizeActivity(ctx, ActivityFilter{}); err != nil || len(sum.Buckets) != 1 || sum.Totals.Calls != 0 {
 		t.Fatalf("empty summary=%+v err=%v", sum, err)
 	}
+	execFailureSQL(t, st, `INSERT INTO activity_usage_counts VALUES('orphan',1)`)
+	if stale, err := st.activityUsageCountsStale(ctx); err != nil || !stale {
+		t.Fatalf("empty ledger with orphan stale=%v err=%v", stale, err)
+	}
+	if sum, err := st.SummarizeActivity(ctx, ActivityFilter{}); err != nil || len(sum.Buckets) != 1 || sum.Totals.Calls != 0 {
+		t.Fatalf("empty fallback summary=%+v err=%v", sum, err)
+	}
+	if rebuilt, err := st.EnsureRollup(ctx); err != nil || !rebuilt {
+		t.Fatalf("empty ledger orphan rebuild=%v err=%v", rebuilt, err)
+	}
 	seedActivityCounts(t, st)
 	execFailureSQL(t, st, `UPDATE activity_usage_counts SET activity_count=1 WHERE usage_dedup_key='count-u0'`)
 	execFailureSQL(t, st, `CREATE TRIGGER fail_rebuild BEFORE INSERT ON activity_usage_counts BEGIN SELECT RAISE(ABORT,'injected rebuild failure'); END`)
@@ -219,4 +230,32 @@ func TestActivityCountsEmptyAndFailedRebuild(t *testing.T) {
 		t.Fatalf("retry rebuild=%v err=%v", rebuilt, err)
 	}
 	assertActivityCountsAnswers(t, st.Reader)
+}
+
+func TestActivityDivisorIncludesCallsOutsideFilter(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	at := time.Unix(1_750_000_000, 0)
+	e := ev("shared-window", model.ToolClaudeCode, at, 300)
+	e.SetCost(300, "test")
+	acts := []model.ActivityEvent{
+		act("before-window", "Edit", model.ActivityTool, at.Add(-time.Hour), e.DedupKey, 0, 3),
+		act("in-window", "Read", model.ActivityTool, at, e.DedupKey, 1, 3),
+		act("after-window", "Read", model.ActivityTool, at.Add(time.Hour), e.DedupKey, 2, 3),
+	}
+	if _, err := st.ApplyObservation(ctx, []model.UsageEvent{e}, acts, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Even a plausible count matching the selected row count is untrusted.
+	execFailureSQL(t, st, `UPDATE activity_usage_counts SET activity_count=1`)
+	filter := ActivityFilter{Since: at, Until: at.Add(time.Minute), Names: []string{"Read"}}
+	sum, err := st.SummarizeActivity(ctx, filter)
+	if err != nil || sum.Totals.Calls != 1 || sum.Totals.AttributedTotal != 100 || sum.Totals.AttributedCostMicroUSD != 100 {
+		t.Fatalf("filtered share=%+v err=%v", sum, err)
+	}
+	filter.GroupBy = []string{"name"}
+	rows, err := st.TopActivity(ctx, filter, ActivityByCost, 10)
+	if err != nil || len(rows) != 1 || rows[0].AttributedTotal != 100 || rows[0].AttributedCostMicroUSD != 100 {
+		t.Fatalf("ranked filtered share=%+v err=%v", rows, err)
+	}
 }
