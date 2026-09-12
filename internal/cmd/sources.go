@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/RandomCodeSpace/aiusage/store"
 )
+
+var sourcesRegistry = defaultRegistry
 
 // newSourcesCmd builds the `sources` command: lists the sources discovered by
 // each adapter (read-only) alongside the per-tool stats already stored.
@@ -40,18 +43,23 @@ func runSources(c *cobra.Command) error {
 	defer st.Close()
 
 	ctx := cmdContext(c)
-	reg := defaultRegistry()
+	reg := sourcesRegistry()
 	dc := discoverConfig(cfg)
 	out := c.OutOrStdout()
 
 	fmt.Fprintln(out, "Discovered sources")
 	fmt.Fprintln(out, strings.Repeat("-", 18))
+	var discoveryErrors []error
 	for _, ad := range reg.All() {
 		srcs, derr := ad.Discover(ctx, dc)
 		if derr != nil {
+			discoveryErrors = append(discoveryErrors, fmt.Errorf("%s discovery: %w", ad.ID(), derr))
 			fmt.Fprintf(out, "%s (%s): discovery error: %v\n", ad.DisplayName(), ad.ID(), derr)
 		}
 		if len(srcs) == 0 {
+			if derr != nil {
+				continue
+			}
 			fmt.Fprintf(out, "%s (%s): no sources found\n", ad.DisplayName(), ad.ID())
 			continue
 		}
@@ -68,10 +76,10 @@ func runSources(c *cobra.Command) error {
 	fmt.Fprintln(out)
 	stats, err := st.SourceStats(ctx)
 	if err != nil {
-		return fmt.Errorf("source stats: %w", err)
+		return errors.Join(append(discoveryErrors, fmt.Errorf("source stats: %w", err))...)
 	}
 	printSourceStats(out, stats)
-	return nil
+	return errors.Join(discoveryErrors...)
 }
 
 // printSourceStats renders the stored per-tool stats as an aligned table.

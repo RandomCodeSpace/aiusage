@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -261,7 +262,11 @@ func TestSkipAllZeroAndMalformed(t *testing.T) {
 		`{ this is not valid json`,
 	})
 
-	evs := collectAll(t, adapter.DiscoverConfig{Home: home})
+	obs, err := New().Collect(context.Background(), adapter.Source{Tool: model.ToolCodex, Path: sess})
+	if err == nil || errors.Is(err, adapter.ErrSourceFormat) || obs.Checkpoint == nil {
+		t.Fatalf("complete poison must report an error while advancing the checkpoint: %v, %+v", err, obs.Checkpoint)
+	}
+	evs := obs.Events
 	// Only the one non-zero event before the malformed line survives.
 	if len(evs) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(evs))
@@ -423,7 +428,11 @@ func TestMalformedMidFileDoesNotAbort(t *testing.T) {
 		`{"type":"event_msg","timestamp":"2026-05-29T10:01:00Z","payload":{"type":"token_count","model":"gpt-5","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}`,
 	})
 
-	evs := collectAll(t, adapter.DiscoverConfig{Home: home})
+	obs, err := New().Collect(context.Background(), adapter.Source{Tool: model.ToolCodex, Path: sess})
+	if err == nil || errors.Is(err, adapter.ErrSourceFormat) || obs.Checkpoint == nil {
+		t.Fatalf("complete poison must report an error while advancing the checkpoint: %v, %+v", err, obs.Checkpoint)
+	}
+	evs := obs.Events
 	if len(evs) != 2 {
 		t.Fatalf("expected 2 events around the malformed line, got %d", len(evs))
 	}

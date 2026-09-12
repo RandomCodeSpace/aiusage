@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/aiusage/store"
 )
@@ -105,7 +106,7 @@ func Overview(c Ctx, d OverviewData, lay Layout) string {
 	}
 
 	avail := lay.BodyH - stripH - toolsH - heroReserveH
-	kpis := overviewKPIs(c, d, lay, avail-minHeroPanelH)
+	kpis, totalVisible := overviewKPIsWithTotal(c, d, lay, avail-minHeroPanelH)
 	kpisH := lipgloss.Height(kpis)
 	bodyH := avail - kpisH
 	if bodyH < 3 {
@@ -119,7 +120,19 @@ func Overview(c Ctx, d OverviewData, lay Layout) string {
 		}
 		parts = append(parts, kpis)
 		parts = append(parts, rest...)
-		return lipgloss.JoinVertical(lipgloss.Left, parts...)
+		out := lipgloss.JoinVertical(lipgloss.Left, parts...)
+		if !totalVisible {
+			total := c.Subtle.Render("total " + c.Humanize(d.Totals.Total) + " tokens")
+			lines := strings.Split(out, "\n")
+			// Below the chart floor its padded fallback can already consume the
+			// reserve. Use the final blank padding row without hiding panel data.
+			if len(lines) >= lay.BodyH && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
+				lines[len(lines)-1] = total
+				return strings.Join(lines, "\n")
+			}
+			return out + "\n" + total
+		}
+		return out
 	}
 
 	if !lay.SidePanel {
@@ -143,7 +156,8 @@ type kpiSpec struct {
 	// fmtVal overrides the default token humanizer. Cost is not a token count,
 	// so it carries its own renderer rather than being humanized into a bare
 	// number with no currency.
-	fmtVal func(int64) string
+	fmtVal   func(int64) string
+	fmtDelta func(int64, int64) (string, int)
 	// footForms is the foot's width ladder, widest first, for a tile whose foot
 	// discloses something (the cost tile's unpriced count). Every rung is
 	// complete on its own, so a narrow tile shows a shorter statement rather
@@ -170,6 +184,11 @@ const kpiTileH = 2*blockPadY + 4
 // front. The first row is always kept even when it does not fit: that floor is
 // minHeroBodyH's kpiTileH term.
 func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
+	strip, _ := overviewKPIsWithTotal(c, d, lay, maxRows)
+	return strip
+}
+
+func overviewKPIsWithTotal(c Ctx, d OverviewData, lay Layout, maxRows int) (string, bool) {
 	width := lay.BodyW
 	tot := Split(d.Totals)
 	prev := Split(d.Prev)
@@ -248,6 +267,18 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 			fmtVal: func(v int64) string {
 				return costValue(c, v, t.UnpricedEvents, t.ComputedCostEvents)
 			},
+			fmtDelta: func(cur, prev int64) (string, int) {
+				if prev == 0 {
+					return "· —", 0
+				}
+				if cur > prev {
+					return "▲ " + c.Money(cur-prev, false, true), 1
+				}
+				if cur < prev {
+					return "▼ " + c.Money(prev-cur, false, true), -1
+				}
+				return "= " + c.Money(0, false, true), 0
+			},
 		})
 	}
 
@@ -259,6 +290,7 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 	// Arrange the tiles into rows of `per`, keeping only the rows the budget can
 	// pay for.
 	var rows []string
+	totalVisible := false
 	used := 0
 	for i := 0; i < len(tiles); i += per {
 		end := i + per
@@ -278,9 +310,10 @@ func overviewKPIs(c Ctx, d OverviewData, lay Layout, maxRows int) string {
 			break
 		}
 		rows = append(rows, row)
+		totalVisible = totalVisible || i <= len(c.Comp) && len(c.Comp) < end
 		used += rh
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+	return lipgloss.JoinVertical(lipgloss.Left, rows...), totalVisible
 }
 
 // kpiHeatStrip renders one KPI tile's self-scaled heat row, through the render
@@ -326,7 +359,9 @@ func kpiTile(c Ctx, s kpiSpec, w int) string {
 		num = s.fmtVal(s.value)
 	}
 	deltaTxt, dir := "·", 0
-	if c.Delta != nil {
+	if s.fmtDelta != nil {
+		deltaTxt, dir = s.fmtDelta(s.value, s.prev)
+	} else if c.Delta != nil {
 		deltaTxt, dir = c.Delta(s.value, s.prev)
 	}
 	deltaStyle := deltaChipStyle(c, dir)

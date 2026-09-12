@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,7 +39,7 @@ const (
 	dbName = "state.db"
 	// driverName is the modernc.org/sqlite database/sql driver name.
 	driverName = "sqlite"
-	// metaProject labels every Hermes session (no cwd is recorded by Hermes).
+	// metaProject preserves the adapter's established session project label.
 	metaProject = "hermes"
 )
 
@@ -65,10 +67,8 @@ func (Adapter) DisplayName() string { return "Hermes" }
 // Cost is COMPUTED and there is NO activity at all: this adapter references
 // model.ActivityEvent nowhere, so its surface exposes usage and nothing else.
 //
-// The tier is the weakest "live" claim in the project: no local session has
-// ever been read on this machine (see the reasoningModes note on issue #28).
-// It is declared live because the adapter was written against a real
-// deployment; demote it to TierFixture the moment that stops being true.
+// The v2026.9.11 live session capture and exact writer accounting evidence
+// are recorded in testdata/live-2026.9.11.provenance.md.
 func (Adapter) Capabilities() model.ToolCapability {
 	return model.ToolCapability{
 		Tool:      model.ToolHermes,
@@ -183,6 +183,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 
 	rows, err := db.QueryContext(ctx, sessionsQuery)
 	if err != nil {
+		if strings.Contains(err.Error(), "no such table: sessions") || strings.Contains(err.Error(), "no such column:") {
+			return adapter.Observation{}, fmt.Errorf("hermes: query %s: %w: %w", src.Path, adapter.ErrSourceFormat, err)
+		}
 		return adapter.Observation{}, fmt.Errorf("hermes: query %s: %w", src.Path, err)
 	}
 	defer rows.Close()
@@ -222,15 +225,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		cCreate := adapter.NonNeg(cacheWrite.Int64) // cache_write_tokens -> CacheCreation
 		cRead := adapter.NonNeg(cacheRead.Int64)
 		reasoning := adapter.NonNeg(reason.Int64)
-		// Anthropic-style additive accounting for the cache buckets. Reasoning
-		// is deliberately kept OUT of the authoritative total, which is only
-		// correct if the count is already inside output_tokens.
-		//
-		// UNVERIFIED: no local Hermes data exists to confirm that (issue #28).
-		// The behaviour is preserved as-is because changing it would restate
-		// every stored total; model.ReasoningModeFor(ToolHermes) carries the
-		// matching subset assumption for pricing, and the two must move
-		// together when the rule is finally checked.
+		// Hermes v2026.9.11 CanonicalUsage separates the cache input buckets
+		// and reads reasoning from output-token details. Its total_tokens
+		// includes output once; see the versioned capture provenance.
 		total := in + out + cCreate + cRead
 
 		// Prefer the row's real timestamps so a delta accrued while the daemon
@@ -267,13 +264,13 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	}
 
 	obs := adapter.Observation{Snapshots: snaps}
+	if skipped > 0 {
+		return obs, fmt.Errorf("hermes: %w: skipped %d malformed session row(s) in %s", adapter.ErrSourceFormat, skipped, src.Path)
+	}
 	if stateJSON, err := json.Marshal(gate); err == nil {
 		obs.Checkpoint = &model.SourceCheckpoint{
 			Tool: model.ToolHermes, SourcePath: src.Path, State: string(stateJSON),
 		}
-	}
-	if skipped > 0 {
-		return obs, fmt.Errorf("hermes: skipped %d malformed session row(s) in %s", skipped, src.Path)
 	}
 	return obs, nil
 }
@@ -301,7 +298,12 @@ func rowHash(id, mdl, provider, startedAt, endedAt string, nums ...int64) string
 // changes — a stale read below the stored baseline trips the collector's
 // reset branch and re-adds the full current value as new usage, forever.
 func openReadOnly(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	dsn := u.String() + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err
@@ -310,9 +312,8 @@ func openReadOnly(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// parseTime tries RFC3339 (with and without nanoseconds) and SQLite's
-// datetime() layout, returning the zero time when the stamp is empty or
-// unparseable. A naked SQLite datetime carries no zone and is taken as UTC.
+// parseTime accepts Hermes's Unix seconds and legacy textual timestamps.
+// A naked SQLite datetime carries no zone and is taken as UTC.
 func parseTime(s string) time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -322,6 +323,10 @@ func parseTime(s string) time.Time {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t.UTC()
 		}
+	}
+	if seconds, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(seconds) && !math.IsInf(seconds, 0) && seconds >= -62135596800 && seconds < 253402300800 {
+		whole, fraction := math.Modf(seconds)
+		return time.Unix(int64(whole), int64(fraction*1e9)).UTC()
 	}
 	return time.Time{}
 }

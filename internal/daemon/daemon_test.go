@@ -324,3 +324,34 @@ func TestAcquireCollectionLockStampsIdentity(t *testing.T) {
 		t.Errorf("version stamp %s not removed on release", versionPath(pidPath))
 	}
 }
+
+func TestWayfinderReplacementDuringFirstCycle(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "aiusage")
+	writeFakeBinary(t, exe, "old", time.Now().Add(-time.Hour))
+	entered, release := make(chan struct{}), make(chan struct{})
+	cycles := 0
+	ad := &fakeAdapter{id: model.ToolCodex, emit: func() adapter.Observation {
+		cycles++
+		if cycles == 1 {
+			close(entered)
+			<-release
+		}
+		return adapter.Observation{}
+	}}
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, adapter.NewRegistry(ad), newFakeStore(), adapter.DiscoverConfig{}, Options{PIDPath: filepath.Join(dir, "aiusage.pid"), ExecPath: exe, Logger: log.New(discard{}, "", 0)})
+	}()
+	<-entered
+	writeFakeBinary(t, exe, "new executable", time.Now())
+	close(release)
+	if err := <-done; !errors.Is(err, ErrBinaryReplaced) {
+		t.Fatalf("Run = %v", err)
+	}
+	if cycles != 1 {
+		t.Fatalf("old binary ran %d cycles", cycles)
+	}
+}

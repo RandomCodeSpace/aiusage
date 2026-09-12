@@ -153,6 +153,12 @@ type rollupDelta struct {
 
 // add folds one inserted event (and the row id it was assigned) into the delta.
 func (d *rollupDelta) add(e model.UsageEvent, id int64) {
+	d.adjust(e, id, 1)
+}
+
+// adjust also supports moving a previously unpriced event between price classes.
+// Negative cells must be checked against the stored rollup before apply.
+func (d *rollupDelta) adjust(e model.UsageEvent, id, sign int64) {
 	if d.cells == nil {
 		d.cells = make(map[rollupKey]*rollupCell)
 	}
@@ -171,17 +177,17 @@ func (d *rollupDelta) add(e model.UsageEvent, id int64) {
 		c = &rollupCell{}
 		d.cells[k] = c
 	}
-	c.input += e.InputTokens
-	c.output += e.OutputTokens
-	c.cacheCreation += e.CacheCreationTokens
-	c.cacheRead += e.CacheReadTokens
-	c.reasoning += e.ReasoningTokens
-	c.total += e.TotalTokens
-	c.events++
+	c.input += sign * e.InputTokens
+	c.output += sign * e.OutputTokens
+	c.cacheCreation += sign * e.CacheCreationTokens
+	c.cacheRead += sign * e.CacheReadTokens
+	c.reasoning += sign * e.ReasoningTokens
+	c.total += sign * e.TotalTokens
+	c.events += sign
 	if cost, ok := e.Cost(); ok {
-		c.costMicroUSD += cost
+		c.costMicroUSD += sign * cost
 	} else {
-		c.unpriced++
+		c.unpriced += sign
 	}
 	if id > d.maxID {
 		d.maxID = id
@@ -340,31 +346,41 @@ func (l *Ledger) RebuildRollup(ctx context.Context) error {
 	return nil
 }
 
-// EnsureRollup brings the rollup back in step with the ledger, rebuilding it
-// when the two disagree, and reports whether a rebuild ran.
+// EnsureRollup brings the usage rollup and activity usage counts back in step
+// with their ledgers, and reports whether either derived table was rebuilt.
 //
-// Two checks, because they catch different failures. The watermark (highest
+// The usage rollup has two checks for different failures. The watermark (highest
 // ledger id folded in) catches the empty rollup a v4 migration leaves behind
 // and any write that skipped the delta. The event count catches the rollup that
 // tracked the newest ids but lost older ones - a rollup filled from a partial
 // ledger would otherwise pass the watermark check forever.
+// Activity counts are compared by key and count in both directions, so moving
+// counts between keys cannot conceal drift behind an unchanged total.
 func (l *Ledger) EnsureRollup(ctx context.Context) (bool, error) {
 	stale, err := l.RollupStale(ctx)
 	if err != nil {
 		return false, err
 	}
-	if !stale {
-		return false, nil
+	if stale {
+		if err := l.RebuildRollup(ctx); err != nil {
+			return false, err
+		}
 	}
-	if err := l.RebuildRollup(ctx); err != nil {
-		return false, err
+	activityStale, err := l.activityUsageCountsStale(ctx)
+	if err != nil {
+		return stale, err
 	}
-	return true, nil
+	if activityStale {
+		if err := l.rebuildActivityUsageCounts(ctx); err != nil {
+			return stale, err
+		}
+	}
+	return stale || activityStale, nil
 }
 
-// RollupStale reports whether the rollup disagrees with the ledger, which is
-// the same question EnsureRollup asks before rebuilding - minus the ability to
-// do anything about it. It is exported for the READ-ONLY serving path: a
+// RollupStale reports whether the usage rollup disagrees with the usage ledger,
+// the question EnsureRollup asks before rebuilding that table. It cannot
+// repair the table. It is exported for the READ-ONLY serving path: a
 // process that cannot write still has to know that the summary it would answer
 // from covers nothing, so it can go to the ledger instead of serving the zeros
 // of a rollup a migration created empty.
@@ -406,6 +422,9 @@ func (s *Reader) RollupStale(ctx context.Context) (bool, error) {
 // ledger. It is the fast path behind time-bucketed reporting: identical inputs
 // must yield identical numbers to Summarize over the same range, which
 // TestRollupMatchesLedger pins through store queries on both sides.
+// Callers must first check RollupStale and use Summarize when it is true, or
+// rebuild through EnsureRollup on a writable handle. This method trusts the
+// derived contents and does not validate out-of-band edits.
 //
 // The public contract remains the one version 4 exposed: Since/Until are
 // snapped OUTWARD to whole UTC buckets (15 minutes), because

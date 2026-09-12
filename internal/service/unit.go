@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -200,10 +201,22 @@ func readWritePaths(paths ...string) string {
 // to the service manager than it did to the user who typed it.
 func quote(s string) string {
 	s = strings.ReplaceAll(s, "%", "%%")
-	if !strings.ContainsAny(s, " \t\"'\\") {
-		return s
+	needsQuote := s == "" || strings.ContainsAny(s, " \t\"'\\")
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\\' || r == '"':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 32 || r == 127:
+			fmt.Fprintf(&b, `\x%02x`, r)
+			needsQuote = true
+		default:
+			b.WriteRune(r)
+		}
 	}
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
+	if needsQuote {
+		return `"` + b.String() + `"`
+	}
+	return b.String()
 }

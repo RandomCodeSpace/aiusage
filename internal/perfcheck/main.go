@@ -327,6 +327,8 @@ func compareQueries(baseline, candidate side) []result {
 
 func compareBenchmarks(baseline, candidate map[string]map[string][]float64) []result {
 	var out []result
+	out = append(out, validateBenchmarks("baseline", baseline)...)
+	out = append(out, validateBenchmarks("candidate", candidate)...)
 	for _, name := range unionBenchKeys(baseline, candidate) {
 		b, bok := baseline[name]
 		c, cok := candidate[name]
@@ -351,6 +353,52 @@ func compareBenchmarks(baseline, candidate map[string]map[string][]float64) []re
 				out = append(out, failed("regression", name+" "+unit, fmtFloat(base), fmtFloat(cand), "<= baseline +5%", "allocation regression"))
 			} else {
 				out = append(out, passedValue("regression", name+" "+unit, fmtFloat(cand), "<= baseline +5%"))
+			}
+		}
+	}
+	return out
+}
+
+// Keep the release workload explicit: a benchmark omitted by both binaries must
+// fail just as one omitted by only the candidate does.
+func requiredBenchmarks() []string {
+	names := []string{"BenchmarkReload", "BenchmarkScrubStep", "BenchmarkView",
+		"BenchmarkRangeCycleBurst", "BenchmarkRangeCyclePaced", "BenchmarkRangeCycleRevisit",
+		"BenchmarkSourceFarmUnchanged"}
+	for _, prefix := range []string{"BenchmarkProductionRender120x40", "BenchmarkProductionRender200x60", "BenchmarkProductionColdLoad"} {
+		for _, view := range []string{"Overview", "ByTool", "ByModel", "Sessions", "ActivityCalls",
+			"ActivityAgent", "ActivitySkill", "ActivityMcpTool", "ActivityMcpServer", "ActivityPlugin"} {
+			names = append(names, prefix+"/"+view)
+		}
+	}
+	for _, input := range []string{"Key", "Mouse", "Resize", "Filter", "Scrub"} {
+		names = append(names, "BenchmarkProductionUIThread/"+input)
+	}
+	return names
+}
+
+func validateBenchmarks(label string, benchmarks map[string]map[string][]float64) []result {
+	var out []result
+	for _, name := range requiredBenchmarks() {
+		metrics, ok := benchmarks[name]
+		if !ok {
+			out = append(out, failed("benchmark", label+" "+name, "", "", "required workload", "benchmark missing"))
+			continue
+		}
+		units := []string{"ns/op", "B/op", "allocs/op"}
+		switch {
+		case strings.HasPrefix(name, "BenchmarkRangeCycle"), strings.HasPrefix(name, "BenchmarkProductionColdLoad/"):
+			units = append(units, "queries/op", "query-ms/op")
+		case strings.HasPrefix(name, "BenchmarkProductionUIThread/"):
+			units = append(units, "queries/op")
+		case name == "BenchmarkSourceFarmUnchanged":
+			units = append(units, "sources/op", "inserted/op")
+		}
+		n := len(metrics["ns/op"])
+		for _, unit := range units {
+			count := len(metrics[unit])
+			if (count != 10 && count != 20) || count != n {
+				out = append(out, failed("benchmark", label+" "+name+" "+unit, "", strconv.Itoa(count), "complete paired set of 10 or 20 samples", "required metric missing or sample count invalid"))
 			}
 		}
 	}
@@ -445,8 +493,8 @@ func benchmarkAbsolute(name string, metrics map[string][]float64) []result {
 }
 
 func timingRegression(category, name string, baseline, candidate []float64) []result {
-	if len(baseline) != len(candidate) || len(baseline) < 10 {
-		return []result{failed("regression", category+" "+name, strconv.Itoa(len(baseline)), strconv.Itoa(len(candidate)), "paired samples >= 10", "sample count mismatch or insufficient samples")}
+	if len(baseline) != len(candidate) || (len(baseline) != 10 && len(baseline) != 20) {
+		return []result{failed("regression", category+" "+name, strconv.Itoa(len(baseline)), strconv.Itoa(len(candidate)), "paired samples = 10 or 20", "sample count mismatch or unsupported sample count")}
 	}
 	bmed, cmed := percentile(baseline, .5), percentile(candidate, .5)
 	p := pairedRegressionP(baseline, candidate, .10)

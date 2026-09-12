@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -79,7 +80,11 @@ func Open(path string) (*Ledger, error) {
 	// pooled connection; the schema is managed once by ensureSchema below.
 	// synchronous=NORMAL is the WAL-recommended durability level (the default
 	// FULL fsyncs every commit; NORMAL only at checkpoints).
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("store: resolve database path: %w", err)
+	}
+	dsn := sqliteFileURI(absolute, false)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
@@ -130,7 +135,11 @@ func OpenReadOnly(path string) (*Reader, error) {
 	// No journal_mode pragma: WAL is a property of the file, and setting it on
 	// a read-only connection fails. busy_timeout still matters - readers wait
 	// out a writer's commit instead of erroring.
-	dsn := "file:" + path + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("store: resolve database path: %w", err)
+	}
+	dsn := sqliteFileURI(absolute, true)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s read-only: %w", path, err)
@@ -219,10 +228,10 @@ func (l *Ledger) InsertEvents(ctx context.Context, events []model.UsageEvent) (i
 
 	inserted, skipErr, err := insertEventsTx(ctx, tx, events)
 	if err != nil {
-		return inserted, err
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return inserted, fmt.Errorf("store: commit: %w", err)
+		return 0, fmt.Errorf("store: commit: %w", err)
 	}
 	return inserted, skipErr
 }
@@ -232,9 +241,8 @@ func (l *Ledger) InsertEvents(ctx context.Context, events []model.UsageEvent) (i
 // cycle checkpoints) can combine it with other statements atomically.
 // ON CONFLICT(dedup_key) DO NOTHING keeps the dedup ignore silent while a
 // CHECK violation still errors (blanket OR IGNORE would swallow it). Per-row
-// failures are skipped (a failed statement does not abort the SQLite
-// transaction) and summarised in skipErr; err is reserved for failures of the
-// batch itself, after which the transaction must not be committed.
+// CHECK failures are skipped and summarised in skipErr. Every other insert
+// failure is a batch error, after which the transaction must not be committed.
 //
 // The derived rollup's delta is written here, from the rows that were ACTUALLY
 // inserted (dedup collisions contribute nothing), inside the caller's
@@ -287,7 +295,11 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []model.UsageEvent) 
 			e.Provider, e.ServiceTier, nullCost(e), e.PriceSource,
 		)
 		if execErr != nil {
-			skips.add(e.DedupKey, fmt.Errorf("store: insert event %s: %w", e.DedupKey, execErr))
+			rowErr := fmt.Errorf("store: insert event %s: %w", e.DedupKey, execErr)
+			if !isSkippableRowError(execErr) {
+				return inserted, nil, rowErr
+			}
+			skips.add(e.DedupKey, rowErr)
 			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
@@ -336,7 +348,7 @@ func (l *Ledger) ApplySnapshot(ctx context.Context, events []model.UsageEvent, s
 	if skipErr != nil {
 		// A skipped delta event must not advance the baseline: rolling back
 		// keeps the delta re-derivable next cycle.
-		return 0, skipErr
+		return 0, fmt.Errorf("store: snapshot rolled back: %v", skipErr)
 	}
 	if applySnapshotFault != nil {
 		if err := applySnapshotFault(); err != nil {
@@ -412,32 +424,29 @@ func (l *Ledger) ApplyBatch(ctx context.Context, b ObservationBatch) (Applied, e
 	inserted, skipErr, err := insertEventsTx(ctx, tx, events)
 	out.Events = inserted
 	if err != nil {
-		return out, err
+		return Applied{}, err
 	}
 	actInserted, actSkipErr, err := insertActivityTx(ctx, tx, activity)
 	out.Activity = actInserted
 	if err != nil {
-		return out, err
+		return Applied{}, err
 	}
 	ctxInserted, ctxSkipErr, err := insertTurnContextsTx(ctx, tx, ctxs)
 	out.TurnContexts = ctxInserted
 	if err != nil {
-		return out, err
+		return Applied{}, err
 	}
 	if cp != nil {
 		if err := upsertCheckpoint(ctx, tx, *cp); err != nil {
-			return out, err
+			return Applied{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return out, fmt.Errorf("store: commit: %w", err)
+		return Applied{}, fmt.Errorf("store: commit: %w", err)
 	}
-	// All three partial-success reports survive: errors.Join keeps each
-	// SkippedRowsError reachable through errors.As, so a batch that skipped a
-	// usage row AND an activity row loses neither detail. The usage skip joins
-	// first — the ledger is the authoritative half, and a caller that prints
-	// the error sees that one lead — with activity next and turn context last,
-	// the most derived of the three. Join returns nil when every arm is nil.
+	// Join preserves each table's committed skip report. errors.As finds the
+	// first matching report; callers wanting every report traverse the joined
+	// children. The message includes usage, activity, then turn context skips.
 	return out, errors.Join(skipErr, actSkipErr, ctxSkipErr)
 }
 
@@ -855,31 +864,9 @@ func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) (
 		out = make([]model.UsageEvent, 0, lo.limit)
 	}
 	for rows.Next() {
-		var (
-			e            model.UsageEvent
-			eventUnix    int64
-			observedUnix int64
-			kind         string
-			cost         sql.NullInt64
-		)
-		dest := []any{
-			&e.ID, &e.Tool, &e.Model, &e.SessionID, &e.Project, &eventUnix, &observedUnix,
-			&e.InputTokens, &e.OutputTokens, &e.CacheCreationTokens, &e.CacheReadTokens,
-			&e.ReasoningTokens, &e.TotalTokens, &e.RequestID, &e.MessageID, &e.SourcePath, &kind,
-			&e.DedupKey, &e.Provider, &e.ServiceTier, &cost, &e.PriceSource,
-		}
-		if lo.includeRaw {
-			dest = append(dest, &e.Raw)
-		}
-		if err := rows.Scan(dest...); err != nil {
+		e, err := scanUsageEvent(rows, lo.includeRaw)
+		if err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
-		}
-		e.EventTime = time.Unix(eventUnix, 0).UTC()
-		e.ObservedTime = time.Unix(observedUnix, 0).UTC()
-		e.Kind = model.EventKind(kind)
-		// A NULL cost stays nil: unpriced, not free.
-		if cost.Valid {
-			e.SetCost(cost.Int64, e.PriceSource)
 		}
 		out = append(out, e)
 	}
@@ -887,6 +874,32 @@ func (s *Reader) ListEvents(ctx context.Context, f Filter, opts ...ListOption) (
 		return nil, fmt.Errorf("store: event rows: %w", err)
 	}
 	return out, nil
+}
+
+func scanUsageEvent(rows *sql.Rows, includeRaw bool) (model.UsageEvent, error) {
+	var e model.UsageEvent
+	var eventUnix, observedUnix int64
+	var kind string
+	var cost sql.NullInt64
+	dest := []any{
+		&e.ID, &e.Tool, &e.Model, &e.SessionID, &e.Project, &eventUnix, &observedUnix,
+		&e.InputTokens, &e.OutputTokens, &e.CacheCreationTokens, &e.CacheReadTokens,
+		&e.ReasoningTokens, &e.TotalTokens, &e.RequestID, &e.MessageID, &e.SourcePath, &kind,
+		&e.DedupKey, &e.Provider, &e.ServiceTier, &cost, &e.PriceSource,
+	}
+	if includeRaw {
+		dest = append(dest, &e.Raw)
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return e, err
+	}
+	e.EventTime = time.Unix(eventUnix, 0).UTC()
+	e.ObservedTime = time.Unix(observedUnix, 0).UTC()
+	e.Kind = model.EventKind(kind)
+	if cost.Valid {
+		e.SetCost(cost.Int64, e.PriceSource)
+	}
+	return e, nil
 }
 
 // IngestWatermark returns the observed time of the NEWEST row in the ledger, or

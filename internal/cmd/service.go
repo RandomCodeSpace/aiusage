@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
+	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/internal/service"
 )
 
@@ -214,4 +215,19 @@ func superviseRestart(ctx context.Context, f globalFlags, warn io.Writer) bool {
 	}
 	reportSupervision(warn, res)
 	return res.Collecting
+}
+
+func waitCollectorRelease(ctx context.Context, cfg config.Config) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if running, _ := daemon.Status(cfg); !running {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("collector lock %s remains held: %w", cfg.PIDPath, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }

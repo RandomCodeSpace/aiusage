@@ -12,22 +12,28 @@ import (
 type Cost struct {
 	// MicroUSD is the cost in millionths of a dollar.
 	MicroUSD int64
-	// Approximate marks a cost that includes rows valued at display time from
-	// today's table instead of stamped at collect. Any sum that mixes stamped
-	// and display-priced rows inherits it — an approximation does not become
-	// exact by being added to an exact number.
+	// Approximate marks costs computed from a rate card at collect or display time.
 	Approximate bool
+	// lowerBound marks a known sum that excludes unpriced rows.
+	lowerBound bool
+	// machineApproximate preserves the established JSON approximation contract.
+	machineApproximate bool
+	resolved           bool
 	// Known is false when nothing in the bucket could be priced at all. Such a
 	// bucket renders as model.UnpricedMark rather than a zero.
 	Known bool
 }
 
-// String renders the display copy: "$1.23" for a stamped cost, "~$1.23" once
-// any part of it was priced at display time, and "-" when the bucket is
-// unpriced. Sub-cent amounts widen to four decimals, and anything smaller than
+// String renders vendor costs as "$1.23", rate-card estimates as "~$1.23",
+// and unknown costs as "-". A leading "≥" marks a sum with unpriced rows.
+// Sub-cent amounts widen to four decimals, and anything smaller than
 // that renders as "<$0.0001" — a real charge must never print as $0.00.
 func (c Cost) String() string {
-	return model.FormatCost(c.MicroUSD, c.Approximate, c.Known)
+	value := model.FormatCost(c.MicroUSD, c.Approximate, c.Known)
+	if c.Known && c.lowerBound {
+		return "≥" + value
+	}
+	return value
 }
 
 // Costs holds the resolved cost per summary bucket (aligned by index with
@@ -50,9 +56,8 @@ type Pricer interface {
 // Stamped costs come from Summarize; the unpriced rows arrive pre-aggregated
 // per model from store.UnpricedGroups, because valuing them needs the model,
 // provider and tier, none of which survive a bucket-level SUM. A bucket that
-// receives any display price is marked approximate, and so is every total it
-// feeds. So is a bucket still holding rows nothing could value: its figure is a
-// floor, not the bill.
+// receives any computed price is marked approximate. Remaining unpriced rows
+// independently make the sum a lower bound.
 func ResolveCosts(sum *store.Summary, groups []store.UnpricedGroup, p Pricer) *Costs {
 	if sum == nil {
 		return nil
@@ -76,28 +81,26 @@ func ResolveCosts(sum *store.Summary, groups []store.UnpricedGroup, p Pricer) *C
 			if i, found := index[bucketKey(g.Keys, sum.GroupBy)]; found {
 				out.Buckets[i].MicroUSD += micro
 				out.Buckets[i].Approximate = true
+				out.Buckets[i].machineApproximate = true
 				out.Buckets[i].Known = true
 				valued[i] += g.Events
 			}
 			out.Totals.MicroUSD += micro
 			out.Totals.Approximate = true
+			out.Totals.machineApproximate = true
 			out.Totals.Known = true
 			totalValued += g.Events
 		}
 	}
 
-	// Rows the ladder could not value at all are simply missing from the sum.
-	// A figure that is short a row is not exact, so it wears the tilde too —
-	// otherwise a bucket with one unpriceable event would advertise a precise
-	// total it does not have.
+	// A partial valuation is a lower bound, independently of its provenance.
 	for i, b := range sum.Buckets {
-		if out.Buckets[i].Known && valued[i] < b.UnpricedEvents {
-			out.Buckets[i].Approximate = true
-		}
+		out.Buckets[i].lowerBound = out.Buckets[i].Known && valued[i] < b.UnpricedEvents
+		out.Buckets[i].machineApproximate = out.Buckets[i].machineApproximate || out.Buckets[i].lowerBound
 	}
-	if out.Totals.Known && totalValued < sum.Totals.UnpricedEvents {
-		out.Totals.Approximate = true
-	}
+	out.Totals.lowerBound = out.Totals.Known && totalValued < sum.Totals.UnpricedEvents
+	out.Totals.machineApproximate = out.Totals.machineApproximate || out.Totals.lowerBound
+
 	return out
 }
 
@@ -107,8 +110,11 @@ func ResolveCosts(sum *store.Summary, groups []store.UnpricedGroup, p Pricer) *C
 // when no pricer is available.
 func stampedCost(b store.Bucket) Cost {
 	return Cost{
-		MicroUSD: b.CostMicroUSD,
-		Known:    b.Events > b.UnpricedEvents,
+		MicroUSD:    b.CostMicroUSD,
+		Known:       b.Events > b.UnpricedEvents,
+		Approximate: b.ComputedCostEvents > 0,
+		lowerBound:  b.Events > b.UnpricedEvents && b.UnpricedEvents > 0,
+		resolved:    true,
 	}
 }
 

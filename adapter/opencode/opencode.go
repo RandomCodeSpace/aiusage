@@ -19,10 +19,9 @@
 // Reasoning=tokens.reasoning, and Total is reconciled against tokens.total via
 // tokenutil.ApplyTotalFallback.
 //
-// Reasoning is ADDITIVE here, not a subset of output: every local message row
-// satisfies total = input + output + reasoning + cache.read + cache.write, and
-// rows with reasoning > output exist. It therefore participates in the known
-// sum handed to the fallback (see buildEvent).
+// Reasoning is normalized to ADDITIVE output. Current writers subtract it from
+// output; older writers retained it inside output. A positive total that exactly
+// accounts for input/output/cache identifies that overlap (see buildEvent).
 //
 // The persisted dedup key is "opencode|<message id>", so the SQLite row and the
 // JSON file for the same message collapse to one stored event (DB is discovered
@@ -39,8 +38,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,10 +191,8 @@ func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Obser
 	return a.CollectIncremental(ctx, src, nil)
 }
 
-// CollectIncremental reads the DB source with a rowid watermark (only message
-// rows above the last consumed rowid are scanned; the message log is
-// append-only). The JSON tree has no incremental path and is always read in
-// full. A nil cp is a full read.
+// CollectIncremental scans new database rows and retries pending modern messages.
+// Legacy databases retain their rowid cursor; JSON trees are always read in full.
 func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
 	switch kindOf(src) {
 	case kindDB:
@@ -214,86 +213,153 @@ func kindOf(src adapter.Source) string {
 	return ""
 }
 
-// collectDB reads `SELECT rowid, id, session_id, data FROM message` read-only,
-// restricted to rowids above the checkpoint watermark (the message log is
-// append-only, so already-consumed rowids never change). The `id`/`session_id`
-// columns are authoritative; the `data` JSON supplies tokens, model, timestamp
-// and project. A malformed or missing column never fails the whole source —
-// the row is skipped, but it also holds the watermark back so it is retried.
-// The DSN is mode=ro (no create/write/lock) plus query_only(1) (the connection
-// refuses any write statement) plus busy_timeout, matching the hermes adapter.
-// immutable=1 is deliberately NOT used: opencode holds this database open and
-// writes it live (three processes on the reference machine), journal_mode is
-// wal, and the WAL held 74.65 MiB of un-checkpointed pages the immutable reader
-// could not see — main-file mtime a full day behind the WAL. immutable=1 makes
-// SQLite skip locking, skip change detection and ignore the WAL entirely, so
-// the adapter reads the database as of its last checkpoint and is exposed to
-// SQLite's documented wrong-result and torn-read behaviour whenever opencode
-// writes mid-scan. None of that fails at open; it surfaces as silently stale
-// rows or SQLITE_CORRUPT at query time.
+var errInvalidTimestamp = errors.New("missing or invalid creation timestamp")
+var errInvalidMessage = errors.New("invalid message JSON")
+
+// dbState is private retry state for the mutable message schema. Missing state
+// replays historical rows once, using the same persisted event identities.
+type dbState struct {
+	Version int     `json:"version"`
+	Pending []int64 `json:"pending,omitempty"`
+}
+
+// collectDB observes message completion and parts in one read-only snapshot.
+// Never use immutable=1: the producer's latest messages can live in its WAL.
 func collectDB(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint) (adapter.Observation, error) {
-	dsn := "file:" + src.Path + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
-	db, err := sql.Open("sqlite", dsn)
+	absolute, err := filepath.Abs(src.Path)
+	if err != nil {
+		return adapter.Observation{}, err
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	q := u.Query()
+	q.Set("mode", "ro")
+	q.Add("_pragma", "query_only(1)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	u.RawQuery = q.Encode()
+	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("opencode: open db %s: %w", src.Path, err)
 	}
 	defer db.Close()
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return adapter.Observation{}, fmt.Errorf("opencode: snapshot %s: %w", src.Path, err)
+	}
+	defer tx.Rollback()
 
+	// Both timestamps identify the supported mutable family. A partial modern
+	// schema must not silently fall back to legacy finality assumptions.
+	var anchors int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('message') WHERE name IN ('time_created','time_updated')`).Scan(&anchors); err != nil {
+		return adapter.Observation{}, fmt.Errorf("opencode: schema %s: %w", src.Path, err)
+	}
+	if anchors == 1 {
+		return adapter.Observation{}, fmt.Errorf("%w: opencode incomplete modern message schema in %s", adapter.ErrSourceFormat, src.Path)
+	}
+	modern := anchors == 2
 	watermark := int64(0)
+	var state dbState
 	if cp != nil {
 		watermark = cp.Watermark
 	}
-
-	rows, err := db.QueryContext(ctx,
-		"SELECT rowid, id, session_id, data FROM message WHERE rowid > ? ORDER BY rowid", watermark)
+	if modern {
+		if cp == nil || cp.State == "" {
+			watermark = 0
+		} else {
+			if err := json.Unmarshal([]byte(cp.State), &state); err != nil || state.Version != 1 || watermark < 0 {
+				return adapter.Observation{}, fmt.Errorf("%w: opencode invalid checkpoint state for %s", adapter.ErrSourceFormat, src.Path)
+			}
+			for i, rowid := range state.Pending {
+				if rowid <= 0 || rowid > watermark || (i > 0 && rowid <= state.Pending[i-1]) {
+					return adapter.Observation{}, fmt.Errorf("%w: opencode invalid pending rowids for %s", adapter.ErrSourceFormat, src.Path)
+				}
+			}
+		}
+	}
+	pendingJSON, _ := json.Marshal(state.Pending)
+	rows, err := tx.QueryContext(ctx, `SELECT rowid, id, session_id, data FROM message
+ WHERE rowid > ? OR rowid IN (SELECT value FROM json_each(?)) ORDER BY rowid`, watermark, string(pendingJSON))
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("opencode: query %s: %w", src.Path, err)
 	}
-	defer rows.Close()
-
-	var (
-		events   []model.UsageEvent
-		consumed = watermark // highest rowid fully processed, no gaps skipped
-		clean    = true
-	)
+	var obs adapter.Observation
+	var completed, pending []int64
+	consumed := watermark
+	var diagnostics error
 	for rows.Next() {
-		if ctx.Err() != nil {
-			return adapter.Observation{Events: events}, ctx.Err()
-		}
-		var (
-			rowid     int64
-			id        sql.NullString
-			sessionID sql.NullString
-			data      sql.NullString
-		)
+		var rowid int64
+		var id, sessionID, data sql.NullString
 		if err := rows.Scan(&rowid, &id, &sessionID, &data); err != nil {
-			clean = false // unreadable row: retry it next cycle
-			continue
+			rows.Close()
+			return obs, fmt.Errorf("opencode: scan %s: %w", src.Path, err)
 		}
-		if data.Valid && data.String != "" {
-			if ev, ok := buildEvent([]byte(data.String), id.String, sessionID.String, src.Path); ok {
-				events = append(events, ev)
-			}
-		}
-		if clean {
+		if rowid > consumed {
 			consumed = rowid
 		}
+		raw := []byte(data.String)
+		if modern {
+			var header struct {
+				Role string `json:"role"`
+				Time struct {
+					Completed int64 `json:"completed"`
+				} `json:"time"`
+			}
+			if err := json.Unmarshal(raw, &header); err != nil || (header.Role != "assistant" && header.Role != "user") || strings.TrimSpace(id.String) == "" {
+				rows.Close()
+				return obs, fmt.Errorf("%w: opencode unclassified message row %d in %s", adapter.ErrSourceFormat, rowid, src.Path)
+			}
+			if header.Role == "user" {
+				continue
+			}
+			if header.Time.Completed <= 0 {
+				pending = append(pending, rowid)
+				continue
+			}
+		}
+		ev, ok, err := buildEvent(raw, id.String, sessionID.String, src.Path)
+		if err != nil && (modern || !errors.Is(err, errInvalidMessage)) {
+			rowErr := fmt.Errorf("opencode message row %d in %s: %w", rowid, src.Path, err)
+			if !errors.Is(err, errInvalidTimestamp) {
+				rowErr = fmt.Errorf("%w: %v", adapter.ErrSourceFormat, rowErr)
+			}
+			diagnostics = errors.Join(diagnostics, rowErr)
+			// Modern malformed payloads may still be repaired in place. Hold the
+			// checkpoint rather than consume an unclassified record.
+			if modern && !errors.Is(err, errInvalidTimestamp) {
+				rows.Close()
+				return obs, diagnostics
+			}
+		}
+		if ok {
+			obs.Events = append(obs.Events, ev)
+		}
+		completed = append(completed, rowid)
 	}
-	if rows.Err() != nil {
-		clean = false // iteration broke: do not advance past what we saw cleanly
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return obs, fmt.Errorf("opencode: read %s: %w", src.Path, err)
 	}
-
-	obs := adapter.Observation{Events: events}
-	if consumed > watermark {
-		obs.Activity = collectActivity(ctx, db, src, events, watermark, consumed)
-	}
-	if consumed > watermark || (cp == nil && clean) {
-		obs.Checkpoint = &model.SourceCheckpoint{
-			Tool: model.ToolOpenCode, SourcePath: src.Path, Watermark: consumed,
+	if len(completed) > 0 {
+		obs.Activity, err = collectActivity(ctx, tx, src, obs.Events, completed, modern)
+		if err != nil {
+			return obs, errors.Join(diagnostics, fmt.Errorf("opencode: parts %s: %w", src.Path, err))
 		}
 	}
-	// rows.Err() is intentionally non-fatal: keep best-effort results.
-	return obs, nil
+	if err := tx.Commit(); err != nil {
+		return obs, errors.Join(diagnostics, fmt.Errorf("opencode: snapshot %s: %w", src.Path, err))
+	}
+	next := &model.SourceCheckpoint{Tool: model.ToolOpenCode, SourcePath: src.Path, Watermark: consumed}
+	if modern {
+		state.Version = 1
+		state.Pending = pending
+		encoded, _ := json.Marshal(state)
+		next.State = string(encoded)
+	}
+	if cp == nil || cp.Watermark != next.Watermark || cp.State != next.State {
+		obs.Checkpoint = next
+	}
+	return obs, diagnostics
 }
 
 // toolPart is one tool-call row of the `part` table, reduced to the three
@@ -306,56 +372,40 @@ type toolPart struct {
 	name      string
 }
 
-// collectActivity reads the tool calls of exactly the messages this cycle
-// consumed — message rowids in (fromRowid, toRowid] — and turns them into
-// activity rows joined to those messages' usage events.
-//
-// Scoping to the message range, rather than giving `part` a watermark of its
-// own, is what makes the per-turn call count trustworthy. calls_in_turn is the
-// divisor the read path attributes cost with, so it must equal the number of
-// rows actually emitted for that turn: if a turn's calls could arrive across
-// two cycles, each batch would divide by its own partial count and the turn's
-// cost would be attributed twice. Here the count and the rows come from ONE
-// query, so they agree by construction whatever the timing.
-//
-// The residual limitation is an UNDERcount, which is the safe direction: a part
-// written after its message row was consumed is never picked up, because the
-// message watermark has moved past it. In practice tool parts are written
-// during the turn and the message row carrying the final token counts settles
-// at or after the end of it, so the message is consumed last.
-//
-// Cost note: the type discriminator lives inside `part.data`, so this
-// json_extract touches every part row in range. `data` embeds full tool OUTPUT
-// (hundreds of MiB across the table, tens of MiB in the largest single row), so
-// the first pass over an established database is measured in seconds; every
-// pass after it sees only the new messages. Deliberately no
-// `data LIKE '{"type":"tool"%'` prefilter: it would depend on opencode's JSON
-// key ORDER, and the day that changed the adapter would silently collect
-// nothing at all rather than run slowly.
-//
-// Errors are swallowed on purpose: activity is a secondary observation, and it
-// must never cost the cycle its usage events.
-func collectActivity(ctx context.Context, db *sql.DB, src adapter.Source, events []model.UsageEvent, fromRowid, toRowid int64) []model.ActivityEvent {
+// collectActivity reads parts of the exact completed message set. The optional
+// legacy part table may be absent; every other read failure holds the cursor.
+func collectActivity(ctx context.Context, db *sql.Tx, src adapter.Source, events []model.UsageEvent, completed []int64, modern bool) ([]model.ActivityEvent, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='part' AND type='table')`).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		if modern {
+			return nil, fmt.Errorf("%w: modern database has no part table", adapter.ErrSourceFormat)
+		}
+		return nil, nil
+	}
+	ids, _ := json.Marshal(completed)
 	rows, err := db.QueryContext(ctx, `
 		SELECT p.message_id, p.id, p.time_created, json_extract(p.data,'$.tool')
 		FROM part p
 		JOIN message m ON m.id = p.message_id
-		WHERE m.rowid > ? AND m.rowid <= ?
+		WHERE m.rowid IN (SELECT value FROM json_each(?))
 		  AND json_extract(p.data,'$.type') = 'tool'
-		ORDER BY p.message_id, p.id`, fromRowid, toRowid)
+		ORDER BY p.message_id, p.id`, string(ids))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
 	var (
-		parts  []toolPart
-		byMsg  = map[string]int{}
-		scanOK = true
+		parts   []toolPart
+		byMsg   = map[string]int{}
+		scanErr error
 	)
 	for rows.Next() {
 		if ctx.Err() != nil {
-			return nil
+			return nil, ctx.Err()
 		}
 		var (
 			msgID, partID sql.NullString
@@ -363,7 +413,7 @@ func collectActivity(ctx context.Context, db *sql.DB, src adapter.Source, events
 			name          sql.NullString
 		)
 		if err := rows.Scan(&msgID, &partID, &created, &name); err != nil {
-			scanOK = false
+			scanErr = err
 			continue
 		}
 		n := strings.TrimSpace(name.String)
@@ -376,12 +426,8 @@ func collectActivity(ctx context.Context, db *sql.DB, src adapter.Source, events
 		})
 		byMsg[msgID.String]++
 	}
-	if rows.Err() != nil || !scanOK {
-		// A partial read would give some turns a divisor smaller than their real
-		// call count. Dropping the batch keeps the attribution honest; the rows
-		// are not lost forever only if the message range is retried, which it is
-		// not — so this is a deliberate trade of completeness for correctness.
-		return nil
+	if err := errors.Join(rows.Err(), scanErr); err != nil {
+		return nil, err
 	}
 
 	// Attributes come from the message's own usage event, so an activity row and
@@ -423,7 +469,7 @@ func collectActivity(ctx context.Context, db *sql.DB, src adapter.Source, events
 		}
 		out = append(out, a)
 	}
-	return out
+	return out, nil
 }
 
 // collectJSON walks storage/message/**/*.json read-only, parsing each as a
@@ -431,7 +477,8 @@ func collectActivity(ctx context.Context, db *sql.DB, src adapter.Source, events
 // come from the JSON itself.
 func collectJSON(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
 	var events []model.UsageEvent
-	_ = filepath.WalkDir(src.Path, func(path string, d fs.DirEntry, err error) error {
+	var diagnostics error
+	walkErr := filepath.WalkDir(src.Path, func(path string, d fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -448,14 +495,17 @@ func collectJSON(ctx context.Context, src adapter.Source) (adapter.Observation, 
 		if rerr != nil {
 			return nil // skip unreadable file
 		}
-		ev, ok := buildEvent(raw, "", "", path)
+		ev, ok, parseErr := buildEvent(raw, "", "", path)
+		if errors.Is(parseErr, errInvalidTimestamp) {
+			diagnostics = errors.Join(diagnostics, fmt.Errorf("opencode message %s: %w", path, parseErr))
+		}
 		if !ok {
 			return nil
 		}
 		events = append(events, ev)
 		return nil
 	})
-	return adapter.Observation{Events: events}, nil
+	return adapter.Observation{Events: events}, errors.Join(diagnostics, walkErr)
 }
 
 // message is the per-message `data` JSON payload (DB column or JSON file).
@@ -487,16 +537,21 @@ type message struct {
 //
 // dbID/dbSession override the JSON id/sessionID when non-empty (DB columns are
 // authoritative). Returns ok=false when the payload is unparseable, the model
-// id is empty, or every token component is zero.
-func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, bool) {
+// id is empty, or every token component is zero. Nonzero usage also requires
+// a positive creation timestamp; malformed fields return a diagnostic.
+func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, bool, error) {
 	var m message
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return model.UsageEvent{}, false
+		var fieldErr *json.UnmarshalTypeError
+		if errors.As(err, &fieldErr) && (fieldErr.Field == "time.created" || fieldErr.Field == "time") {
+			return model.UsageEvent{}, false, errInvalidTimestamp
+		}
+		return model.UsageEvent{}, false, errInvalidMessage
 	}
 
 	mdl := strings.TrimSpace(m.ModelID)
 	if mdl == "" {
-		return model.UsageEvent{}, false // require non-empty modelID
+		return model.UsageEvent{}, false, nil // require non-empty modelID
 	}
 
 	id := strings.TrimSpace(m.ID)
@@ -504,7 +559,7 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 		id = strings.TrimSpace(dbID)
 	}
 	if id == "" {
-		return model.UsageEvent{}, false // need a stable dedup key
+		return model.UsageEvent{}, false, nil // need a stable dedup key
 	}
 
 	session := strings.TrimSpace(m.SessionID)
@@ -521,6 +576,15 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 	cacheRead := adapter.NonNeg(m.Tokens.Cache.Read)
 	reasoning := adapter.NonNeg(m.Tokens.Reasoning)
 	total := adapter.NonNeg(m.Tokens.Total)
+
+	// The 1.1.65 writer retained reasoning inside output; newer writers subtract
+	// it. Normalize only when the positive provider total proves that overlap.
+	// Subtract bounded components from total so the identity cannot overflow.
+	if reasoning > 0 && output >= reasoning && total > 0 && input <= total &&
+		cacheCreation <= total-input && cacheRead <= total-input-cacheCreation &&
+		output == total-input-cacheCreation-cacheRead {
+		output -= reasoning
+	}
 
 	// Reconcile against the provider total. opencode cache buckets are additive
 	// (Anthropic-style) and so is reasoning, so all of them participate in the
@@ -540,7 +604,7 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 
 	if input == 0 && output == 0 && cacheCreation == 0 && cacheRead == 0 &&
 		reasoning == 0 && extra == 0 && storedTotal == 0 {
-		return model.UsageEvent{}, false // drop all-zero records
+		return model.UsageEvent{}, false, nil // drop all-zero records
 	}
 
 	project := strings.TrimSpace(m.Path.Cwd)
@@ -548,10 +612,10 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 		project = "opencode"
 	}
 
-	when := time.Time{}
-	if m.Time.Created > 0 {
-		when = time.UnixMilli(m.Time.Created).UTC()
+	if m.Time.Created <= 0 {
+		return model.UsageEvent{}, false, errInvalidTimestamp
 	}
+	when := time.UnixMilli(m.Time.Created).UTC()
 
 	ev := model.UsageEvent{
 		Tool:                model.ToolOpenCode,
@@ -571,7 +635,7 @@ func buildEvent(raw []byte, dbID, dbSession, srcPath string) (model.UsageEvent, 
 		DedupKey:            "opencode|" + id,
 		Kind:                model.KindUsage,
 	}
-	return ev, true
+	return ev, true, nil
 }
 
 func isFile(p string) bool {

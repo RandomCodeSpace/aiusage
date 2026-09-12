@@ -165,7 +165,7 @@ func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
 	mc := m
 	dbPath := m.dbPath
 	gen := m.loadGen
-	mc.loadCtx = m.flight.next()
+	mc.loadCtx = m.data.loadContext(m.flight.next())
 	m.detail.stop() // a navigation moots the detail query under the old selection
 	return func() tea.Msg {
 		if delay > 0 {

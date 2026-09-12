@@ -256,6 +256,7 @@ func TestRefreshFetchesCachesAndSwaps(t *testing.T) {
 	dir := t.TempDir()
 	e := New(Options{DataDir: dir, Refresh: true})
 	e.url = srv.URL
+	e.modelsDevURL = "" // this test isolates the LiteLLM feed
 
 	if err := e.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -289,6 +290,7 @@ func TestRefreshDisabledNeverFetches(t *testing.T) {
 
 	e := New(Options{DataDir: t.TempDir(), Refresh: false})
 	e.url = srv.URL
+	e.modelsDevURL = "" // this test isolates the LiteLLM feed
 	if err := e.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -311,6 +313,7 @@ func TestRefreshThrottlesOnCacheAge(t *testing.T) {
 	dir := t.TempDir()
 	e := New(Options{DataDir: dir, Refresh: true})
 	e.url = srv.URL
+	e.modelsDevURL = "" // this test isolates the LiteLLM feed
 
 	for i := 0; i < 3; i++ {
 		if err := e.Refresh(context.Background()); err != nil {
@@ -346,6 +349,7 @@ func TestRefreshFailureKeepsPreviousTable(t *testing.T) {
 	dir := t.TempDir()
 	e := New(Options{DataDir: dir, Refresh: true})
 	e.url = srv.URL
+	e.modelsDevURL = "" // this test isolates the LiteLLM feed
 	e.refreshed = &Table{Source: "litellm-old", Models: map[string]Rates{"m": {Input: 1e-06}}}
 
 	if err := e.Refresh(context.Background()); err == nil {
@@ -371,6 +375,7 @@ func TestRefreshRejectsGarbageUpstream(t *testing.T) {
 
 	e := New(Options{DataDir: t.TempDir(), Refresh: true})
 	e.url = srv.URL
+	e.modelsDevURL = "" // this test isolates the LiteLLM feed
 	if err := e.Refresh(context.Background()); err == nil {
 		t.Fatal("expected a parse error for a truncated upstream table")
 	}

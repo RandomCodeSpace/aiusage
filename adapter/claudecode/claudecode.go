@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -192,8 +193,8 @@ type fileStamp struct {
 }
 
 // Collect walks <root>/projects/**/*.jsonl, parses every usage line, applies
-// in-cycle dedup, and returns the surviving events. Per-file errors are skipped
-// so one bad transcript never fails the cycle.
+// in-cycle dedup, and returns the surviving events with any per-file errors.
+// A bad transcript does not discard observations from readable files.
 func (a Adapter) Collect(ctx context.Context, src adapter.Source) (adapter.Observation, error) {
 	return a.CollectIncremental(ctx, src, nil)
 }
@@ -249,7 +250,8 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	}
 
 	d := newDeduper()
-	parseErr := false
+	var parseErr error
+	complete := true
 	for _, e := range files {
 		if ctx.Err() != nil {
 			return adapter.Observation{
@@ -258,12 +260,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 				TurnContexts: d.turnContexts(),
 			}, ctx.Err()
 		}
-		if err := parseFile(e.path, e.segment, d); err != nil {
-			// A failed or partial parse must not land in the manifest: the gate
-			// would skip the unread content until some file under the root next
-			// changes. Withhold the checkpoint so the next cycle re-reads.
-			parseErr = true
-		}
+		readComplete, err := parseFile(e.path, e.segment, d)
+		// A partial read must not land in the manifest: the unchanged-file
+		// gate would skip its unread content on the next poll.
+		complete = complete && readComplete
+		parseErr = errors.Join(parseErr, err)
 	}
 
 	obs := adapter.Observation{
@@ -271,17 +272,17 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		Activity:     d.activity(),
 		TurnContexts: d.turnContexts(),
 	}
-	if statErr || parseErr {
-		return obs, nil
+	if statErr || !complete {
+		return obs, parseErr
 	}
 	stateJSON, err := json.Marshal(manifest)
 	if err != nil {
-		return obs, nil
+		return obs, parseErr
 	}
 	obs.Checkpoint = &model.SourceCheckpoint{
 		Tool: model.ToolClaudeCode, SourcePath: src.Path, State: string(stateJSON),
 	}
-	return obs, nil
+	return obs, parseErr
 }
 
 // manifestUnchanged reports whether the stored manifest JSON matches the
@@ -321,13 +322,13 @@ func projectSegment(projDir, file string) string {
 }
 
 // parseFile reads one JSONL transcript line-by-line, feeding parsed candidates
-// into the deduper. Malformed lines are skipped. A non-nil error (open failure
-// or scanner error) means the read did not complete; the caller must not
-// checkpoint the root.
-func parseFile(path, segment string, d *deduper) error {
+// into the deduper. The bool reports whether the read completed; incomplete
+// reads must not checkpoint the root. Complete malformed usage records are
+// reported while retaining the surrounding valid rows.
+func parseFile(path, segment string, d *deduper) (bool, error) {
 	f, err := os.Open(path) // O_RDONLY
 	if err != nil {
-		return err
+		return false, fmt.Errorf("claude-code: open %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -335,11 +336,36 @@ func parseFile(path, segment string, d *deduper) error {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // tolerate long JSONL lines
 
+	var parseErr error
+	complete, recognized, nonempty := true, false, false
+	lineNumber := 0
 	for sc.Scan() {
-		line := sc.Bytes()
-		if bytes.Contains(line, usageMarkerBytes) {
-			cand, ok := parseLine(line, path, segment, sessionFromName)
+		lineNumber++
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		nonempty = true
+		typ, err := recordType(line)
+		if err != nil {
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
+				parseErr = errors.Join(parseErr, fmt.Errorf("claude-code: %s line %d: malformed record", path, lineNumber))
+				continue
+			}
+		}
+		switch typ {
+		case "assistant", "user", "system", "progress", "summary", "file-history-snapshot", "queue-operation":
+			recognized = true
+		}
+		if bytes.Contains(line, usageMarkerBytes) || typ == "assistant" {
+			cand, ok, err := parseLine(line, path, segment, sessionFromName)
+			if err != nil {
+				parseErr = errors.Join(parseErr, fmt.Errorf("claude-code: %s line %d: %w", path, lineNumber, err))
+				complete = complete && !errors.Is(err, adapter.ErrSourceFormat)
+			}
 			if ok {
+				recognized = true
 				d.add(cand)
 			}
 			continue
@@ -349,7 +375,44 @@ func parseFile(path, segment string, d *deduper) error {
 			d.addHooks(parseHookLine(line, path, segment, sessionFromName))
 		}
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		return false, errors.Join(parseErr, fmt.Errorf("claude-code: read %s: %w", path, err))
+	}
+	if nonempty && !recognized {
+		return false, errors.Join(parseErr, fmt.Errorf("claude-code: %s: %w: no recognized transcript records", path, adapter.ErrSourceFormat))
+	}
+	return complete, parseErr
+}
+
+// recordType stops at the top-level discriminator so ordinary message content
+// stays behind the usage/hook marker gate. The standard decoder handles fields
+// before type without imposing an ordering or escaping rule on transcripts.
+func recordType(raw []byte) (string, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, err := d.Token()
+	if err != nil {
+		return "", err
+	}
+	if token != json.Delim('{') {
+		return "", errors.New("record is not an object")
+	}
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return "", err
+		}
+		if key == "type" {
+			var typ string
+			err := d.Decode(&typ)
+			return typ, err
+		}
+		var ignored json.RawMessage
+		if err := d.Decode(&ignored); err != nil {
+			return "", err
+		}
+	}
+	_, err = d.Token()
+	return "", err
 }
 
 // nullable wraps an optional JSON scalar, distinguishing an absent key (zero
@@ -376,6 +439,7 @@ func (n *nullable[T]) UnmarshalJSON(b []byte) error {
 // the AgentProgress wrapper under data. Guarded keys use nullable so a JSON
 // null is detected in the same pass.
 type rawLine struct {
+	Type              string            `json:"type"`
 	Timestamp         *string           `json:"timestamp"`
 	CWD               nullable[string]  `json:"cwd"`
 	SessionID         nullable[string]  `json:"sessionId"`
@@ -498,9 +562,10 @@ type usage struct {
 	Speed               nullable[string] `json:"speed"`
 	// Enrichment-only fields. They are NOT guarded keys: an absent, null or
 	// unexpected value must leave the line's stored accounting untouched, so
-	// both decode leniently rather than failing the enclosing Unmarshal.
-	ServiceTier   lenientString  `json:"service_tier"`
-	CacheCreation *cacheCreation `json:"cache_creation"`
+	// these decode leniently rather than failing the enclosing Unmarshal.
+	ServiceTier         lenientString        `json:"service_tier"`
+	CacheCreation       *cacheCreation       `json:"cache_creation"`
+	OutputTokensDetails *outputTokensDetails `json:"output_tokens_details"`
 }
 
 // lenientString decodes a JSON string and treats every other shape (null,
@@ -534,6 +599,21 @@ func (c *cacheCreation) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// outputTokensDetails records reasoning already included in output_tokens.
+// Like the other optional details, an unexpected shape must not discard usage.
+type outputTokensDetails struct {
+	ThinkingTokens int64 `json:"thinking_tokens"`
+}
+
+func (d *outputTokensDetails) UnmarshalJSON(b []byte) error {
+	type plain outputTokensDetails
+	var v plain
+	if err := json.Unmarshal(b, &v); err == nil {
+		*d = outputTokensDetails(v)
+	}
+	return nil
+}
+
 // candidate is a parsed usage record awaiting dedup.
 type candidate struct {
 	event       model.UsageEvent
@@ -558,10 +638,29 @@ type candidate struct {
 // parseLine decodes one transcript line into a candidate. It returns ok=false
 // to skip the line (malformed JSON, null in a guarded key, missing usage, or an
 // empty/synthetic model).
-func parseLine(line []byte, path, segment, sessionFromName string) (candidate, bool) {
+func parseLine(line []byte, path, segment, sessionFromName string) (candidate, bool, error) {
+	// A custom field decoder can stop before a later version field is read.
+	// Identify the source family independently of field order.
+	var source struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(line, &source); err != nil {
+		var fieldErr *json.UnmarshalTypeError
+		if errors.As(err, &fieldErr) && fieldErr.Field == "version" {
+			return candidate{}, false, fmt.Errorf("%w: malformed producer version", adapter.ErrSourceFormat)
+		}
+	}
+	versioned := source.Version != ""
 	var rl rawLine
 	if err := json.Unmarshal(line, &rl); err != nil {
-		return candidate{}, false
+		var fieldErr *json.UnmarshalTypeError
+		if errors.As(err, &fieldErr) && fieldErr.Field == "timestamp" {
+			return candidate{}, false, errors.New("usage record has malformed timestamp")
+		}
+		if versioned {
+			return candidate{}, false, fmt.Errorf("%w: malformed versioned assistant record", adapter.ErrSourceFormat)
+		}
+		return candidate{}, false, nil
 	}
 
 	// Flatten AgentProgress (data.message) onto the Direct shape.
@@ -569,21 +668,44 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 	if msg == nil && rl.Data != nil {
 		msg = rl.Data.Message
 	}
+	// Versioned direct assistant records have stable identities and usage.
+	// Older unversioned and AgentProgress records retain their supported fallbacks.
+	direct := rl.Data == nil || rl.Data.Message == nil
+	if versioned && direct && (rl.Type == "assistant" || (msg != nil && msg.Usage != nil)) {
+		if rl.Type != "assistant" {
+			return candidate{}, false, fmt.Errorf("%w: assistant usage requires type=assistant", adapter.ErrSourceFormat)
+		}
+		if msg == nil {
+			return candidate{}, false, fmt.Errorf("%w: assistant record missing message", adapter.ErrSourceFormat)
+		}
+		if strings.TrimSpace(msg.Model.Value) == syntheticModel {
+			return candidate{}, false, nil
+		}
+		if strings.TrimSpace(msg.ID.Value) == "" {
+			return candidate{}, false, fmt.Errorf("%w: assistant message missing id", adapter.ErrSourceFormat)
+		}
+		if strings.TrimSpace(msg.Model.Value) == "" {
+			return candidate{}, false, fmt.Errorf("%w: assistant message missing model", adapter.ErrSourceFormat)
+		}
+		if msg.Usage == nil || msg.Usage.InputTokens == nil || msg.Usage.OutputTokens == nil {
+			return candidate{}, false, fmt.Errorf("%w: assistant message missing usage input/output tokens", adapter.ErrSourceFormat)
+		}
+	}
 	if msg == nil || msg.Usage == nil {
-		return candidate{}, false
+		return candidate{}, false, nil
 	}
 	u := msg.Usage
 
 	// Reject lines where any guarded key is explicitly JSON null, recorded by
 	// the nullable fields during the same decode pass.
 	if hasGuardedNull(&rl, msg) {
-		return candidate{}, false
+		return candidate{}, false, nil
 	}
 
 	// Model: drop <synthetic>; append -fast for fast speed; empty rejects.
 	modelID := strings.TrimSpace(msg.Model.Value)
 	if modelID == "" || modelID == syntheticModel {
-		return candidate{}, false
+		return candidate{}, false, nil
 	}
 	if u.Speed.Value == "fast" {
 		modelID += "-fast"
@@ -593,7 +715,11 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 	out := deref(u.OutputTokens)
 	cacheC := adapter.NonNeg(u.CacheCreationTokens.Value)
 	cacheR := adapter.NonNeg(u.CacheReadTokens.Value)
-	total := in + out + cacheC + cacheR // cache additive; no reasoning
+	total := in + out + cacheC + cacheR // reasoning is already in output
+	var reasoning int64
+	if u.OutputTokensDetails != nil {
+		reasoning = adapter.NonNeg(u.OutputTokensDetails.ThinkingTokens)
+	}
 
 	project := segment
 	if strings.TrimSpace(rl.CWD.Value) != "" {
@@ -610,6 +736,10 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(*rl.Timestamp)); err == nil {
 			eventTime = t.UTC()
 		}
+	}
+
+	if eventTime.IsZero() {
+		return candidate{}, false, errors.New("usage record has missing or malformed timestamp")
 	}
 
 	messageID := msg.ID.Value
@@ -639,7 +769,7 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		OutputTokens:        out,
 		CacheCreationTokens: cacheC,
 		CacheReadTokens:     cacheR,
-		ReasoningTokens:     0,
+		ReasoningTokens:     reasoning,
 		TotalTokens:         total,
 		CacheTTL:            ttl,
 		RequestID:           requestID,
@@ -660,7 +790,7 @@ func parseLine(line []byte, path, segment, sessionFromName string) (candidate, b
 		total:       total,
 		calls:       recordCalls(msg.Content, line),
 		contexts:    recordContexts(&rl),
-	}, true
+	}, true, nil
 }
 
 // toolCall is one tool_use block reduced to the identity and the two names the
@@ -943,13 +1073,14 @@ type auditMessage struct {
 // are the provider's, not the clamped values stored in the token columns, so a
 // mismatch between the two stays visible.
 type auditUsage struct {
-	InputTokens         *int64         `json:"input_tokens,omitempty"`
-	OutputTokens        *int64         `json:"output_tokens,omitempty"`
-	CacheCreationTokens *int64         `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadTokens     *int64         `json:"cache_read_input_tokens,omitempty"`
-	ServiceTier         string         `json:"service_tier,omitempty"`
-	Speed               string         `json:"speed,omitempty"`
-	CacheCreation       *cacheCreation `json:"cache_creation,omitempty"`
+	InputTokens         *int64               `json:"input_tokens,omitempty"`
+	OutputTokens        *int64               `json:"output_tokens,omitempty"`
+	CacheCreationTokens *int64               `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadTokens     *int64               `json:"cache_read_input_tokens,omitempty"`
+	ServiceTier         string               `json:"service_tier,omitempty"`
+	Speed               string               `json:"speed,omitempty"`
+	CacheCreation       *cacheCreation       `json:"cache_creation,omitempty"`
+	OutputTokensDetails *outputTokensDetails `json:"output_tokens_details,omitempty"`
 }
 
 // auditPayload builds the stored audit payload from the decoded line. Values
@@ -964,11 +1095,12 @@ func auditPayload(rl *rawLine, msg *message) string {
 			ID:    msg.ID.Value,
 			Model: msg.Model.Value,
 			Usage: auditUsage{
-				InputTokens:   u.InputTokens,
-				OutputTokens:  u.OutputTokens,
-				ServiceTier:   string(u.ServiceTier),
-				Speed:         u.Speed.Value,
-				CacheCreation: u.CacheCreation,
+				InputTokens:         u.InputTokens,
+				OutputTokens:        u.OutputTokens,
+				ServiceTier:         string(u.ServiceTier),
+				Speed:               u.Speed.Value,
+				CacheCreation:       u.CacheCreation,
+				OutputTokensDetails: u.OutputTokensDetails,
 			},
 		},
 	}

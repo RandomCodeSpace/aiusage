@@ -162,11 +162,9 @@ func TestUnpricedGroupIsNeverBilledAsOneLongRequest(t *testing.T) {
 	}
 }
 
-// TestResolveCostsUnvaluedRemainderIsApproximate covers the honesty gap between
-// "exact" and "unpriced": a bucket whose stamped rows are exact but which still
-// holds rows nothing could value is a FLOOR, so it must wear the tilde rather
-// than advertise a precise total it does not have.
-func TestResolveCostsUnvaluedRemainderIsApproximate(t *testing.T) {
+// TestResolveCostsUnvaluedRemainderIsBounded distinguishes missing valuation
+// from rate-card estimation.
+func TestResolveCostsUnvaluedRemainderIsBounded(t *testing.T) {
 	sum := &store.Summary{
 		GroupBy: []string{"tool"},
 		Buckets: []store.Bucket{
@@ -183,14 +181,14 @@ func TestResolveCostsUnvaluedRemainderIsApproximate(t *testing.T) {
 	}}
 
 	costs := ResolveCosts(sum, groups, fixedPricer{miss: map[string]bool{"mystery-model": true}})
-	if got := costs.Buckets[0]; got.MicroUSD != 3_000_000 || !got.Approximate || !got.Known {
-		t.Errorf("bucket = %+v, want an approximate 3000000 floor", got)
+	if got := costs.Buckets[0]; got.MicroUSD != 3_000_000 || got.Approximate || !got.Known || !got.lowerBound {
+		t.Errorf("bucket = %+v, want a vendor-reported 3000000 floor", got)
 	}
-	if got := costs.Buckets[0].String(); got != "~$3.00" {
-		t.Errorf("rendered = %q, want ~$3.00", got)
+	if got := costs.Buckets[0].String(); got != "≥$3.00" {
+		t.Errorf("rendered = %q, want ≥$3.00", got)
 	}
-	if got := costs.Totals.String(); got != "~$3.00" {
-		t.Errorf("totals = %q, want ~$3.00", got)
+	if got := costs.Totals.String(); got != "≥$3.00" {
+		t.Errorf("totals = %q, want ≥$3.00", got)
 	}
 }
 

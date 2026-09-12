@@ -64,7 +64,8 @@ package copilot
 
 import (
 	"database/sql"
-	"fmt"
+	"net/url"
+	"path/filepath"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (CGO_ENABLED=0)
 )
@@ -188,7 +189,12 @@ func spawningToolCallID(rec *otelRecord, spans map[string]*otelRecord) string {
 
 // loadSubAgentCosts reads the per-spawn cost map from the session store.
 func loadSubAgentCosts(path string) (map[string]int64, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	dsn := u.String() + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err

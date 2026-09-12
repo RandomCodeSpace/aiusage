@@ -296,11 +296,38 @@ func TestActivityAttributionUsesMaterializedCounts(t *testing.T) {
 		t.Fatalf("SummarizeActivity prepared %d statements, want 1:\n%s", len(queries), strings.Join(queries, "\n---\n"))
 	}
 	q := strings.ToLower(queries[0])
-	if !strings.Contains(q, "join activity_usage_counts") {
+	if !strings.Contains(q, "join activity_usage_counts") || !strings.Contains(q, "join expected_activity_counts") {
 		t.Fatalf("activity query does not join materialized counts:\n%s", queries[0])
 	}
 	if strings.Contains(q, "select count(*) from activity_events") {
 		t.Fatalf("activity query restored a correlated divisor scan:\n%s", queries[0])
+	}
+}
+
+func TestActivityFallbackKeepsOneStatement(t *testing.T) {
+	st := openCounting(t)
+	seedActivityCounts(t, st)
+	if _, err := st.db.Exec(`DELETE FROM activity_usage_counts`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, top := range []bool{false, true} {
+		queries := queriesDuring(func() {
+			if top {
+				rows, err := st.TopActivity(ctx, ActivityFilter{GroupBy: []string{"name"}}, ActivityByCost, 10)
+				if err != nil || len(rows) != 3 {
+					t.Fatalf("TopActivity rows=%d err=%v", len(rows), err)
+				}
+			} else {
+				sum, err := st.SummarizeActivity(ctx, ActivityFilter{})
+				if err != nil || sum.Totals.AttributedCostMicroUSD != 1400 {
+					t.Fatalf("SummarizeActivity=%+v err=%v", sum, err)
+				}
+			}
+		})
+		if len(queries) != 1 {
+			t.Fatalf("top=%v prepared %d statements, want 1", top, len(queries))
+		}
 	}
 }
 

@@ -113,25 +113,24 @@ const (
 
 // reasoningModes maps a tool id to its reasoning billing mode.
 //
-// Verified against real local data:
-//   - claude-code: transcripts report no reasoning field at all; thinking
-//     tokens are already inside output_tokens.
+// Verified against local captures and exact versioned writers:
+//   - claude-code 2.1.269: observed thinking_tokens are a subset of
+//     output_tokens; the live fixture preserves both counters.
 //   - codex: reasoning_output_tokens is an OpenAI subset of output_tokens.
-//   - opencode: every local message row satisfies
-//     total = input + output + reasoning + cache.read + cache.write, and rows
-//     with reasoning > output exist, so reasoning cannot be a subset.
+//   - opencode: current 1.18.29 writer output excludes reasoning. Legacy
+//     1.1.65 may include it; the adapter removes only overlap proven by an
+//     exact provider-total identity before exposing additive counters.
 //   - gemini: tokens.thoughts is reported next to tokens.output and the
 //     provider total is input + output + thoughts.
 //   - agy 1.1.22 stream JSON: thinking_tokens is contained in output_tokens;
 //     total_tokens is exactly input_tokens + output_tokens.
 //   - copilot 1.0.82 OTEL: response usage reports nonzero reasoning while
 //     total = input + output, proving reasoning is contained in output.
+//   - hermes v2026.9.11: the exact writer maps reasoning from output details
+//     and counts output once in CanonicalUsage.total_tokens. The live cumulative
+//     capture and constructed edge are in adapter/hermes/testdata.
 //
-// UNVERIFIED — no local data for Hermes (issue #28). This encodes the best
-// available evidence and must be re-checked once data exists:
-//   - hermes: sessions carry reasoning_tokens in their own column and the
-//     adapter keeps it out of the authoritative total, which only holds if the
-//     count is already inside output_tokens.
+// Provider coverage limitation:
 //   - copilot: the OTEL export reports gen_ai.usage.reasoning.output_tokens as
 //     a distinct attribute, but Copilot proxies several vendors and the adapter's
 //     own total handling already asserts that reasoning sits inside output_tokens
@@ -150,7 +149,7 @@ var reasoningModes = map[string]ReasoningMode{
 	ToolOpenCode:   ReasoningAdditive,
 	ToolGemini:     ReasoningAdditive,
 	ToolAgy:        ReasoningSubset,
-	ToolHermes:     ReasoningSubset, // unverified
+	ToolHermes:     ReasoningSubset,
 	ToolCopilot:    ReasoningSubset,
 	// pi/openclaw share one session format, whose types state that output
 	// already includes reasoning; reasonix labels the field a subset of

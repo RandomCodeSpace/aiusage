@@ -11,13 +11,16 @@
 // codex's, it is compressed BY DEFAULT: a reader without a zstd decoder sees
 // nothing at all here rather than losing only cold sessions.
 //
-// WHAT IS READ. Exactly three record types, by name:
+// WHAT IS READ. Accounting and identity records, by name:
 //
 //   - `session`          — the immutable header line: session id, cwd, agent preset.
 //   - `assistant/message` — one completed model call: `data.usage` plus the
 //     provider/model that served it. This is the ONLY usage record.
 //   - `tool/call`         — one tool invocation the model requested, named and
 //     correlated to its step.
+//   - `request/context`   — provider/model fallback for a later completed call.
+//   - `assistant/chunk`   — usage-chunk sequence numbers only, to detect a
+//     completed message that lost its reported accounting.
 //
 // Everything else — user prompts, tool results, packed chunk rows, request
 // headers with their system prompt and tool schemas — is ignored by TYPE, so
@@ -28,7 +31,7 @@
 // as the step's `assistant/message` `data.usage`. The numbers are identical —
 // DSH's own token meter says so ("a final assistant-message usage for the same
 // (turn, step) replaces that sample instead of double-counting it"). This
-// adapter reads ONLY `assistant/message`. The message's `sourceEventSeqs` names
+// adapter counts ONLY `assistant/message`. The message's `sourceEventSeqs` names
 // every chunk seq it collapses, including that usage chunk, and is kept in the
 // audit payload as the evidence that the collapse happened.
 //
@@ -267,7 +270,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		Activity:     res.activity,
 		TurnContexts: res.contexts,
 	}
-	if res.scanErr == nil {
+	if res.scanErr == nil && res.formatErr == nil {
 		// The read reached the end of the stream. Skipped lines are permanently
 		// unparseable rather than unread, so the checkpoint may advance; a scan
 		// that aborted withholds it, and the unread remainder is picked up next
@@ -275,6 +278,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		obs.Checkpoint = &model.SourceCheckpoint{
 			Tool: model.ToolDSH, SourcePath: src.Path, Size: size, MTimeNS: mtimeNS,
 		}
+	}
+	if res.formatErr != nil {
+		return obs, errors.Join(fmt.Errorf("dsh: %s: %w", src.Path, res.formatErr), res.scanErr)
 	}
 	switch {
 	case res.scanErr != nil && res.skipped > 0:
@@ -457,7 +463,13 @@ type result struct {
 	skipped  int
 	// scanErr is set when the stream ended early — a torn zstd tail, an
 	// unreadable remainder, the decoded-size bound. It withholds the checkpoint.
-	scanErr error
+	scanErr    error
+	formatErr  error
+	recognized bool
+}
+
+func (r *result) badFormat(reason string) {
+	r.formatErr = errors.Join(r.formatErr, fmt.Errorf("%w: %s", adapter.ErrSourceFormat, reason))
 }
 
 // step identifies one model call within a session.
@@ -543,12 +555,13 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 	defer closeFn()
 
 	var (
-		res      result
-		hdr      header
-		anchors  = map[step]*stepAnchor{}
-		calls    []pendingCall
-		curModel string
-		curProv  string
+		res       result
+		hdr       header
+		anchors   = map[step]*stepAnchor{}
+		usageSeqs = map[int64]bool{}
+		calls     []pendingCall
+		curModel  string
+		curProv   string
 		// usage rows in log order, paired with the step they belong to so the
 		// anchors can be resolved after the whole file is read.
 		br = bufio.NewReaderSize(r, 64*1024)
@@ -574,6 +587,10 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 			break
 		}
 		trimmed := trimSpaceBytes(raw)
+		if errors.Is(rerr, io.EOF) && len(trimmed) > 0 && !json.Valid(trimmed) {
+			res.scanErr = io.ErrUnexpectedEOF
+			break
+		}
 		if len(trimmed) > 0 {
 			if !seenFirst {
 				seenFirst = true
@@ -582,8 +599,10 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 				if err := json.Unmarshal(trimmed, &hdr); err != nil || hdr.Type != typeSession {
 					res.skipped++
 					hdr = header{}
+				} else {
+					res.recognized = true
 				}
-			} else if !decodeRecord(trimmed, mtime, hdr, path, &res, anchors, &calls, &curModel, &curProv) {
+			} else if !decodeRecord(trimmed, mtime, hdr, path, &res, anchors, usageSeqs, &calls, &curModel, &curProv) {
 				res.skipped++
 			}
 		}
@@ -596,6 +615,9 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 			break
 		}
 	}
+	if seenFirst && !res.recognized && res.scanErr == nil {
+		res.badFormat("no recognized session records")
+	}
 
 	res.activity = resolveCalls(calls, anchors, hdr, path)
 	return res, nil
@@ -605,14 +627,45 @@ func readTranscript(ctx context.Context, path string, mtime time.Time) (result, 
 // could not be decoded at all, which is what the skipped counter reports; a
 // well-formed record of an uninteresting type is a success that emits nothing.
 func decodeRecord(raw []byte, mtime time.Time, hdr header, path string, res *result,
-	anchors map[step]*stepAnchor, calls *[]pendingCall, curModel, curProv *string) bool {
+	anchors map[step]*stepAnchor, usageSeqs map[int64]bool, calls *[]pendingCall, curModel, curProv *string) bool {
 
 	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
+	decodeErr := json.Unmarshal(raw, &env)
+	expectedUsage := false
+	for _, seq := range env.SourceEventSeqs {
+		expectedUsage = expectedUsage || usageSeqs[seq]
+	}
+	// Tool results also carry collapse provenance. A referenced usage chunk
+	// identifies an assistant message even if its type field was renamed.
+	collapsed := env.SourceEventSeqs != nil && (env.Type == typeAssistant || expectedUsage)
+	if decodeErr != nil {
+		if collapsed {
+			res.badAssistant(env, anchors, "malformed collapsed assistant record")
+		}
 		return false
 	}
+	// The current writer attaches this collapse provenance to assistant/message.
+	// Legacy records without it retain their stable identity/time fallbacks.
+	if collapsed && (env.Type != typeAssistant || env.Seq == nil || *env.Seq < 0 || env.Time <= 0) {
+		res.badAssistant(env, anchors, "collapsed assistant record missing type, seq or time")
+		return true
+	}
 	switch env.Type {
+	case "assistant/chunk":
+		// Only remember accounting-chunk identities. No content is decoded or
+		// emitted, and the completed message remains the only usage row.
+		var d struct {
+			Chunk struct {
+				Type  string      `json:"type"`
+				Usage *tokenUsage `json:"usage"`
+			} `json:"chunk"`
+		}
+		if env.Seq != nil && json.Unmarshal(env.Data, &d) == nil && d.Chunk.Type == "usage" && d.Chunk.Usage != nil {
+			usageSeqs[*env.Seq] = true
+		}
+		return true
 	case typeReqCtx:
+		res.recognized = true
 		var d requestCtxData
 		if json.Unmarshal(env.Data, &d) == nil {
 			if d.Model != "" {
@@ -625,6 +678,7 @@ func decodeRecord(raw []byte, mtime time.Time, hdr header, path string, res *res
 		return true
 
 	case typeToolCall:
+		res.recognized = true
 		var d toolCallData
 		if err := json.Unmarshal(env.Data, &d); err != nil {
 			return false
@@ -642,9 +696,25 @@ func decodeRecord(raw []byte, mtime time.Time, hdr header, path string, res *res
 		return true
 
 	case typeAssistant:
+		res.recognized = true
 		var d assistantData
 		if err := json.Unmarshal(env.Data, &d); err != nil {
+			if collapsed {
+				res.badAssistant(env, anchors, "malformed collapsed assistant data")
+			}
 			return false
+		}
+		if collapsed {
+			if strings.TrimSpace(d.Message.ID) == "" {
+				res.badAssistant(env, anchors, "collapsed assistant message missing id")
+				return true
+			}
+			// The writer may omit usage for a no-accounting response, but not
+			// after it received an explicitly referenced accounting chunk.
+			if (expectedUsage && d.Usage == nil) || (d.Usage != nil && (d.Usage.InputTokens == nil || d.Usage.OutputTokens == nil)) {
+				res.badAssistant(env, anchors, "collapsed assistant message missing reported input/output usage")
+				return true
+			}
 		}
 		at := step{turn: d.Turn, step: d.Step}
 		a := anchors[at]
@@ -702,9 +772,41 @@ func decodeRecord(raw []byte, mtime time.Time, hdr header, path string, res *res
 		return true
 	}
 	// Every other record type — user/message, tool/result, request/header, the
-	// packed text-chunks / reasoning-chunks / tool-call-chunks rows, and the
-	// assistant/chunk usage duplicate — is ignored by name, undecoded.
+	// packed text-chunks / reasoning-chunks / tool-call-chunks rows — is ignored
+	// by name, undecoded.
 	return true
+}
+
+func (r *result) badAssistant(env envelope, anchors map[step]*stepAnchor, reason string) {
+	r.badFormat(reason)
+	// Rejecting one message must not make another message in its step an exact
+	// call join. Preserve a known message identity so accounting recovery cannot
+	// insert its calls again under different keys, but withhold usage attribution.
+	var d struct {
+		Turn    int64           `json:"turn"`
+		Step    int64           `json:"step"`
+		Message json.RawMessage `json:"message"`
+	}
+	if json.Unmarshal(env.Data, &d) == nil && d.Turn > 0 && d.Step > 0 {
+		at := step{turn: d.Turn, step: d.Step}
+		a := anchors[at]
+		if a == nil {
+			a = &stepAnchor{}
+			anchors[at] = a
+		}
+		a.count++
+		a.usageKey = ""
+		if a.count == 1 {
+			var message struct {
+				ID     string        `json:"id"`
+				Source messageSource `json:"source"`
+			}
+			if json.Unmarshal(d.Message, &message) == nil && strings.TrimSpace(message.ID) != "" {
+				a.messageID = message.ID
+				a.model = message.Source.Model
+			}
+		}
+	}
 }
 
 // buildEvent maps one DSH TokenUsage onto a ledger row.

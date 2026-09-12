@@ -19,6 +19,7 @@ import (
 func newLoadedModel(t *testing.T, src DataSource, dbPath string) Model {
 	t.Helper()
 	m := NewModel(src, Options{DBPath: dbPath})
+	t.Cleanup(m.zoneMgr.Close)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	return loadOnce(tm.(Model))
 }

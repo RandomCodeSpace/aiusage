@@ -20,6 +20,9 @@ const unknownModelFixture = `{"timestamp":"2026-05-29T12:05:00Z","cwd":"/home/de
 // returns the home dir to point --home at.
 func writeTranscripts(t *testing.T, lines ...string) string {
 	t.Helper()
+	for _, name := range discoveryEnv() {
+		t.Setenv(name, "")
+	}
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "projects", "demo")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -34,10 +37,8 @@ func writeTranscripts(t *testing.T, lines ...string) string {
 	return home
 }
 
-// TestSummaryStampsAndShowsExactCost is the end-to-end proof that a collected
-// event is priced at ingest from the embedded snapshot and rendered as an exact
-// dollar amount — no tilde, because nothing needed display pricing.
-func TestSummaryStampsAndShowsExactCost(t *testing.T) {
+// TestSummaryStampsAndShowsEstimatedCost preserves computed provenance at display.
+func TestSummaryStampsAndShowsEstimatedCost(t *testing.T) {
 	home := writeTranscripts(t, pricedFixture)
 	db := filepath.Join(t.TempDir(), "usage.db")
 	cfg := offlineConfig(t)
@@ -59,17 +60,15 @@ func TestSummaryStampsAndShowsExactCost(t *testing.T) {
 	if !strings.Contains(out, "$3.00") {
 		t.Errorf("summary missing the exact $3.00 cost:\n%s", out)
 	}
-	if strings.Contains(out, "~") {
-		t.Errorf("a fully stamped summary must not be marked approximate:\n%s", out)
+	if !strings.Contains(out, "~$3.00") {
+		t.Errorf("computed cost must be marked estimated:\n%s", out)
 	}
 	if strings.Contains(out, "$0.00") {
 		t.Errorf("summary rendered a $0.00 cost:\n%s", out)
 	}
 }
 
-// TestSummaryMarksUnpriceableRowsApproximate checks the other half of the
-// contract: a bucket still holding rows no table can value is a floor, so the
-// rendered total wears the tilde instead of claiming precision.
+// Unpriceable rows make the computed estimate a lower bound.
 func TestSummaryMarksUnpriceableRowsApproximate(t *testing.T) {
 	home := writeTranscripts(t, pricedFixture, unknownModelFixture)
 	db := filepath.Join(t.TempDir(), "usage.db")
@@ -85,10 +84,10 @@ func TestSummaryMarksUnpriceableRowsApproximate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("summary: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "~$3.00") {
-		t.Errorf("mixed summary missing the approximate marker:\n%s", out)
+	if !strings.Contains(out, "≥~$3.00") {
+		t.Errorf("mixed summary missing the lower bound and estimate markers:\n%s", out)
 	}
-	if !strings.Contains(out, "priced at display time") {
+	if !strings.Contains(out, "estimated from rates") {
 		t.Errorf("approximate summary missing its explanatory note:\n%s", out)
 	}
 }

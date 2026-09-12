@@ -50,6 +50,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -329,10 +330,6 @@ type wireLine struct {
 	Usage      *tokenUsage `json:"usage"`      // usage.record: the counters
 }
 
-// lineMarkers fast-skip records that can carry neither usage nor the model
-// carry-forward. They are cheap probes: a message whose text happens to contain
-// "usage.record" passes the byte test and is then rejected by the exact type
-// check, which is the same split codex uses.
 var (
 	markerUsage   = []byte(recUsage)
 	markerRequest = []byte(recRequest)
@@ -348,9 +345,10 @@ func lineIsInteresting(raw []byte) bool {
 // nothing, changing both the reported model AND the dedup key of records the
 // full read had already keyed differently.
 type ckptState struct {
-	Model      string `json:"model,omitempty"`      // last llm.request.model (the REAL id)
-	Alias      string `json:"alias,omitempty"`      // last llm.request.modelAlias
-	RequestKey string `json:"requestKey,omitempty"` // that request's identity
+	Model           string `json:"model,omitempty"`            // last llm.request.model (the REAL id)
+	Alias           string `json:"alias,omitempty"`            // last llm.request.modelAlias
+	RequestKey      string `json:"requestKey,omitempty"`       // that request's identity
+	ProtocolVersion string `json:"protocol_version,omitempty"` // "legacy" for headerless records
 }
 
 // Collect reads one wire log in full and returns its usage events.
@@ -376,6 +374,10 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("kimicode: stat %s: %w", src.Path, err)
 	}
+	return a.collectReader(ctx, src, cp, f, fi)
+}
+
+func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint, f io.ReadSeeker, fi os.FileInfo) (adapter.Observation, error) {
 	size := fi.Size()
 	mtimeNS := fi.ModTime().UnixNano()
 
@@ -394,6 +396,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 					start, state = 0, ckptState{}
 				}
 			}
+			// Older checkpoints did not retain the wire format. Re-read once
+			// so a versioned usage tail cannot be mistaken for sparse legacy data.
+			if state.ProtocolVersion == "" {
+				start, state = 0, ckptState{}
+			}
 		}
 	}
 	if start > 0 {
@@ -403,10 +410,15 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	}
 
 	var (
-		events   []model.UsageEvent
-		consumed = start
-		mtime    = fi.ModTime().UTC()
-		r        = bufio.NewReaderSize(f, 64*1024)
+		events         []model.UsageEvent
+		consumed       = start
+		mtime          = fi.ModTime().UTC()
+		r              = bufio.NewReaderSize(f, 64*1024)
+		recognized     = start > 0
+		nonempty       bool
+		formatErr      error
+		parseErr       error
+		requestInvalid bool
 	)
 
 	for {
@@ -416,25 +428,55 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		raw, rerr := r.ReadBytes('\n')
 		terminated := rerr == nil
 		if rerr != nil && rerr != io.EOF {
-			break // unreadable remainder: keep what we have, checkpoint stops here
+			return adapter.Observation{Events: events}, fmt.Errorf("kimicode: read %s: %w", src.Path, rerr)
 		}
-		if len(bytes.TrimSpace(raw)) > 0 && lineIsInteresting(raw) {
-			var ln wireLine
-			if err := json.Unmarshal(raw, &ln); err != nil {
-				// Malformed line: skip it and keep parsing — one bad line must
-				// not drop the rest of the file. An unterminated malformed tail
-				// is a write in progress: stop before it so the completed line
-				// is read next cycle.
-				if !terminated {
-					break
+		if len(bytes.TrimSpace(raw)) > 0 {
+			if !terminated && !json.Valid(raw) {
+				break // an incomplete final record must be retried after growth
+			}
+			nonempty = true
+			typ, typeErr := recordType(raw)
+			if typeErr != nil {
+				if json.Valid(raw) {
+					formatErr = fmt.Errorf("kimicode: wire %w: incompatible type", adapter.ErrSourceFormat)
+					if bytes.Contains(raw, []byte(`"protocol_version"`)) || bytes.Contains(raw, []byte(`"modelAlias"`)) {
+						requestInvalid = true
+					}
+				} else {
+					parseErr = errors.Join(parseErr, fmt.Errorf("kimicode: malformed wire record"))
 				}
-			} else {
-				switch ln.Type {
-				case recRequest:
-					state = requestState(ln)
-				case recUsage:
-					if ev, ok := buildEvent(ln, state, src, mtime); ok {
-						events = append(events, ev)
+			} else if typ == "metadata" || typ == recUsage || typ == recRequest || lineIsInteresting(raw) ||
+				bytes.Contains(raw, []byte(`"usage"`)) || bytes.Contains(raw, []byte(`"protocol_version"`)) ||
+				(typ != "profile.bind" && bytes.Contains(raw, []byte(`"modelAlias"`))) {
+				ln, known, err := decodeWireRecord(raw, &state)
+				if err != nil {
+					if errors.Is(err, adapter.ErrSourceFormat) {
+						if formatErr == nil {
+							formatErr = err
+						}
+						if typ == "metadata" || typ == recRequest || bytes.Contains(raw, []byte(`"protocol_version"`)) || bytes.Contains(raw, []byte(`"modelAlias"`)) {
+							requestInvalid = true
+						}
+					} else {
+						parseErr = errors.Join(parseErr, err)
+					}
+				} else if known {
+					recognized = true
+					switch ln.Type {
+					case recRequest:
+						next := requestState(ln)
+						next.ProtocolVersion = state.ProtocolVersion
+						state = next
+						requestInvalid = false
+					case recUsage:
+						// A rejected context cannot key dependent usage safely.
+						// Repair must replay it once with the original request.
+						if requestInvalid {
+							break
+						}
+						if ev, ok := buildEvent(ln, state, src, mtime); ok {
+							events = append(events, ev)
+						}
 					}
 				}
 			}
@@ -449,6 +491,15 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		break
 	}
 
+	if err := ctx.Err(); err != nil {
+		return adapter.Observation{Events: events}, err
+	}
+	if formatErr != nil {
+		return adapter.Observation{Events: events}, errors.Join(parseErr, formatErr)
+	}
+	if nonempty && !recognized {
+		return adapter.Observation{}, fmt.Errorf("kimicode: wire %w: no recognized record anchors", adapter.ErrSourceFormat)
+	}
 	newState, err := json.Marshal(state)
 	if err != nil {
 		return adapter.Observation{Events: events}, nil // no checkpoint; next cycle re-reads
@@ -459,7 +510,117 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			Tool: model.ToolKimiCode, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed, State: string(newState),
 		},
-	}, nil
+	}, parseErr
+}
+
+// Stop at the top-level discriminator before ordinary message content. Fields
+// before type still use the standard decoder, without an ordering assumption.
+func recordType(raw []byte) (string, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, err := d.Token()
+	if err != nil {
+		return "", err
+	}
+	if token != json.Delim('{') {
+		return "", errors.New("record is not an object")
+	}
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return "", err
+		}
+		if key == "type" {
+			var typ string
+			err := d.Decode(&typ)
+			return typ, err
+		}
+		var ignored json.RawMessage
+		if err := d.Decode(&ignored); err != nil {
+			return "", err
+		}
+	}
+	_, err = d.Token()
+	return "", err
+}
+
+// decodeWireRecord validates only format and accounting fields. Content stays
+// outside the decode, including on unrelated record kinds.
+func decodeWireRecord(raw []byte, state *ckptState) (wireLine, bool, error) {
+	if !json.Valid(raw) {
+		return wireLine{}, false, fmt.Errorf("kimicode: malformed wire record")
+	}
+	bad := func(anchor string) (wireLine, bool, error) {
+		return wireLine{}, false, fmt.Errorf("kimicode: wire %w: missing or incompatible %s", adapter.ErrSourceFormat, anchor)
+	}
+	var discriminator struct {
+		Type     *string         `json:"type"`
+		Protocol json.RawMessage `json:"protocol_version"`
+		Usage    json.RawMessage `json:"usage"`
+		Alias    json.RawMessage `json:"modelAlias"`
+	}
+	if err := json.Unmarshal(raw, &discriminator); err != nil {
+		return bad("record/type")
+	}
+	if discriminator.Type == nil {
+		if len(discriminator.Protocol)+len(discriminator.Usage)+len(discriminator.Alias) > 0 {
+			return bad("type")
+		}
+		return wireLine{}, false, nil
+	}
+	if *discriminator.Type == "metadata" {
+		var metadata struct {
+			Protocol *string `json:"protocol_version"`
+			Created  *int64  `json:"created_at"`
+		}
+		if err := json.Unmarshal(raw, &metadata); err != nil || metadata.Protocol == nil || strings.TrimSpace(*metadata.Protocol) == "" || *metadata.Protocol == "legacy" || metadata.Created == nil {
+			return bad("metadata protocol_version/created_at")
+		}
+		state.ProtocolVersion = *metadata.Protocol
+		return wireLine{Type: "metadata"}, true, nil
+	}
+	if *discriminator.Type != recRequest && *discriminator.Type != recUsage {
+		if len(discriminator.Protocol) > 0 {
+			return bad("metadata type")
+		}
+		// profile.bind also carries modelAlias, without being a request.
+		if len(discriminator.Usage) > 0 || (len(discriminator.Alias) > 0 && *discriminator.Type != "profile.bind") {
+			return bad("usage/request type")
+		}
+		return wireLine{}, false, nil
+	}
+	var ln wireLine
+	if err := json.Unmarshal(raw, &ln); err != nil {
+		return bad("usage/request fields")
+	}
+	if ln.Type == recRequest {
+		if strings.TrimSpace(ln.Model) == "" {
+			return bad("llm.request.model")
+		}
+	} else {
+		if ln.Usage == nil {
+			return bad("usage.record.usage")
+		}
+		var usage struct {
+			Input  *int64 `json:"inputOther"`
+			Output *int64 `json:"output"`
+			Read   *int64 `json:"inputCacheRead"`
+			Create *int64 `json:"inputCacheCreation"`
+		}
+		if err := json.Unmarshal(discriminator.Usage, &usage); err != nil {
+			return bad("usage counters")
+		}
+		if state.ProtocolVersion != "" && state.ProtocolVersion != "legacy" {
+			if usage.Input == nil || usage.Output == nil || usage.Read == nil || usage.Create == nil {
+				return bad("versioned usage counters")
+			}
+		} else if usage.Input == nil && usage.Output == nil && usage.Read == nil && usage.Create == nil {
+			return bad("legacy usage counter")
+		}
+	}
+	if state.ProtocolVersion == "" {
+		state.ProtocolVersion = "legacy"
+	}
+	return ln, true, nil
 }
 
 // requestState turns one `llm.request` record into the carry-forward state that

@@ -234,6 +234,8 @@ func setVersion(t *testing.T, v string) {
 // policy against a live (lock-held) fake daemon: release mismatches stop and
 // respawn; dev-stamp mismatches leave the daemon alone and only write a notice.
 func TestEnsureDaemonIdentityMismatch(t *testing.T) {
+	stubSupervisor(t)
+	stubCollectorEvidence(t, "", true)
 	tests := []struct {
 		name      string
 		recorded  string // "" = no daemon.version file (pre-stamping daemon)
@@ -259,6 +261,9 @@ func TestEnsureDaemonIdentityMismatch(t *testing.T) {
 
 			dir := t.TempDir()
 			pidPath := seedLock(t, dir)
+			if err := os.WriteFile(pidPath, []byte("12345"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			release := holdLock(t, pidPath)
 			defer release()
 

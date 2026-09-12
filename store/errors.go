@@ -54,6 +54,9 @@ type SkippedRow struct {
 // discard the good rows beside it and then re-derive exactly the same poison
 // row on the next pass, forever - so the bad rows are skipped, the rest commits,
 // and the checkpoint advances past all of it.
+// Only these known row violations may skip. Every other insert or commit
+// error rolls the batch back and returns zero counts. ApplySnapshot also
+// rolls back rejected delta rows and never returns SkippedRowsError.
 //
 // The consequence for a caller is the part worth stating: WHEN THIS ERROR IS
 // RETURNED, THE COUNTS RETURNED WITH IT ARE REAL. InsertEvents' int and
@@ -152,4 +155,11 @@ func (s *rowSkips) err(total int) error {
 		return nil
 	}
 	return &SkippedRowsError{Table: s.table, Total: total, Rows: s.rows}
+}
+
+// isSkippableRowError admits only the extended CHECK result. Expected dedup
+// collisions already use ON CONFLICT; all other driver errors fail the batch.
+func isSkippableRowError(err error) bool {
+	var coded interface{ Code() int }
+	return errors.As(err, &coded) && coded.Code() == 275 // SQLITE_CONSTRAINT_CHECK
 }

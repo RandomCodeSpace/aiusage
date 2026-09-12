@@ -120,6 +120,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -386,7 +387,12 @@ func indexRows(ctx context.Context, path string) []indexRow {
 	// deliberately absent — Cline writes this database live and keeps a WAL an
 	// immutable reader ignores entirely, which is how a reader ends up quietly
 	// describing the database as of its last checkpoint.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	dsn := u.String() + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil
@@ -610,10 +616,9 @@ func dedupKey(sessionID, agent, messageID string) string {
 }
 
 // buildEvent maps one assistant message's metrics onto a usage event. Returns
-// ok=false when the message reports no metrics, names no model, or accounts for
-// no tokens at all.
+// ok=false when the message reports no metrics or accounts for no tokens at all.
 func buildEvent(m message, key, sessionID, project, mdl, provider string, when time.Time, srcPath string) (model.UsageEvent, bool) {
-	if m.Metrics == nil || mdl == "" {
+	if m.Metrics == nil {
 		return model.UsageEvent{}, false
 	}
 	input, output, cacheRead, cacheCreate, total := mapTokens(*m.Metrics)

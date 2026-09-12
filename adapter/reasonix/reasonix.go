@@ -58,23 +58,15 @@
 // on every pass. The checkpoint is trusted only on pure growth; a shrink or a
 // same-size rewrite re-reads from zero.
 //
-// # Cost: this surface carries FLAGS, never an amount
+// # Cost: the captured rows are unpriced
 //
-// A record says whether its cost is known — usage_source, cost_complete,
-// cost_estimated, display_complete, display_status, incomplete_reason
-// ("no_price") — and never says what it was. Both live records here are
-// cost_complete=false / incomplete_reason="no_price", and reasonix's own index
-// of these very files has no cost column at all. So the adapter stamps NO cost:
-// CostMicroUSD stays nil, which is unpriced, which is not $0. The flags ride
-// along in the audit payload, where they say WHY. The pricing ladder still gets
-// its turn — the harness not knowing a price is not a claim that nobody does.
-//
-// Should reasonix ever write an amount into these lines, it must be
-// currency-guarded before it is stamped: the vendor documents that
-// `total_cost_usd` is "a numeric compatibility alias ... and does not imply
-// USD", display currency is auto|CNY|USD, and mixed original currencies keep
-// cost_complete=true while display_complete goes false. Reading a number out of
-// that without its ISO code would book CNY as dollars.
+// The captured Ollama rows carry cost_complete=false and
+// incomplete_reason="no_price", with no amount. This adapter stamps no cost:
+// CostMicroUSD remains nil, and the pricing ladder can value the counters.
+// The exact v1.25.3 writer can also emit optional quoted cost amounts and
+// currencies. They are not mapped here; unknown currencies must never be
+// interpreted as USD. See testdata/live-1.25.3.provenance.md for the versioned
+// writer evidence and the captured surface's limits.
 //
 // # Names and counters ONLY
 //
@@ -94,6 +86,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -404,6 +397,10 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("reasonix: stat %s: %w", src.Path, err)
 	}
+	return a.collectReader(ctx, src, cp, f, fi)
+}
+
+func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint, f io.ReadSeeker, fi os.FileInfo) (adapter.Observation, error) {
 	size, mtimeNS := fi.Size(), fi.ModTime().UnixNano()
 
 	var start int64
@@ -428,10 +425,11 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	mtime := fi.ModTime().UTC()
 
 	var (
-		events   []model.UsageEvent
-		skipped  int
-		consumed = start
-		r        = bufio.NewReaderSize(f, 64*1024)
+		events    []model.UsageEvent
+		schemaErr error
+		skipped   int
+		consumed  = start
+		r         = bufio.NewReaderSize(f, 64*1024)
 	)
 	for {
 		if ctx.Err() != nil {
@@ -440,7 +438,7 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		raw, rerr := r.ReadBytes('\n')
 		terminated := rerr == nil
 		if rerr != nil && rerr != io.EOF {
-			break // unreadable remainder: keep what we have, offset stops here
+			return adapter.Observation{Events: events}, fmt.Errorf("reasonix: read %s: %w", src.Path, rerr)
 		}
 		// A blank line is padding, not corruption; a decoded line that carries
 		// no tokens is bookkeeping, not corruption either. Only a line that
@@ -451,6 +449,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			switch {
 			case derr != nil:
 				skipped++
+				if errors.Is(derr, adapter.ErrSourceFormat) {
+					schemaErr = derr
+				}
 			case ok:
 				events = append(events, ev)
 			}
@@ -466,12 +467,22 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		break
 	}
 
+	if err := ctx.Err(); err != nil {
+		return adapter.Observation{Events: events}, err
+	}
 	obs := adapter.Observation{
 		Events: events,
 		Checkpoint: &model.SourceCheckpoint{
 			Tool: model.ToolReasonix, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed,
 		},
+	}
+	if schemaErr != nil {
+		// Keep the old checkpoint so fixing a recognized current record does
+		// not require an unrelated append to recover it. Valid events still
+		// reach the ledger and replay under their existing dedup keys.
+		obs.Checkpoint = nil
+		return obs, fmt.Errorf("reasonix: %s: %w", src.Path, schemaErr)
 	}
 	if skipped > 0 {
 		return obs, fmt.Errorf("reasonix: skipped %d unparseable record(s) in %s", skipped, src.Path)
@@ -520,15 +531,28 @@ type statsRecord struct {
 	IncompleteReason string `json:"incomplete_reason,omitempty"`
 }
 
+var errCurrentTimestamp = fmt.Errorf("%w: current stats record requires a valid ts timestamp", adapter.ErrSourceFormat)
+
 // parseRecord maps one JSONL line onto a usage event. The two failure modes are
-// kept apart on purpose: a non-nil error means the line did not DECODE, while
-// ok=false with a nil error means it decoded and carried no tokens. Only the
-// first is a defect worth reporting — collapsing them would make an ordinary
-// zero-usage line look like corruption on every pass.
+// kept apart: a non-nil error means malformed JSON or a missing current
+// timestamp; ok=false with a nil error means a decoded record has no tokens.
+// Zero-usage bookkeeping is not corruption.
 func parseRecord(line []byte, mtime time.Time, path string) (model.UsageEvent, bool, error) {
 	var rec statsRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
+		if json.Valid(line) {
+			return model.UsageEvent{}, false, fmt.Errorf("%w: decode stats record: %v", adapter.ErrSourceFormat, err)
+		}
 		return model.UsageEvent{}, false, err
+	}
+
+	// The current writer always emits ts. Its usage/cost markers distinguish
+	// these records from older tolerated shapes that use the file mtime.
+	// Counter/model/source omissions are valid: the writer uses omitempty.
+	if rec.UsageSource != "" || rec.CostComplete != nil || rec.DisplayComplete != nil {
+		if _, err := time.Parse(time.RFC3339Nano, rec.TS); err != nil {
+			return model.UsageEvent{}, false, errCurrentTimestamp
+		}
 	}
 
 	prompt := adapter.NonNeg(rec.Prompt)
@@ -551,7 +575,19 @@ func parseRecord(line []byte, mtime time.Time, path string) (model.UsageEvent, b
 		total = prompt + completion
 	}
 	if input == 0 && cacheHit == 0 && completion == 0 && reasoning == 0 && total == 0 {
-		return model.UsageEvent{}, false, nil // an all-zero line is bookkeeping, not usage
+		// Distinguish legitimate zero/turn/request records from a complete
+		// unrelated object. Only this zero path needs presence information;
+		// decoded counters alone cannot distinguish absent from zero.
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(line, &fields); err != nil {
+			return model.UsageEvent{}, false, fmt.Errorf("%w: expected stats object", adapter.ErrSourceFormat)
+		}
+		for _, name := range []string{"ts", "model", "source", "prompt", "completion", "reasoning", "cache_hit", "cache_miss", "total", "requests", "turn", "turns", "usage_source", "cost_complete", "cost_estimated", "display_complete", "display_status", "incomplete_reason"} {
+			if _, present := fields[name]; present {
+				return model.UsageEvent{}, false, nil
+			}
+		}
+		return model.UsageEvent{}, false, fmt.Errorf("%w: no recognized stats fields", adapter.ErrSourceFormat)
 	}
 
 	ev := model.UsageEvent{

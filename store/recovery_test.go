@@ -877,7 +877,7 @@ func TestRecoveryFilesystemHelperFailures(t *testing.T) {
 	if _, err := resolvedPathsEqual(missing, filepath.Join(dir, "destination.db")); err == nil {
 		t.Fatal("resolvedPathsEqual accepted missing source")
 	}
-	if got := sqliteReadOnlyURI("relative database.db"); !strings.HasPrefix(got, "file:/") || !strings.Contains(got, "mode=ro") {
+	if got := sqliteFileURI("relative database.db", true); !strings.HasPrefix(got, "file:/") || !strings.Contains(got, "mode=ro") {
 		t.Fatalf("relative SQLite URI = %s", got)
 	}
 }

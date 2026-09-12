@@ -92,6 +92,11 @@ func run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapte
 		defer lock.release(logger)
 	}
 
+	// The executable as it was when this daemon started. An upgrade replaces
+	// those bytes, and the tick below notices before it spends another cycle
+	// running superseded code.
+	started, watching := stampExecutable(opt.ExecPath)
+
 	if err := writePID(opt.PIDPath); err != nil {
 		return fmt.Errorf("write pidfile %s: %w", opt.PIDPath, err)
 	}
@@ -125,6 +130,9 @@ func run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapte
 		if stats.RollupRebuilt {
 			logger.Printf("rebuilt the derived rollup from the ledger")
 		}
+		if stats.PricesSynced > 0 {
+			logger.Printf("price sync: updated=%d", stats.PricesSynced)
+		}
 		logger.Printf("%s: adapters=%d sources=%d seen=%d inserted=%d activity=%d snapshots=%d errors=%d",
 			label, stats.Adapters, stats.Sources, stats.EventsSeen, stats.EventsInserted,
 			stats.ActivityInserted, stats.Snapshots, len(stats.Errors))
@@ -138,11 +146,6 @@ func run(ctx context.Context, reg *adapter.Registry, st collect.Store, dc adapte
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	// The executable as it was when this daemon started. An upgrade replaces
-	// those bytes, and the tick below notices before it spends another cycle
-	// running superseded code.
-	started, watching := stampExecutable(opt.ExecPath)
 
 	for {
 		select {
@@ -184,7 +187,7 @@ func AcquireCollectionLock(pidPath, version string) (func(), error) {
 	lock, err := acquireLock(pidPath)
 	if err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("the aiusage daemon is already collecting (lock held on %s.lock); skipping this run to avoid double counting", pidPath)
+			return nil, fmt.Errorf("the aiusage daemon is already collecting (lock held on %s.lock); skipping this run to avoid double counting: %w", pidPath, syscall.EWOULDBLOCK)
 		}
 		return nil, err
 	}

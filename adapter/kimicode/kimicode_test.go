@@ -3,6 +3,7 @@ package kimicode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -554,7 +555,11 @@ func TestMalformedLineDoesNotDropTheRest(t *testing.T) {
 
 	src := adapter.Source{Tool: model.ToolKimiCode, Class: model.EventLevel, Path: path,
 		Meta: map[string]string{"session": synthSession, "agent": "main"}}
-	evs := collect(t, src)
+	obs, err := (Adapter{}).Collect(context.Background(), src)
+	if err == nil || errors.Is(err, adapter.ErrSourceFormat) || obs.Checkpoint == nil {
+		t.Fatalf("malformed record error = %v, checkpoint present = %t", err, obs.Checkpoint != nil)
+	}
+	evs := obs.Events
 	if len(evs) != 3 {
 		t.Fatalf("want 3 events past the corrupt line, got %d", len(evs))
 	}
@@ -568,9 +573,9 @@ func TestMalformedLineDoesNotDropTheRest(t *testing.T) {
 // TestNoContentReachesAnyEmittedField plants a secret in every content field
 // the wire log has — system prompt, cwd, user input, message parts, tool call
 // arguments, tool schemas, streamed text, tool results, message ids — and
-// asserts none of it reaches any emitted field. Two of those lines also contain
-// the literal strings "usage.record" and "llm.request", so they pass the byte
-// probe and are decoded before the type check rejects them.
+// asserts none of it reaches any emitted field. Two content-only records also
+// contain the strings "usage.record" and "llm.request"; their discriminators
+// still exclude them from accounting.
 func TestNoContentReachesAnyEmittedField(t *testing.T) {
 	src := sourceFor(t, privSession, "main")
 	raw, err := os.ReadFile(src.Path)

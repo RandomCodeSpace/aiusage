@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"path/filepath"
+	"strings"
 
 	"github.com/RandomCodeSpace/aiusage/internal/config"
 	"github.com/RandomCodeSpace/aiusage/internal/report"
@@ -59,18 +60,17 @@ func resolveCosts(ctx context.Context, st *store.Reader, cfg config.Config, sum 
 	return report.ResolveCosts(sum, groups, newPricer(cfg))
 }
 
-// costNote explains the tilde under a table that contains display-priced rows,
-// so an approximate total is never mistaken for the billed amount.
+// costNote explains estimates, incomplete sums, and unknown costs.
 func costNote(costs *report.Costs) string {
 	if costs == nil {
 		return ""
 	}
-	approx := costs.Totals.Approximate
+	needsNote := !costs.Totals.Known || costs.Totals.Approximate || strings.Contains(costs.Totals.String(), "≥")
 	for _, c := range costs.Buckets {
-		approx = approx || c.Approximate
+		needsNote = needsNote || !c.Known || c.Approximate || strings.Contains(c.String(), "≥")
 	}
-	if !approx {
+	if !needsNote {
 		return ""
 	}
-	return "~ = includes rows priced at display time from the current table; - = unpriced"
+	return "~ = estimated from rates; ≥ = excludes unpriced usage; - = unpriced"
 }

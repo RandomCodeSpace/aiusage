@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -40,5 +41,21 @@ func TestStopNoDaemon(t *testing.T) {
 	cfg := config.Config{PIDPath: filepath.Join(dir, "aiusage.pid")}
 	if err := Stop(cfg, 0); err != nil {
 		t.Fatalf("Stop with no daemon = %v, want nil", err)
+	}
+}
+
+func TestWayfinderVersionMarkersFollowPID(t *testing.T) {
+	dir := t.TempDir()
+	configs := []config.Config{{PIDPath: filepath.Join(dir, "aiusage.pid")}, {PIDPath: filepath.Join(dir, "aiusage-a.pid")}, {PIDPath: filepath.Join(dir, "custom.pid")}}
+	for i, cfg := range configs {
+		WriteVersion(cfg, fmt.Sprint(i))
+	}
+	for i, cfg := range configs {
+		if got := ReadVersion(cfg); got != fmt.Sprint(i) {
+			t.Fatalf("%s got %q", cfg.PIDPath, got)
+		}
+	}
+	if got := versionPath(configs[0].PIDPath); got != filepath.Join(dir, "daemon.version") {
+		t.Fatal(got)
 	}
 }

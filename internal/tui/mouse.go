@@ -352,7 +352,7 @@ func (m Model) itemZoneCandidates() []string {
 			out = append(out, views.RowZone(i))
 		}
 	case ViewActivity:
-		for i := range m.activity.Rows {
+		for i := 0; i < m.activity.RowCount(); i++ {
 			out = append(out, views.ActZone(i))
 		}
 	}

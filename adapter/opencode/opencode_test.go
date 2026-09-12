@@ -181,16 +181,16 @@ func TestReasoningIsAdditive(t *testing.T) {
 	dir := t.TempDir()
 	rows := [][3]string{
 		// output == 0, reasoning > 0, total fully explained: no gap to fill.
-		{"r_gap", "s", `{"id":"r_gap","sessionID":"s","providerID":"anthropic","modelID":"claude-sonnet-4",
+		{"r_gap", "s", `{"id":"r_gap","time":{"created":1730000000000},"sessionID":"s","providerID":"anthropic","modelID":"claude-sonnet-4",
 			"tokens":{"input":1000,"output":0,"reasoning":400,"cache":{"read":200,"write":100},"total":1700},
 			"path":{"cwd":"/w"}}`},
 		// reasoning > output: impossible if reasoning were a subset of output.
-		{"r_big", "s", `{"id":"r_big","sessionID":"s","providerID":"openai","modelID":"gpt-5",
+		{"r_big", "s", `{"id":"r_big","time":{"created":1730000000000},"sessionID":"s","providerID":"openai","modelID":"gpt-5",
 			"tokens":{"input":50,"output":10,"reasoning":900,"cache":{"read":0,"write":0},"total":960},
 			"path":{"cwd":"/w"}}`},
 		// output == 0, reasoning > 0 AND a genuine remainder: the fill takes the
 		// remainder only (200 - 100 - 40), never the reasoning count.
-		{"r_fill", "s", `{"id":"r_fill","sessionID":"s","providerID":"openai","modelID":"gpt-5",
+		{"r_fill", "s", `{"id":"r_fill","time":{"created":1730000000000},"sessionID":"s","providerID":"openai","modelID":"gpt-5",
 			"tokens":{"input":100,"output":0,"reasoning":40,"cache":{"read":0,"write":0},"total":200},
 			"path":{"cwd":"/w"}}`},
 	}
@@ -262,7 +262,7 @@ func TestDropsEmptyModelAndAllZero(t *testing.T) {
 		// malformed JSON -> dropped, must not fail the source
 		{"d", "s", `{not json`},
 		// valid -> kept
-		{"e", "s", `{"id":"e","sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2},"path":{"cwd":"/x"}}`},
+		{"e", "s", `{"id":"e","time":{"created":1730000000000},"sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2},"path":{"cwd":"/x"}}`},
 	}
 	writeDB(t, dir, rows)
 
@@ -340,7 +340,7 @@ func TestJSONTreeAndDBSameDedupKey(t *testing.T) {
 
 func TestProjectFallbackWhenNoCwd(t *testing.T) {
 	dir := t.TempDir()
-	data := `{"id":"nz","sessionID":"s","modelID":"gpt-5","tokens":{"input":5,"output":5,"total":10}}`
+	data := `{"id":"nz","time":{"created":1730000000000},"sessionID":"s","modelID":"gpt-5","tokens":{"input":5,"output":5,"total":10}}`
 	writeDB(t, dir, [][3]string{{"nz", "s", data}})
 
 	srcs := discover(t, dir)
@@ -369,7 +369,7 @@ func TestFindDBPrefixVariant(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	_, _ = db.Exec(`INSERT INTO message VALUES (?,?,?)`, "pfx",
-		"s", `{"id":"pfx","sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2}}`)
+		"s", `{"id":"pfx","time":{"created":1730000000000},"sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2}}`)
 	db.Close()
 
 	got := findDB(dir)
@@ -427,7 +427,7 @@ func TestReadsUncheckpointedWAL(t *testing.T) {
 	if _, err := writer.Exec(`CREATE TABLE message (id TEXT, session_id TEXT, data TEXT)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	data := `{"id":"wal1","sessionID":"s","modelID":"gpt-5","tokens":{"input":5,"output":6,"total":11}}`
+	data := `{"id":"wal1","time":{"created":1730000000000},"sessionID":"s","modelID":"gpt-5","tokens":{"input":5,"output":6,"total":11}}`
 	if _, err := writer.Exec(`INSERT INTO message VALUES ('wal1','s',?)`, data); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestReadsUncheckpointedWAL(t *testing.T) {
 // checkpoint.
 func TestIncrementalWatermark(t *testing.T) {
 	dir := t.TempDir()
-	data1 := `{"id":"w1","sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2}}`
+	data1 := `{"id":"w1","time":{"created":1730000000000},"sessionID":"s","modelID":"gpt-5","tokens":{"input":1,"output":1,"total":2}}`
 	dbPath := writeDB(t, dir, [][3]string{{"w1", "s", data1}})
 
 	a := Adapter{}
@@ -491,7 +491,7 @@ func TestIncrementalWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open writer: %v", err)
 	}
-	data2 := `{"id":"w2","sessionID":"s","modelID":"gpt-5","tokens":{"input":3,"output":4,"total":7}}`
+	data2 := `{"id":"w2","time":{"created":1730000000000},"sessionID":"s","modelID":"gpt-5","tokens":{"input":3,"output":4,"total":7}}`
 	if _, err := db.Exec(`INSERT INTO message VALUES ('w2','s',?)`, data2); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

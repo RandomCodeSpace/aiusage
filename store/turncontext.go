@@ -704,8 +704,8 @@ func (s *Reader) distinctTurnContextSessions(ctx context.Context, where string, 
 // with the same idempotence the two ledgers get: ON CONFLICT(usage_dedup_key,
 // dimension) DO NOTHING keeps a re-read silent while a CHECK violation (empty
 // key, unknown dimension, empty value) still errors, which a blanket OR IGNORE
-// would swallow. Per-row failures are skipped and summarised in skipErr so one
-// poison row cannot abort a batch that is re-derived every cycle.
+// would swallow. Only CHECK failures and empty keys are skipped and summarised
+// in skipErr; every other insert error fails the batch.
 //
 // The conflict target is (the usage row, the axis), which is what makes a second
 // sighting of the same turn a no-op rather than a second helping of its cost,
@@ -743,7 +743,11 @@ func insertTurnContextsTx(ctx context.Context, tx *sql.Tx, ctxs []model.TurnCont
 			c.EventTime.UTC().Unix(), obs.UTC().Unix(), c.SourcePath,
 		)
 		if execErr != nil {
-			skips.add(c.UsageDedupKey, fmt.Errorf("store: insert turn context %s/%s: %w", c.UsageDedupKey, c.Dimension, execErr))
+			rowErr := fmt.Errorf("store: insert turn context %s/%s: %w", c.UsageDedupKey, c.Dimension, execErr)
+			if !isSkippableRowError(execErr) {
+				return inserted, nil, rowErr
+			}
+			skips.add(c.UsageDedupKey, rowErr)
 			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {

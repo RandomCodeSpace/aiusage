@@ -38,30 +38,40 @@ type maintenanceCollectionState struct {
 }
 
 var pauseCollectionForMaintenance = func(ctx context.Context, cfg config.Config) (maintenanceCollectionState, error) {
+	previous, legacy, err := legacyCollector(ctx, cfg)
+	if err != nil {
+		return maintenanceCollectionState{}, err
+	}
+	if legacy {
+		cfg = previous
+	}
 	running, pid := daemon.Status(cfg)
 	if !running {
 		return maintenanceCollectionState{}, nil
 	}
 	state := maintenanceCollectionState{wasRunning: true}
-	if autoInstall(flags) {
-		supervisor := newSupervisor()
-		supervisorCtx, cancel := supervisionContext(ctx)
-		defer cancel()
-		if supervisor.Available(supervisorCtx) {
-			stopped, err := supervisor.StopCollection(supervisorCtx)
-			if err != nil {
-				return state, err
-			}
-			if stopped {
-				state.nativeStopped = true
-				return state, nil
-			}
-			state.detached = true
+	supervisor := newSupervisor()
+	supervisorCtx, cancel := supervisionContext(ctx)
+	defer cancel()
+	native, err := collectorOwner(supervisorCtx, supervisor, pid)
+	if err != nil {
+		return state, err
+	}
+	if native {
+		stopped, err := supervisor.StopCollection(supervisorCtx)
+		if err != nil {
+			return state, err
 		}
+		if !stopped {
+			return state, fmt.Errorf("native collector pid %d was not stopped", pid)
+		}
+		state.nativeStopped = true
+		return state, nil
 	}
 	if err := stopDaemon(cfg, pid); err != nil {
 		return state, err
 	}
+	state.detached = true
 	return state, nil
 }
 
@@ -78,7 +88,7 @@ var resumeCollectionAfterMaintenance = func(ctx context.Context, cfg config.Conf
 	if state.detached {
 		return spawnDaemon(cfg)
 	}
-	return ensureDaemon(ctx, cfg, warn)
+	return fmt.Errorf("cannot restore an unrecorded collector mode")
 }
 
 func newDBRestoreCmd() *cobra.Command {

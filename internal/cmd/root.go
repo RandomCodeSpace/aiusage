@@ -13,11 +13,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,9 +40,7 @@ import (
 	"github.com/RandomCodeSpace/aiusage/adapter/pi"
 	"github.com/RandomCodeSpace/aiusage/adapter/qwencode"
 	"github.com/RandomCodeSpace/aiusage/adapter/reasonix"
-	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
-	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 	"github.com/RandomCodeSpace/aiusage/internal/tui"
 	"github.com/RandomCodeSpace/aiusage/model"
 	"github.com/RandomCodeSpace/aiusage/store"
@@ -68,17 +68,19 @@ var flags globalFlags
 // setup is skipped for the plain reason that it is the command that does the
 // installing.
 var daemonSkip = map[string]bool{
-	"run":        true,
-	"once":       true,
-	"setup":      true,
-	"doctor":     true,
-	"backup":     true,
-	"verify":     true,
-	"restore":    true,
-	"reset":      true,
-	"completion": true,
-	"help":       true,
-	"version":    true,
+	"run":              true,
+	"once":             true,
+	"setup":            true,
+	"doctor":           true,
+	"backup":           true,
+	"verify":           true,
+	"restore":          true,
+	"reset":            true,
+	"completion":       true,
+	"__complete":       true,
+	"__completeNoDesc": true,
+	"help":             true,
+	"version":          true,
 }
 
 // isTTY reports whether stdout is an interactive terminal. It is a seam so the
@@ -109,7 +111,7 @@ func newRootCmd() *cobra.Command {
 		// unless --no-daemon is set. A spawn failure here is non-fatal: report it
 		// and continue so a reporting/TUI command still works without collection.
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
-			if flags.noDaemon || daemonSkip[c.Name()] {
+			if flags.noDaemon || skipsDaemon(c) {
 				return nil
 			}
 			// Bare `aiusage` only launches the TUI (the data-facing action) when
@@ -122,6 +124,13 @@ func newRootCmd() *cobra.Command {
 			}
 			cfg, err := loadConfig()
 			if err != nil {
+				return err
+			}
+			st, err := openStore(cfg)
+			if err != nil {
+				return err
+			}
+			if err := st.Close(); err != nil {
 				return err
 			}
 			if err := ensureDaemon(cmdContext(c), cfg, c.ErrOrStderr()); err != nil {
@@ -181,6 +190,15 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
+func skipsDaemon(c *cobra.Command) bool {
+	for ; c != nil; c = c.Parent() {
+		if daemonSkip[c.Name()] {
+			return true
+		}
+	}
+	return false
+}
+
 // Execute builds and runs the root command. main.go calls this and reports any
 // error to stderr.
 func Execute() error {
@@ -194,7 +212,15 @@ func Execute() error {
 // config.SetHome). The interval is re-clamped after a flag override so the
 // documented [60,1800] bound always holds.
 func loadConfig() (config.Config, error) {
-	path := flags.config
+	resolved, err := resolveGlobalPaths(flags)
+	if err != nil {
+		return config.Config{}, err
+	}
+	return loadConfigFlags(resolved)
+}
+
+func loadConfigFlags(f globalFlags) (config.Config, error) {
+	path := f.config
 	if path == "" {
 		path = config.DefaultConfigPath()
 	}
@@ -207,17 +233,20 @@ func loadConfig() (config.Config, error) {
 	// Home first: SetHome moves the still-derived DB/PID/log paths with it, and
 	// the explicit --db below must override the home-derived DB path, not the
 	// other way around.
-	if flags.home != "" {
-		cfg.SetHome(flags.home)
+	if f.home != "" {
+		cfg.SetHome(f.home)
 	}
-	if flags.db != "" {
-		cfg.DBPath = flags.db
+	if f.db != "" {
+		cfg.DBPath = f.db
 	}
-	if flags.interval > 0 {
-		cfg.IntervalSeconds = clampInterval(flags.interval)
+	if f.interval > 0 {
+		cfg.IntervalSeconds = clampInterval(f.interval)
 	}
 	if cfg.SourceRoots == nil {
 		cfg.SourceRoots = map[string]string{}
+	}
+	if err := cfg.ResolveCollectorPaths(); err != nil {
+		return config.Config{}, err
 	}
 	return cfg, nil
 }
@@ -255,21 +284,34 @@ func uiStatePath(cfg config.Config) string {
 // with a database. A path that only queries takes st.Reader, which carries no
 // write method at all.
 func openStore(cfg config.Config) (*store.Ledger, error) {
+	needsLock := true
 	if info, err := os.Stat(cfg.DBPath); err == nil && info.Size() > 0 {
 		version, err := store.RecordedSchemaVersion(context.Background(), cfg.DBPath)
-		if err != nil {
-			return nil, err
-		}
-		if version > 0 && version < store.SchemaVersion {
-			release, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
-			if err != nil {
-				return nil, fmt.Errorf("migration requires exclusive collection ownership: %w", err)
-			}
-			defer release()
-			return openStoreLocked(cfg)
-		}
+		needsLock = err != nil || version < store.SchemaVersion
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("inspect store %s: %w", cfg.DBPath, err)
+	}
+	if needsLock {
+		// A concurrent first opener may still be initializing the schema. Wait
+		// for its existing collection lock, then recheck/open under ownership.
+		deadline := time.Now().Add(supervisionBudget)
+		for {
+			release, err := acquireCollectorLock(context.Background(), cfg)
+			if err == nil {
+				defer release()
+				break
+			}
+			if !errors.Is(err, syscall.EWOULDBLOCK) {
+				return nil, err
+			}
+			if version, inspectErr := store.RecordedSchemaVersion(context.Background(), cfg.DBPath); inspectErr == nil && version == store.SchemaVersion {
+				return openStoreLocked(cfg)
+			}
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("initialization or migration requires exclusive collection ownership: %w", err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	return openStoreLocked(cfg)
 }

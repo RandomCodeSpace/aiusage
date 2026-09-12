@@ -102,6 +102,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -362,11 +363,15 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 
 	var prev ckptState
 	if cp != nil && cp.State != "" {
-		if err := json.Unmarshal([]byte(cp.State), &prev); err == nil {
-			if prev.DBSize == gate.DBSize && prev.DBMTime == gate.DBMTime &&
-				prev.WALSize == gate.WALSize && prev.WALMTime == gate.WALMTime {
-				return adapter.Observation{}, nil // untouched db: skip, keep stored checkpoint
-			}
+		if err := json.Unmarshal([]byte(cp.State), &prev); err != nil {
+			return adapter.Observation{}, fmt.Errorf("crush: decode checkpoint for %s: %w", src.Path, err)
+		}
+		if prev.DBSize <= 0 {
+			return adapter.Observation{}, fmt.Errorf("crush: checkpoint for %s has no database stamp", src.Path)
+		}
+		if prev.DBSize == gate.DBSize && prev.DBMTime == gate.DBMTime &&
+			prev.WALSize == gate.WALSize && prev.WALMTime == gate.WALMTime {
+			return adapter.Observation{}, nil // untouched db: skip, keep stored checkpoint
 		}
 	}
 
@@ -670,7 +675,12 @@ func rawJSON(p rawPayload) string {
 // running Crush, and SQLite documents wrong results when an immutable-flagged
 // file changes underneath a reader.
 func openReadOnly(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	dsn := u.String() + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err

@@ -330,11 +330,10 @@ func readStreamFile(path string, now time.Time) (streamReadResult, error) {
 				out.FormatErr = errors.Join(out.FormatErr, streamFormatError("result record missing conversation_id, status, or num_turns"))
 				continue
 			}
-			if !strings.EqualFold(rec.Result.Status, "SUCCESS") {
-				continue
-			}
 			if rec.Result.Usage == nil {
-				out.FormatErr = errors.Join(out.FormatErr, streamFormatError("successful result record missing usage"))
+				if strings.EqualFold(rec.Result.Status, "SUCCESS") {
+					out.FormatErr = errors.Join(out.FormatErr, streamFormatError("successful result record missing usage"))
+				}
 				continue
 			}
 			modelName := models[rec.Result.ConversationID]
@@ -360,7 +359,7 @@ func readStreamFile(path string, now time.Time) (streamReadResult, error) {
 				SessionID:       rec.Result.ConversationID,
 				Project:         metaProject,
 				ObservedTime:    now,
-				InputTokens:     u.InputTokens,
+				InputTokens:     u.InputTokens - u.CacheReadTokens,
 				OutputTokens:    u.OutputTokens,
 				CacheReadTokens: u.CacheReadTokens,
 				ReasoningTokens: u.ThinkingTokens,

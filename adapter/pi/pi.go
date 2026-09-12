@@ -40,6 +40,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -342,8 +343,8 @@ func excluded(lowerName string) bool {
 // those records establish have to survive the gap: the session id and cwd for
 // every row's identity, and the provider/model carry-forward that
 // compaction/branch_summary usage depends on (those entries name no model of
-// their own). Rejected marks a file the header check refused, so a growing
-// non-transcript is never tail-read as though it had been accepted.
+// their own). Rejected is retained for old checkpoints: refused sources now
+// return a format error without a checkpoint, and old refusals never tail-read.
 type ckptState struct {
 	SessionID string `json:"session,omitempty"`
 	Project   string `json:"project,omitempty"`
@@ -373,6 +374,10 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("%s: stat %s: %w", a.tool, src.Path, err)
 	}
+	return a.collectReader(ctx, src, cp, f, fi)
+}
+
+func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint, f io.ReadSeeker, fi os.FileInfo) (adapter.Observation, error) {
 	size, mtimeNS := fi.Size(), fi.ModTime().UnixNano()
 
 	var (
@@ -396,62 +401,62 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		}
 	}
 
-	obs, newState, consumed := a.readSession(ctx, f, src.Path, start, state)
-	stateJSON, err := json.Marshal(newState)
-	if err != nil {
-		return obs, nil // no checkpoint: the next cycle re-reads and re-derives
+	obs, newState, consumed, checkpointOK, err := a.readSession(ctx, f, src.Path, start, state)
+	if !checkpointOK {
+		return obs, err
+	}
+	stateJSON, marshalErr := json.Marshal(newState)
+	if marshalErr != nil {
+		return obs, err // no checkpoint: the next cycle re-reads and re-derives
 	}
 	obs.Checkpoint = &model.SourceCheckpoint{
 		Tool: a.tool, SourcePath: src.Path,
 		Size: size, MTimeNS: mtimeNS, Offset: consumed, State: string(stateJSON),
 	}
-	return obs, nil
+	return obs, err
 }
 
 // readSession parses the transcript from the reader's current position.
-func (a Adapter) readSession(ctx context.Context, r io.Reader, path string, start int64, state ckptState) (adapter.Observation, ckptState, int64) {
+func (a Adapter) readSession(ctx context.Context, r io.Reader, path string, start int64, state ckptState) (adapter.Observation, ckptState, int64, bool, error) {
 	var (
-		obs      adapter.Observation
-		consumed = start
-		br       = bufio.NewReaderSize(r, 64*1024)
-		first    = start == 0
+		obs         adapter.Observation
+		consumed    = start
+		br          = bufio.NewReaderSize(r, 64*1024)
+		first       = start == 0
+		diagnostics error
 	)
-
 	for {
 		if ctx.Err() != nil {
-			return obs, state, consumed
+			return obs, state, consumed, false, ctx.Err()
 		}
 		raw, rerr := br.ReadBytes('\n')
 		terminated := rerr == nil
 		if rerr != nil && rerr != io.EOF {
-			break // unreadable remainder: keep what we have, stop the offset here
+			return obs, state, consumed, false, fmt.Errorf("%s: read %s: %w", a.tool, path, rerr)
 		}
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) > 0 {
 			var e entry
-			if err := json.Unmarshal(trimmed, &e); err != nil {
-				// A malformed line must not drop the rest of the file. An
-				// unterminated malformed tail is a write in progress: leave the
-				// offset before it so the finished line is read next cycle.
+			decodeErr := json.Unmarshal(trimmed, &e)
+			if decodeErr != nil {
+				// The writer may still be completing an unterminated record. A complete
+				// malformed record is visible but does not prevent later valid rows.
 				if !terminated {
 					break
 				}
-			} else {
-				if first {
-					first = false
-					// THE HEADER CHECK. A pi transcript always opens with its
-					// session header — SessionManager writes it before anything
-					// else and refuses to open a file that does not parse as one.
-					// Any other first record means this is not a transcript
-					// (OpenClaw's trajectory sidecar opens with
-					// `"type":"session.started"`, one dot away from passing a
-					// sloppier test), and reading on would count another file's
-					// copy of these tokens.
-					if e.Type != "session" {
-						state.Rejected = true
-						return adapter.Observation{}, state, 0
-					}
+				var typeErr *json.UnmarshalTypeError
+				if errors.As(decodeErr, &typeErr) && (first || typeErr.Field == "type" || e.Type == "session" || e.Type == "message" || e.Usage != nil) {
+					return obs, state, consumed, false, fmt.Errorf("%s: %s at byte %d: %w: incompatible %s", a.tool, path, consumed, adapter.ErrSourceFormat, typeErr.Field)
 				}
+				diagnostics = errors.Join(diagnostics, fmt.Errorf("%s: %s at byte %d: malformed record: %w", a.tool, path, consumed, decodeErr))
+			} else {
+				if anchor := missingAnchor(e, first); anchor != "" {
+					if !terminated {
+						break
+					}
+					return obs, state, consumed, false, errors.Join(diagnostics, fmt.Errorf("%s: %s at byte %d: %w: missing or incompatible %s", a.tool, path, consumed, adapter.ErrSourceFormat, anchor))
+				}
+				first = false
 				a.apply(&obs, &state, e, path)
 			}
 		}
@@ -459,12 +464,65 @@ func (a Adapter) readSession(ctx context.Context, r io.Reader, path string, star
 			consumed += int64(len(raw))
 			continue
 		}
-		// Complete-but-unterminated final line: its records were emitted, but the
-		// offset stays before it. If it was mid-append the next cycle re-reads the
-		// whole line and the re-derived dedup keys collapse in the store.
+		// Even valid unterminated JSON is replayed after the writer adds its newline.
 		break
 	}
-	return obs, state, consumed
+	if ctx.Err() != nil {
+		return obs, state, consumed, false, ctx.Err()
+	}
+	if first && consumed > 0 {
+		return obs, state, consumed, false, errors.Join(diagnostics, fmt.Errorf("%s: %s: %w: missing session header", a.tool, path, adapter.ErrSourceFormat))
+	}
+	return obs, state, consumed, true, diagnostics
+}
+
+// Required facts are checked on the existing allow-listed decode. Content is
+// not decoded again just to validate a transcript envelope.
+func missingAnchor(e entry, first bool) string {
+	if first && e.Type != "session" {
+		return "type=session"
+	}
+	if e.Type == "session" {
+		if e.ID == "" {
+			return "session.id"
+		}
+		if parseTime(e.Timestamp).IsZero() {
+			return "session.timestamp"
+		}
+		if e.CWD == "" {
+			return "session.cwd"
+		}
+	}
+	if e.Type == "message" {
+		if e.Message == nil || e.Message.Role == "" {
+			return "message.role"
+		}
+		if e.Message.Role == "assistant" && e.Message.Usage == nil {
+			return "message.usage"
+		}
+	}
+	if e.Message != nil && e.Message.Role == "assistant" && e.Type != "message" {
+		return "type=message"
+	}
+	var u *usage
+	if e.Type == "message" && e.Message != nil && e.Message.Role == "assistant" {
+		u = e.Message.Usage
+	}
+	if e.Type == "compaction" || e.Type == "branch_summary" {
+		u = e.Usage
+	}
+	if u != nil {
+		if e.ID == "" {
+			return "usage entry.id"
+		}
+		if parseTime(e.Timestamp).IsZero() {
+			return "usage entry.timestamp"
+		}
+		if u.Input == nil || u.Output == nil {
+			return "usage.input/output"
+		}
+	}
+	return ""
 }
 
 // apply folds one decoded entry into the observation and the carry-forward state.
@@ -535,13 +593,20 @@ func (a Adapter) apply(obs *adapter.Observation, state *ckptState, e entry, path
 func (a Adapter) event(e entry, u usage, mdl, provider, api, responseModel, responseID, stopReason string,
 	state ckptState, path string) (model.UsageEvent, bool) {
 
-	in := adapter.NonNeg(u.Input)
-	out := adapter.NonNeg(u.Output)
+	in := adapter.NonNeg(*u.Input)
+	out := adapter.NonNeg(*u.Output)
 	cr := adapter.NonNeg(u.CacheRead)
 	cw := adapter.NonNeg(u.CacheWrite)
 	// reasoning is a SUBSET of output (pi-ai types.d.ts: "output already includes
 	// these tokens"), so it is reported but never added to anything.
-	reasoning := adapter.NonNeg(u.Reasoning)
+	reasoning := int64(0)
+	if u.Reasoning != nil {
+		reasoning = adapter.NonNeg(*u.Reasoning)
+	}
+	keyReasoning := min(reasoning, out)
+	if u.Reasoning == nil && a.tool == model.ToolOpenClaw && u.ReasoningTokens != nil {
+		reasoning = adapter.NonNeg(*u.ReasoningTokens)
+	}
 	if reasoning > out {
 		reasoning = out
 	}
@@ -586,7 +651,10 @@ func (a Adapter) event(e entry, u usage, mdl, provider, api, responseModel, resp
 		SourcePath:          path,
 		Kind:                model.KindUsage,
 	}
-	ev.DedupKey = a.dedupKey(e, when, mdl, provider, api, in, out, cr, cw, reasoning, total, u.Cost.Total)
+	// The established key predates OpenClaw's reasoningTokens spelling.
+	// Keep its reasoning component so replaying an existing source after this
+	// correction cannot insert the same billed tokens under a new identity.
+	ev.DedupKey = a.dedupKey(e, when, mdl, provider, api, in, out, cr, cw, keyReasoning, total, u.Cost.Total)
 	// The source's own cost, in USD, computed by pi from its model catalogue.
 	// Stamped only when positive: a stamped zero would assert the request was
 	// free, and an append-only ledger cannot take that back. Zero here means

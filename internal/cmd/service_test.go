@@ -31,6 +31,7 @@ import (
 // exactly the machine-without-systemd case, and any test that wants supervision
 // installs its own fake with stubSupervisor.
 func TestMain(m *testing.M) {
+	collectorProcess = func(context.Context, int) (string, bool) { return "", false }
 	newSupervisor = func() *service.Manager {
 		return &service.Manager{
 			UnitDir: filepath.Join(os.TempDir(), "aiusage-tests-never-written"),
@@ -45,6 +46,7 @@ func TestMain(m *testing.M) {
 // fakeUnits is a scriptable stand-in for systemctl and loginctl, tracking the
 // enabled/active state the Manager queries.
 type fakeUnits struct {
+	pid     int
 	calls   []string
 	enabled map[string]bool
 	active  map[string]bool
@@ -152,6 +154,8 @@ func (f *fakeUnits) run(ctx context.Context, name string, args ...string) ([]byt
 	}
 
 	switch verb {
+	case "show":
+		return []byte(strconv.Itoa(f.pid)), nil
 	case "show-environment", "daemon-reload", "enable-linger":
 		return nil, nil
 	case "show-user":
@@ -798,6 +802,9 @@ func TestEnsureDaemonRestartsTheUnitOnBuildMismatch(t *testing.T) {
 
 	dirState := t.TempDir()
 	pidPath := seedLock(t, dirState)
+	if err := os.WriteFile(pidPath, []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	release := holdLock(t, pidPath)
 	defer release()
 
@@ -813,6 +820,7 @@ func TestEnsureDaemonRestartsTheUnitOnBuildMismatch(t *testing.T) {
 	}
 	f.active[service.CollectUnit] = true
 	f.enabled[service.CollectUnit] = true
+	f.pid = 12345
 
 	calls, restore := stubSpawn(t)
 	defer restore()
@@ -988,6 +996,7 @@ func TestSetupInstallsAndRemoves(t *testing.T) {
 // automatic install: being asked is consent, so an explicit setup writes the
 // overrides it was handed into the unit.
 func TestSetupBakesTheFlagsItWasGiven(t *testing.T) {
+	isolateState(t)
 	_, dir := stubSupervisor(t)
 	db := filepath.Join(t.TempDir(), "elsewhere.db")
 
@@ -1007,6 +1016,7 @@ func TestSetupBakesTheFlagsItWasGiven(t *testing.T) {
 // TestSetupInstallsOnlyTheCollector: aiusage supervises one process. A second
 // unit file in the directory would be one this CLI never accounted for.
 func TestSetupInstallsOnlyTheCollector(t *testing.T) {
+	isolateState(t)
 	_, dir := stubSupervisor(t)
 
 	out, err := runCmd(t, "--config", offlineConfig(t), "setup")
@@ -1029,6 +1039,7 @@ func TestSetupInstallsOnlyTheCollector(t *testing.T) {
 // TestSetupForceRewrites: the only path that replaces a unit file the user may
 // have edited.
 func TestSetupForceRewrites(t *testing.T) {
+	isolateState(t)
 	_, dir := stubSupervisor(t)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir units: %v", err)
@@ -1137,6 +1148,7 @@ func TestSetupWithoutDarwinGUIChangesNothing(t *testing.T) {
 }
 
 func TestSetupRestoresDetachedCollectorAfterLaunchdActivationFailure(t *testing.T) {
+	stubCollectorEvidence(t, "", true)
 	f, dir := stubLaunchdSupervisor(t)
 	f.fail["bootstrap"] = errors.New("bootstrap refused")
 	t.Setenv("XDG_DATA_HOME", "")
@@ -1328,6 +1340,7 @@ func TestDoctorSupervisionCannotOutlastItsBudget(t *testing.T) {
 // waiting. What it may not do is hang: whatever happened is printed, and the
 // error names the deadline rather than the signal a killed process reports.
 func TestSetupCannotOutlastItsBudget(t *testing.T) {
+	isolateState(t)
 	f, dir := stubSupervisor(t)
 	f.delay = 150 * time.Millisecond
 	setSetupBudget(t, 200*time.Millisecond)

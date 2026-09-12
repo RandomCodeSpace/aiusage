@@ -38,9 +38,11 @@ binary=""
 pid_path="$lifecycle_root/state/aiusage.pid"
 version_path="$lifecycle_root/state/daemon.version"
 config_existed=0
-config_dir_existed=0
-plist_dir_existed=0
+config_dir_existed=1
+plist_dir_existed=1
 failure_path=""
+config_snapshot_ready=0
+config_touched=0
 
 clean_run() {
 	env -i \
@@ -59,6 +61,10 @@ run_with_failure() {
 }
 
 cleanup() {
+	local status=$? restore_ok=1
+	# A handled cancellation must finish restoring the runner's configuration.
+	trap - EXIT
+	trap '' HUP INT TERM
 	set +e
 	/bin/launchctl bootout "$launch_target" >/dev/null 2>&1
 	if [[ -f "$pid_path" ]]; then
@@ -68,10 +74,12 @@ cleanup() {
 		fi
 	fi
 	rm -f -- "$plist_path"
-	if [[ "$config_existed" -eq 1 ]]; then
-		cp -p "$lifecycle_root/original-config.json" "$default_config"
-	else
-		rm -f -- "$default_config"
+	if [[ "$config_snapshot_ready" -eq 1 && "$config_touched" -eq 1 ]]; then
+		if [[ "$config_existed" -eq 1 ]]; then
+			cp -p "$lifecycle_root/original-config.json" "$default_config" || restore_ok=0
+		else
+			rm -f -- "$default_config" || restore_ok=0
+		fi
 	fi
 	if [[ "$config_dir_existed" -eq 0 ]]; then
 		rmdir "$default_config_dir" >/dev/null 2>&1
@@ -79,19 +87,33 @@ cleanup() {
 	if [[ "$plist_dir_existed" -eq 0 ]]; then
 		rmdir "$plist_dir" >/dev/null 2>&1
 	fi
-	rm -rf -- "$lifecycle_root"
+	if [[ "$restore_ok" -eq 1 ]]; then
+		rm -rf -- "$lifecycle_root"
+	else
+		echo "failed to restore runner configuration; recovery files retained at $lifecycle_root" >&2
+		if [[ "$status" -eq 0 ]]; then status=1; fi
+	fi
+	exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ -d "$default_config_dir" ]]; then
 	config_dir_existed=1
+else
+	config_dir_existed=0
 fi
 if [[ -f "$default_config" ]]; then
 	config_existed=1
 	cp -p "$default_config" "$lifecycle_root/original-config.json"
 fi
+config_snapshot_ready=1
 if [[ -d "$plist_dir" ]]; then
 	plist_dir_existed=1
+else
+	plist_dir_existed=0
 fi
 mkdir -p "$default_config_dir" "$plist_dir" "$lifecycle_root/extract" \
 	"$lifecycle_root/data" "$lifecycle_root/state" "$lifecycle_root/discovery"
@@ -110,6 +132,7 @@ log_path="$lifecycle_root/state/aiusage.log"
 discovery_dir="$lifecycle_root/discovery"
 write_config() {
 	configured_log="$1"
+	config_touched=1
 	printf '{"db_path":"%s","pid_path":"%s","log_path":"%s","home":"%s","pricing":{"refresh":false}}\n' \
 		"$db_path" "$pid_path" "$configured_log" "$discovery_dir" >"$default_config"
 	chmod 0600 "$default_config"

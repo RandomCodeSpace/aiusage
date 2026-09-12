@@ -104,6 +104,10 @@ func runSetup(c *cobra.Command, sf setupFlags) error {
 	ctx, cancel := context.WithTimeout(cmdContext(c), setupBudget)
 	defer cancel()
 
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	m := newSupervisor()
 	if !m.Available(ctx) {
 		fmt.Fprintln(out, noSupervisionNotice(m.Kind()))
@@ -127,10 +131,6 @@ func runSetup(c *cobra.Command, sf setupFlags) error {
 		return nil
 	}
 
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
 	o, err := supervisionOptions(cfg, globalArgs(flags))
 	if err != nil {
 		return err
@@ -142,13 +142,21 @@ func runSetup(c *cobra.Command, sf setupFlags) error {
 	// native supervision. Stop only a collector the native manager did not
 	// start, then restore that detached collector if activation fails.
 	detachedStopped := false
-	if running, pid := daemon.Status(cfg); running {
-		nativeActive, stateKnown := nativeCollectorState(m.Status(ctx))
-		if !stateKnown {
-			return fmt.Errorf("cannot determine whether the running collector belongs to %s; no lifecycle change was made", m.Kind())
+	previous, legacy, err := legacyCollector(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	collectorCfg := cfg
+	if legacy {
+		collectorCfg = previous
+	}
+	if running, pid := daemon.Status(collectorCfg); running {
+		native, err := collectorOwner(ctx, m, pid)
+		if err != nil {
+			return err
 		}
-		if !nativeActive {
-			if err := stopDaemon(cfg, pid); err != nil {
+		if !native {
+			if err := stopDaemon(collectorCfg, pid); err != nil {
 				return fmt.Errorf("stop detached collector before %s activation: %w", m.Kind(), err)
 			}
 			detachedStopped = true

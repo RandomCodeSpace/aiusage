@@ -42,6 +42,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -239,6 +240,14 @@ func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
 		return r, errors.New("install: the aiusage binary has no resolvable path")
 	}
 
+	if strings.ContainsFunc(o.Exec, func(r rune) bool { return r < 32 || r == 127 }) {
+		return r, errors.New("install: systemd cannot represent a control character in the executable path")
+	}
+	for _, value := range append([]string{o.Exec, o.DataDir, o.StateDir}, o.Args...) {
+		if strings.ContainsRune(value, 0) {
+			return r, errors.New("install: unit value contains an unrepresentable NUL byte")
+		}
+	}
 	dir := m.unitDir()
 	dirExisted := fileExists(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -249,8 +258,17 @@ func (m *Manager) Install(ctx context.Context, o Options) (Result, error) {
 	u := unitPlan{name: CollectUnit}
 	path := filepath.Join(dir, u.name)
 	existed := fileExists(path)
-	wasEnabled := m.isEnabled(ctx, u.name)
-	wasActive := m.isActive(ctx, u.name)
+	wasEnabled, enabledKnown := m.enabledState(ctx, u.name)
+	wasActive, activeKnown := m.activeState(ctx, u.name)
+	if !enabledKnown || !activeKnown {
+		if !dirExisted {
+			_ = os.Remove(dir)
+		}
+		if ctx.Err() != nil {
+			return r, fmt.Errorf("inspect %s before installation: supervision deadline: %w", u.name, ctx.Err())
+		}
+		return r, fmt.Errorf("inspect %s before installation: service state is unknown", u.name)
+	}
 	var original []byte
 	originalMode := os.FileMode(unitFileMode)
 	if existed && o.Force {
@@ -387,16 +405,21 @@ func (m *Manager) Remove(ctx context.Context, force bool) (Result, error) {
 		r.Refused++
 		return r, nil
 	}
-	if m.isActive(ctx, name) {
+	active, activeKnown := m.activeState(ctx, name)
+	enabled, enabledKnown := m.enabledState(ctx, name)
+	if !activeKnown || !enabledKnown {
+		return r, fmt.Errorf("inspect %s before removal: service state is unknown", name)
+	}
+	if active {
 		if _, err := m.systemctl(ctx, "stop", name); err != nil {
-			r.addf("could not stop %s: %v", name, err)
+			return r, fmt.Errorf("stop %s before removal: %w", name, err)
 		} else {
 			r.change("stopped %s", name)
 		}
 	}
-	if m.isEnabled(ctx, name) {
+	if enabled {
 		if _, err := m.systemctl(ctx, "disable", name); err != nil {
-			r.addf("could not disable %s: %v", name, err)
+			return r, fmt.Errorf("disable %s before removal: %w", name, err)
 		} else {
 			r.change("disabled %s", name)
 		}
@@ -406,7 +429,7 @@ func (m *Manager) Remove(ctx context.Context, force bool) (Result, error) {
 	}
 	r.change("removed %s", path)
 	if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
-		r.addf("could not reload the service manager: %v", err)
+		return r, fmt.Errorf("removed %s, but could not reload the service manager: %w", path, err)
 	}
 	return r, nil
 }
@@ -430,9 +453,10 @@ func (m *Manager) Status(ctx context.Context) []UnitStatus {
 	}
 	st := UnitStatus{Name: CollectUnit, Installed: fileExists(filepath.Join(m.unitDir(), CollectUnit))}
 	if st.Installed && ctx.Err() == nil {
-		st.Enabled = m.isEnabled(ctx, CollectUnit)
-		st.Active = m.isActive(ctx, CollectUnit)
-		st.StateKnown = ctx.Err() == nil
+		var enabledKnown, activeKnown bool
+		st.Enabled, enabledKnown = m.enabledState(ctx, CollectUnit)
+		st.Active, activeKnown = m.activeState(ctx, CollectUnit)
+		st.StateKnown = enabledKnown && activeKnown
 		st.Persistence = m.lingerState(ctx)
 	}
 	return []UnitStatus{st}
@@ -644,6 +668,64 @@ func (m *Manager) isEnabled(ctx context.Context, name string) bool {
 func (m *Manager) isActive(ctx context.Context, name string) bool {
 	out, err := m.systemctl(ctx, "is-active", name)
 	return err == nil && hasStateLine(out, "active")
+}
+
+func (m *Manager) enabledState(ctx context.Context, name string) (bool, bool) {
+	return m.queryState(ctx, "is-enabled", name, "enabled", []string{"disabled", "enabled-runtime", "static", "indirect", "masked", "masked-runtime", "linked", "linked-runtime", "alias", "generated", "transient", "not-found"})
+}
+
+func (m *Manager) activeState(ctx context.Context, name string) (bool, bool) {
+	// Transitional states do not prove that the collector has stopped. Treat
+	// them as unknown so removal cannot skip stop and unlink a live unit.
+	return m.queryState(ctx, "is-active", name, "active", []string{"inactive", "failed"})
+}
+
+func (m *Manager) queryState(ctx context.Context, verb, name, positive string, negatives []string) (bool, bool) {
+	out, err := m.systemctl(ctx, verb, name)
+	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false, false
+	}
+	if err == nil && hasStateLine(out, positive) {
+		return true, true
+	}
+	for _, state := range negatives {
+		if hasStateLine(out, state) {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// CollectorPID asks the running native manager which process it owns. Zero with
+// known=true means it has no active collector; an unavailable answer is unknown.
+func (m *Manager) CollectorPID(ctx context.Context) (pid int, known bool) {
+	if m.goos() == "darwin" {
+		out, err := m.launchctl(ctx, "print", m.launchTarget())
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return 0, false
+			}
+			for _, absent := range []string{"could not find service", "service could not be found"} {
+				if strings.Contains(strings.ToLower(out), absent) {
+					return 0, true
+				}
+			}
+			return 0, false
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if value, ok := strings.CutPrefix(strings.TrimSpace(line), "pid = "); ok {
+				pid, err := strconv.Atoi(value)
+				return pid, err == nil && pid > 0
+			}
+		}
+		return 0, hasStateLine(out, "state = waiting") || hasStateLine(out, "state = not running")
+	}
+	out, err := m.systemctl(ctx, "show", CollectUnit, "--property=MainPID", "--value")
+	if err != nil || ctx.Err() != nil {
+		return 0, false
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(out))
+	return pid, err == nil && pid >= 0
 }
 
 // hasStateLine reports whether any line of a systemctl answer is exactly want.

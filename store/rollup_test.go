@@ -324,17 +324,15 @@ func TestRollupFoldsSubHourEventsInKolkata(t *testing.T) {
 
 	st := openTemp(t)
 	if off := utcOffsetSeconds(t, st, subHourFoldBase); off != kolkataOffsetSeconds {
-		// No tzdata on this machine: Go fell back to UTC and the child cannot
-		// test what it was started for. Say so instead of passing quietly.
-		t.Skipf("TZ=Asia/Kolkata resolved to offset %ds, not %ds; this machine has no zone database",
+		// This test must prove the SQL offset before testing bucket equality.
+		t.Fatalf("TZ=Asia/Kolkata resolved to offset %ds, not %ds; this machine has no zone database",
 			off, kolkataOffsetSeconds)
 	}
 	assertSubHourFoldMatchesLedger(t, st)
 }
 
 // runTestInZone re-runs one test of this binary in another timezone and fails
-// if the child does. A child that skipped skips the parent with the same
-// reason, so a missing zone database never reads as a pass.
+// if the child does. A skip cannot satisfy this required timezone proof.
 func runTestInZone(t *testing.T, name, zone string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run", "^"+name+"$", "-test.v")
@@ -344,7 +342,7 @@ func runTestInZone(t *testing.T, name, zone string) {
 		t.Fatalf("%s under TZ=%s: %v\n%s", name, zone, err, out)
 	}
 	if strings.Contains(string(out), "--- SKIP") {
-		t.Skipf("%s skipped itself under TZ=%s:\n%s", name, zone, out)
+		t.Fatalf("%s skipped itself under TZ=%s:\n%s", name, zone, out)
 	}
 	if !strings.Contains(string(out), "--- PASS") {
 		t.Fatalf("%s under TZ=%s did not report a pass:\n%s", name, zone, out)
