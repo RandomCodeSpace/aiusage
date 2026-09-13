@@ -124,6 +124,9 @@ jobs:
           done
 
       - name: Prepare local annotated tag
+        env:
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           if git show-ref --verify --quiet "refs/tags/$VERSION"; then
             peeled="$(git rev-parse "refs/tags/$VERSION^{}")"
@@ -341,6 +344,9 @@ jobs:
         run: go run ./internal/adaptercompatcheck --mode release >/dev/null
 
       - name: Prepare immutable annotated tag
+        env:
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           if git show-ref --verify --quiet "refs/tags/$VERSION"; then
             peeled="$(git rev-parse "refs/tags/$VERSION^{}")"
