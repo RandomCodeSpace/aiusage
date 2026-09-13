@@ -302,11 +302,11 @@ func costCell(costs []Cost, i int) string {
 func columnWidths(headers []string, rows [][]string, totals []string) []int {
 	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = len(h)
+		widths[i] = lipgloss.Width(h)
 	}
 	consider := func(r []string) {
 		for i := 0; i < len(r) && i < len(widths); i++ {
-			if l := len(r[i]); l > widths[i] {
+			if l := lipgloss.Width(r[i]); l > widths[i] {
 				widths[i] = l
 			}
 		}
@@ -370,17 +370,17 @@ func separator(widths []int) string {
 }
 
 func padRight(s string, w int) string {
-	if len(s) >= w {
+	if lipgloss.Width(s) >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-lipgloss.Width(s))
 }
 
 func padLeft(s string, w int) string {
-	if len(s) >= w {
+	if lipgloss.Width(s) >= w {
 		return s
 	}
-	return strings.Repeat(" ", w-len(s)) + s
+	return strings.Repeat(" ", w-lipgloss.Width(s)) + s
 }
 
 // humanize formats a token/event count compactly: values below 1000 are shown

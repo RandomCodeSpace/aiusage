@@ -99,7 +99,7 @@ func newRunCmd() *cobra.Command {
 			// Take collection ownership before store.Open can inspect or migrate an
 			// older schema. The daemon loop keeps using this same lock; there is no
 			// release/reacquire window for an old collector to enter.
-			release, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
+			release, started, err := acquireCollectorStartupLock(cmdContext(c), cfg)
 			if err != nil {
 				return err
 			}
@@ -112,6 +112,9 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
+			// Startup now owns a complete ledger and the namespaced lock. The
+			// temporary legacy guard can release without dropping collection ownership.
+			started()
 
 			ctx, stop := signal.NotifyContext(cmdContext(c), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()

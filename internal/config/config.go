@@ -15,6 +15,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,6 +175,42 @@ func (c *Config) SetHome(home string) {
 	}
 }
 
+// ResolveCollectorPaths gives a derived nondefault ledger its own lock identity.
+// Explicit PID paths, the default basename, log location and UI directory stay fixed.
+func (c *Config) ResolveCollectorPaths() error {
+	for name, p := range map[string]*string{"db_path": &c.DBPath, "pid_path": &c.PIDPath, "log_path": &c.LogPath, "home": &c.Home} {
+		if *p == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(*p)
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", name, err)
+		}
+		*p = absolute
+	}
+	if c.derivedPID {
+		defaultDB, err := filepath.Abs(filepath.Join(dataHome(c.Home), appName, dbFile))
+		if err != nil {
+			return fmt.Errorf("resolve default database: %w", err)
+		}
+		base := pidFile
+		if c.DBPath != defaultDB {
+			base = fmt.Sprintf("aiusage-%x.pid", sha256.Sum256([]byte(c.DBPath)))
+		}
+		c.PIDPath = filepath.Join(filepath.Dir(c.PIDPath), base)
+	}
+	return nil
+}
+
+// LegacyPIDPath identifies the pre-isolation lock only for automatically derived
+// nondefault collectors. An explicit PID path is already the user's contract.
+func (c Config) LegacyPIDPath() string {
+	if c.derivedPID && filepath.Base(c.PIDPath) != pidFile {
+		return filepath.Join(filepath.Dir(c.PIDPath), pidFile)
+	}
+	return ""
+}
+
 // DefaultConfigPath returns the conventional config file location
 // (~/.config/aiusage/config.json, honoring XDG_CONFIG_HOME).
 func DefaultConfigPath() string {
@@ -222,6 +259,9 @@ func Load(path string) (Config, error) {
 	// instead of comparing token counts against a negative number.
 	if cfg.TUI.LeverageInputFloor < 0 {
 		cfg.TUI.LeverageInputFloor = 0
+	}
+	if cfg.PIDPath == "" {
+		return Config{}, errors.New("pid_path must not be empty")
 	}
 	return cfg, nil
 }
@@ -303,6 +343,12 @@ func mergeFile(cfg *Config, path string) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(cfg); err != nil {
 		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err == nil {
+		if _, explicit := fields["pid_path"]; explicit {
+			cfg.derivedPID = false
+		}
 	}
 	if dec.More() {
 		return fmt.Errorf("parse config %s: unexpected trailing data", path)

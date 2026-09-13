@@ -6,8 +6,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/RandomCodeSpace/aiusage/collect"
-	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
-	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
 
 // onceRegistry is a seam so tests can drive `once` with failing adapters.
@@ -35,7 +33,7 @@ func newOnceCmd() *cobra.Command {
 			// and both insert the delta, double counting it. The identity is
 			// stamped so a concurrent ensureDaemon treats this cycle as a
 			// same-build daemon instead of force-restarting it.
-			release, err := daemon.AcquireCollectionLock(cfg.PIDPath, buildinfo.Identity())
+			release, err := acquireCollectorLock(cmdContext(c), cfg)
 			if err != nil {
 				return err
 			}
@@ -72,6 +70,12 @@ func printCycleStats(c *cobra.Command, s collect.CycleStats) {
 	out := c.OutOrStdout()
 	if s.RollupRebuilt {
 		fmt.Fprintln(out, "rebuilt the derived rollup from the ledger")
+	}
+	if s.CodeChangesUpdated > 0 {
+		fmt.Fprintf(out, "updated line counts for %d turns\n", s.CodeChangesUpdated)
+	}
+	if s.PricesSynced > 0 {
+		fmt.Fprintf(out, "priced %d previously unpriced requests\n", s.PricesSynced)
 	}
 	// activity is reported separately from inserted: they count different
 	// ledgers, and a pass that appended tens of thousands of tool calls while

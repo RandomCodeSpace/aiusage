@@ -28,6 +28,10 @@ const claudeFixture = `{"timestamp":"2026-05-29T12:00:00Z","cwd":"/home/dev/proj
 // returns the home dir.
 func writeClaudeFixture(t *testing.T) string {
 	t.Helper()
+	// Discovery overrides otherwise escape --home and read the developer source tree.
+	for _, name := range discoveryEnv() {
+		t.Setenv(name, "")
+	}
 	home := t.TempDir()
 	projDir := filepath.Join(home, ".claude", "projects", "demo")
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -225,8 +229,8 @@ func TestLoadConfigHomeFlagMovesDerivedPaths(t *testing.T) {
 	if cfg.DBPath != "/pinned/usage.db" {
 		t.Errorf("DBPath = %q, want the explicit --db to win", cfg.DBPath)
 	}
-	if want := filepath.Join(home, ".local", "state", "aiusage", "aiusage.pid"); cfg.PIDPath != want {
-		t.Errorf("PIDPath = %q, want %q (still home-derived)", cfg.PIDPath, want)
+	if want := filepath.Join(home, ".local", "state", "aiusage", "aiusage.pid"); cfg.LegacyPIDPath() != want || cfg.PIDPath == want {
+		t.Errorf("PIDPath = %q, want an isolated basename beside %q", cfg.PIDPath, want)
 	}
 }
 
@@ -372,17 +376,23 @@ func (failingAdapter) Capabilities() model.ToolCapability {
 func TestOnceFailsFastWhenDaemonHoldsLock(t *testing.T) {
 	home := writeClaudeFixture(t)
 	db := filepath.Join(t.TempDir(), "usage.db")
-	stateDir := isolateState(t)
+	isolateState(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
-	pidPath := filepath.Join(stateDir, "aiusage", "aiusage.pid")
+	cfgPath := offlineConfig(t)
+	setFlags(t, globalFlags{db: db, home: home, config: cfgPath})
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidPath := cfg.PIDPath
 	release, err := daemon.AcquireCollectionLock(pidPath, "fake-daemon-build")
 	if err != nil {
 		t.Fatalf("hold lock: %v", err)
 	}
 	defer release()
 
-	out, err := runCmd(t, "--db", db, "--home", home, "--config", offlineConfig(t), "once")
+	out, err := runCmd(t, "--db", db, "--home", home, "--config", cfgPath, "once")
 	if err == nil {
 		t.Fatalf("once should fail while the daemon holds the lock; output:\n%s", out)
 	}

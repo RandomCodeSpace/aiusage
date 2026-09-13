@@ -108,6 +108,13 @@ Activity dimensions overlap. A single agent turn can read a file, run a
 command, and call another tool, so activity columns should not be added
 together as one total.
 
+In Sessions, drill through OpenCode, model and project, then select a session
+to see its recorded lines added and removed. These are lifetime session totals from saved turn snapshots, across
+models and outside the selected date range. Counts refresh when OpenCode
+revises a snapshot; they are not a repository diff or a measure of authored
+code. Missing snapshots and unsupported tools show unknown; partial totals
+are marked. No source text or patches are stored for this feature.
+
 ## Everyday commands
 
 | Command | What it gives you |
@@ -122,7 +129,7 @@ together as one total.
 | `aiusage export` | JSON or CSV export |
 | `aiusage db` | Back up, verify, restore, or safely reset the database |
 | `aiusage setup` | Install background collection |
-| `aiusage version` | Build and schema version |
+| `aiusage version` | Build identity |
 
 Examples:
 
@@ -143,7 +150,7 @@ Run `aiusage <command> --help` for every option.
 | `Tab` | Move to the next view |
 | `t` | Change the time range |
 | `[` / `]` | Move the time window backward or forward |
-| `p` | Change provider scope |
+| `p` | Change the Overview or Activity pivot |
 | `/` | Search or filter the current view |
 | `s` | Change sorting |
 | `Enter` / `Esc` | Open or close details |
@@ -236,8 +243,19 @@ The default database is `~/.local/share/aiusage/usage.db`. Run
 - Normal reports and exports do not include raw metadata.
 
 Token collection itself is local. When pricing refresh is enabled, aiusage may
-download the LiteLLM price table and cache a successful response for 24 hours.
-If refresh fails, the bundled table remains in use and a later pass may retry.
+download price tables from LiteLLM and Models.dev. Both have JSON snapshots
+embedded in the binary, so pricing works offline without a first download.
+Models.dev refreshes at most once every 24 hours while the collector runs and
+falls back to its embedded snapshot if the refresh fails. A fresh local cache
+is reused across restarts. Set `pricing.refresh` to `false` to disable downloads.
+
+When rates become available for an older unpriced request, collection fills in
+its estimated cost automatically in batches. Already priced requests keep
+their original costs. Token counts and request identities stay unchanged, and
+the saved price source identifies the rates used for each estimate. Models.dev
+prices are provider-specific catalog estimates, including community rates where
+official prices are unavailable. Confirmed free models are recorded as zero;
+missing prices remain unpriced.
 
 <details>
 <summary><strong>Use aiusage from Go</strong></summary>

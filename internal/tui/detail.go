@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -86,7 +87,7 @@ func (m Model) detailLoadCmd() tea.Cmd {
 	// Same gate contract as loadCmd: taken on the UI thread at dispatch, so the
 	// detail flight this one replaces stops instead of finishing a query whose
 	// result handleDetailLoaded would drop on the sequence check.
-	mc.loadCtx = m.detail.next()
+	mc.loadCtx = m.data.loadContext(m.detail.next())
 	return func() tea.Msg {
 		mc.loadDetail()
 		return detailLoadedMsg{gen: gen, seq: seq, failed: mc.detailFailed()}
@@ -135,10 +136,16 @@ func (m Model) handleDetailLoaded(msg detailLoadedMsg) (Model, tea.Cmd) {
 	}
 	switch m.view {
 	case ViewOverview:
-		// Rebuild the overview coherently from the warm cache: the flight ran
-		// the full loader, so this re-derives timeline, composition and totals
-		// without touching SQLite (mirrors handleDataLoaded's reload).
-		m.loadOverview()
+		// Apply only a complete cached snapshot. Invalidation can happen after
+		// the flight finished; a miss requests another background load.
+		m.loadOverviewWith(true)
+		if m.detailWanted {
+			if m.fresh != FreshCold {
+				m.fresh = FreshCutIn
+			}
+		} else if m.err == nil {
+			m.fresh = FreshLive
+		}
 	case ViewByTool:
 		m.syncByToolDetail()
 	case ViewByModel:
@@ -149,11 +156,16 @@ func (m Model) handleDetailLoaded(msg detailLoadedMsg) (Model, tea.Cmd) {
 	// A failed flight left the cache cold, so the sync twin above just missed
 	// and re-armed detailWanted — scheduling again would redispatch the failing
 	// query every debounce interval. Render the honest per-pane failure instead;
-	// any later successful sync or load clears it. Overview is excluded: it has
-	// no per-pane flag and its failure surfaces through m.err.
-	if msg.failed && m.detailWanted && m.view != ViewOverview {
+	// any later successful sync or load clears it. Overview holds its picture
+	// and reports the failure through the existing freshness state.
+	if msg.failed && m.detailWanted {
 		m.detailWanted = false
-		m.failDetailPane()
+		if m.view == ViewOverview {
+			m.err = errors.New("overview detail load failed")
+			m.fresh = FreshStale
+		} else {
+			m.failDetailPane()
+		}
 	}
 	return m, nil
 }

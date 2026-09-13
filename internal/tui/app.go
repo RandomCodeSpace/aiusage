@@ -474,7 +474,7 @@ func (m Model) drill() (tea.Model, tea.Cmd) {
 
 // drillIntoBrowse pushes a crumb on the given dimension and switches to Browse.
 func (m Model) drillIntoBrowse(dim, val string) (tea.Model, tea.Cmd) {
-	if val == "" {
+	if val == "" && dim != "model" {
 		return m, nil
 	}
 	m.crumbs = append(m.crumbs, Crumb{Dim: dim, Value: val})

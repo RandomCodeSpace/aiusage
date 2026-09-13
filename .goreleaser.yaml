@@ -3,7 +3,8 @@
 # (vX.Y.Z) and injected into the binary via ldflags so `aiusage version` and the
 # CLI/daemon version-sync report the real release version instead of "dev".
 #
-# Local dry run:
+# Local dry run with GoReleaser v2.18.0:
+#   goreleaser check
 #   goreleaser release --snapshot --clean --skip=publish
 version: 2
 

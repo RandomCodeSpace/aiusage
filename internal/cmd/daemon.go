@@ -62,13 +62,13 @@ func daemonArgs(f globalFlags) []string {
 func globalArgs(f globalFlags) []string {
 	var args []string
 	if f.db != "" {
-		args = append(args, "--db", f.db)
+		args = append(args, "--db", absPath(f.db))
 	}
 	if f.config != "" {
 		args = append(args, "--config", absPath(f.config))
 	}
 	if f.home != "" {
-		args = append(args, "--home", f.home)
+		args = append(args, "--home", absPath(f.home))
 	}
 	if f.interval > 0 {
 		args = append(args, "--interval", strconv.Itoa(f.interval))
@@ -86,6 +86,20 @@ func absPath(p string) string {
 		return p
 	}
 	return abs
+}
+
+func resolveGlobalPaths(f globalFlags) (globalFlags, error) {
+	for name, p := range map[string]*string{"db": &f.db, "home": &f.home, "config": &f.config} {
+		if *p == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(*p)
+		if err != nil {
+			return f, fmt.Errorf("resolve --%s: %w", name, err)
+		}
+		*p = absolute
+	}
+	return f, nil
 }
 
 var spawnDaemon = func(cfg config.Config) error {
@@ -167,6 +181,15 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 	ctx, cancel := supervisionContext(ctx)
 	defer cancel()
 
+	requested := cfg
+	previous, legacy, err := legacyCollector(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if legacy {
+		cfg = previous
+		fmt.Fprintf(warn, "notice: reusing legacy collector state at %s for %s\n", cfg.PIDPath, cfg.DBPath)
+	}
 	running, pid := daemon.Status(cfg)
 	if !running {
 		if superviseStart(ctx, cfg, flags, warn) {
@@ -196,24 +219,40 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 		}
 		return nil
 	}
-	// A supervised collector is replaced by restarting its unit, not by killing
-	// it: systemd would only start it again anyway.
-	if superviseRestart(ctx, flags, warn) {
+	m := newSupervisor()
+	native, err := collectorOwner(ctx, m, pid)
+	if err != nil {
+		return err
+	}
+	if native && !legacy {
+		res, err := m.Restart(ctx)
+		if err != nil {
+			return err
+		}
+		if !res.Collecting {
+			return fmt.Errorf("native collector pid %d was not restarted", pid)
+		}
+		reportSupervision(warn, res)
 		return nil
+	}
+	if native {
+		stopped, err := m.StopCollection(ctx)
+		if err != nil {
+			return err
+		}
+		if !stopped {
+			return fmt.Errorf("native legacy collector pid %d was not stopped", pid)
+		}
+		// Restart the recorded native mode. The new binary derives its PID path.
+		if err := waitCollectorRelease(ctx, cfg); err != nil {
+			return err
+		}
+		return m.StartCollection(ctx)
 	}
 	if err := stopDaemon(cfg, pid); err != nil {
-		if pid > 0 {
-			return fmt.Errorf("daemon (pid %d, build %s) still running and collecting with the old build — stop it manually (kill %d): %w", pid, recorded, pid, err)
-		}
-		return fmt.Errorf("daemon (build %s) still running and collecting with the old build — stop the process holding %s.lock: %w", recorded, cfg.PIDPath, err)
+		return fmt.Errorf("stop detached collector pid %d: %w", pid, err)
 	}
-	// The daemon that was running here was not a unit (or Restart declined), so
-	// this is also the moment an unsupervised install can become a supervised
-	// one: the lock is free and nothing is collecting.
-	if superviseStart(ctx, cfg, flags, warn) {
-		return nil
-	}
-	return spawnDaemon(cfg)
+	return spawnDaemon(requested)
 }
 
 // restartOnMismatch decides whether an identity mismatch between the recorded

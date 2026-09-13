@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -333,23 +334,23 @@ func TestTrajectorySidecarIsNeitherDiscoveredNorRead(t *testing.T) {
 	obs, err := a.Collect(context.Background(), adapter.Source{
 		Tool: model.ToolOpenClaw, Class: model.EventLevel, Path: sidecar,
 	})
-	if err != nil {
-		t.Fatalf("collect sidecar: %v", err)
+	if !errors.Is(err, adapter.ErrSourceFormat) {
+		t.Fatalf("collect sidecar: %v, want format refusal", err)
 	}
 	if len(obs.Events) != 0 || len(obs.Activity) != 0 {
 		t.Fatalf("sidecar produced %d events and %d activity rows, want none",
 			len(obs.Events), len(obs.Activity))
 	}
-	if obs.Checkpoint == nil || !strings.Contains(obs.Checkpoint.State, `"rejected":true`) {
-		t.Fatalf("rejected file did not record the refusal: %+v", obs.Checkpoint)
+	if obs.Checkpoint != nil {
+		t.Fatalf("rejected file advanced checkpoint: %+v", obs.Checkpoint)
 	}
 	// A rejected file that later GROWS must not be tail-read as though its
 	// header had been accepted.
 	obs2, err := a.(adapter.Incremental).CollectIncremental(context.Background(),
 		adapter.Source{Tool: model.ToolOpenClaw, Path: sidecar},
-		&model.SourceCheckpoint{Size: 1, MTimeNS: 1, Offset: 500, State: obs.Checkpoint.State})
-	if err != nil {
-		t.Fatal(err)
+		&model.SourceCheckpoint{Size: 1, MTimeNS: 1, Offset: 500, State: `{"rejected":true}`})
+	if !errors.Is(err, adapter.ErrSourceFormat) || obs2.Checkpoint != nil {
+		t.Fatalf("grown rejected file: checkpoint=%v, err=%v", obs2.Checkpoint, err)
 	}
 	if len(obs2.Events) != 0 {
 		t.Fatalf("a grown rejected file yielded %d events", len(obs2.Events))
@@ -804,7 +805,11 @@ func TestMalformedLineDoesNotDropTheRest(t *testing.T) {
 		`{"type":"message" this is not json`,
 		`{"type":"message","id":"e2","timestamp":"2026-08-16T00:00:02.000Z","message":{"role":"assistant","provider":"p","model":"m","usage":{"input":4,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":5,"cost":{"total":0}}}}`,
 	})
-	obs := collectFile(t, NewPi(), filepath.Join(dir, "s.jsonl"))
+	path := filepath.Join(dir, "s.jsonl")
+	obs, err := NewPi().Collect(context.Background(), adapter.Source{Tool: model.ToolPi, Path: path})
+	if err == nil || errors.Is(err, adapter.ErrSourceFormat) || !strings.Contains(err.Error(), path) || obs.Checkpoint == nil {
+		t.Fatalf("complete poison: checkpoint=%v, err=%v", obs.Checkpoint, err)
+	}
 	if len(obs.Events) != 1 {
 		t.Fatalf("events = %d, want 1", len(obs.Events))
 	}

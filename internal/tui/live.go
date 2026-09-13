@@ -9,6 +9,8 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/RandomCodeSpace/aiusage/store"
 )
 
 // live.go wires instant-open + async loading + low-CPU live refresh.
@@ -165,7 +167,7 @@ func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
 	mc := m
 	dbPath := m.dbPath
 	gen := m.loadGen
-	mc.loadCtx = m.flight.next()
+	mc.loadCtx = m.data.loadContext(m.flight.next())
 	m.detail.stop() // a navigation moots the detail query under the old selection
 	return func() tea.Msg {
 		if delay > 0 {
@@ -233,6 +235,11 @@ func (m *Model) startLoad() tea.Cmd {
 func (m *Model) startLoadAfter(delay time.Duration) tea.Cmd {
 	m.loadGen++
 	m.loadNow = m.data.now()
+	if m.view == ViewBrowse {
+		// Refresh and navigation must not present old session counts as the
+		// incoming selection's detail while its background query is pending.
+		m.browse.SetCodeChanges(store.CodeChangeSummary{}, false, false)
+	}
 	// A load replaces the rows under the selection — a drill, a range or sort
 	// change, a live refresh — so whatever a press selected is gone. Dropping the
 	// drill flag here covers every one of those paths at their single choke

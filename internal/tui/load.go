@@ -72,8 +72,30 @@ func (m *Model) reloadWith(cacheOnlyDetail bool) {
 // bars. When the scrub crosshair is pinned, the KPI tiles + side bars re-price
 // to the scrubbed bucket via syncScrub (called after the base load).
 func (m *Model) loadOverview() {
+	m.loadOverviewWith(false)
+}
+
+// loadOverviewWith applies a complete set of cached summaries atomically when
+// cacheOnly is true. A missing summary leaves the displayed snapshot intact.
+func (m *Model) loadOverviewWith(cacheOnly bool) {
 	now := m.qnow()
-	tl, dim, err := m.data.Timeline(m.qctx(), now, m.span(), m.crumbs)
+	dim := timelineDim(m.rng)
+	var tl, byTool, comp *store.Summary
+	var prev store.Bucket
+	var err error
+	if cacheOnly {
+		var okT, okB, okC, okP bool
+		tl, _, okT = m.data.TimelineCached(now, m.span(), m.crumbs)
+		byTool, okB = m.data.GroupByCached(now, m.span(), m.crumbs, "tool", SortTotal)
+		comp, okC = m.data.cachedSummary(m.data.filterFor(m.qctx(), now, m.span(), m.crumbs, []string{dim, "tool"}))
+		prev, okP = m.prevTotalsCached()
+		if !okT || !okB || !okC || !okP {
+			m.detailWanted = true
+			return
+		}
+	} else {
+		tl, _, err = m.data.Timeline(m.qctx(), now, m.span(), m.crumbs)
+	}
 	if err != nil {
 		m.err = err
 		return
@@ -82,7 +104,9 @@ func (m *Model) loadOverview() {
 	// Summary, including distinct sessions and pricing provenance. Reuse it
 	// instead of issuing a fifth query for data the timeline already returned.
 	tot := tl.Totals
-	byTool, err := m.data.GroupBy(m.qctx(), now, m.span(), m.crumbs, "tool", SortTotal)
+	if !cacheOnly {
+		byTool, err = m.data.GroupBy(m.qctx(), now, m.span(), m.crumbs, "tool", SortTotal)
+	}
 	if err != nil {
 		m.err = err
 		return
@@ -94,16 +118,23 @@ func (m *Model) loadOverview() {
 	// Prewarm every scrub position in ONE [dim, tool] grouped query: the
 	// per-bucket by-tool compositions land in m.scrubComp, so a scrub sweep is
 	// fully local — no windowed per-bucket queries, warm or cold.
-	comp, err := m.data.GroupByDims(m.qctx(), now, m.span(), m.crumbs, []string{dim, "tool"})
+	if !cacheOnly {
+		comp, err = m.data.GroupByDims(m.qctx(), now, m.span(), m.crumbs, []string{dim, "tool"})
+	}
 	if err != nil {
 		m.err = err
 		return
 	}
+	if !cacheOnly {
+		prev = m.prevTotals()
+	}
 	m.scrubComp = buildScrubComp(tl.Buckets, comp.Buckets, dim)
+	m.err = nil
+	m.detailWanted = false
 
 	m.overview = views.OverviewData{
 		Totals:      tot,
-		Prev:        m.prevTotals(),
+		Prev:        prev,
 		Timeline:    tl.Buckets,
 		TimelineDim: dim,
 		RangeLbl:    m.spanLabel(),
@@ -558,6 +589,7 @@ func (m *Model) loadBrowsePreview() {
 	if m.view != ViewBrowse {
 		return
 	}
+	m.loadBrowseCodeChanges(false)
 	dim := m.browse.Dim()
 	val, ok := m.browse.SelectedValue()
 	if !ok {
@@ -583,6 +615,7 @@ func (m *Model) syncBrowsePreview() {
 	if m.view != ViewBrowse {
 		return
 	}
+	m.loadBrowseCodeChanges(true)
 	dim := m.browse.Dim()
 	val, ok := m.browse.SelectedValue()
 	if !ok {
@@ -597,6 +630,41 @@ func (m *Model) syncBrowsePreview() {
 	} else {
 		m.detailWanted = true
 	}
+}
+
+// loadBrowseCodeChanges shares the detail flight and its cache-only UI twin.
+// The selected session's identity intentionally excludes model and time range.
+func (m *Model) loadBrowseCodeChanges(cacheOnly bool) {
+	session, selected := m.browse.SelectedValue()
+	if m.browse.Dim() != "session" || !selected {
+		m.browse.SetCodeChanges(store.CodeChangeSummary{}, false, false)
+		return
+	}
+	var tool, project string
+	for _, crumb := range m.crumbs {
+		switch crumb.Dim {
+		case "tool":
+			tool = crumb.Value
+		case "project":
+			project = crumb.Value
+		}
+	}
+	if tool == "" || session == "" {
+		// A model-first drill can combine tools. Its row does not identify
+		// one harness session, so no exact code-change query is available.
+		m.browse.SetCodeChanges(store.CodeChangeSummary{}, true, false)
+		return
+	}
+	if cacheOnly {
+		summary, err, ready := m.data.SessionCodeChangesCached(tool, session, project)
+		m.browse.SetCodeChanges(summary, ready, err != nil)
+		if !ready {
+			m.detailWanted = true
+		}
+		return
+	}
+	summary, err := m.data.SessionCodeChanges(m.qctx(), tool, session, project)
+	m.browse.SetCodeChanges(summary, true, err != nil)
 }
 
 // syncScrub re-prices the Overview KPI tiles + side bars to the scrubbed bucket
@@ -675,11 +743,8 @@ func (m *Model) clampScrub() {
 // prevWindow resolves the previous-period comparison window for delta chips.
 // ok=false for open-ended ranges (all), which have no prior period.
 //
-// Windows derive from the load-generation clock (qnow), quantized to bucket
-// granularity so their cache keys stay stable: 7d/30d compare against the prior
-// N local calendar days (AddDate keeps local midnights across DST); today
-// compares against the same-length tail of yesterday, with "now" rounded down
-// to the hour so the key moves once per hour, not per second. A STEPPED window
+// Live windows compare corresponding elapsed calendar segments at the cache
+// snapshot clock. AddDate preserves local wall time across DST. A STEPPED window
 // is already a whole closed calendar span, so its comparison period is simply
 // the span before it — including for today, where the partial-day tail logic
 // would understate a full past day.
@@ -695,16 +760,9 @@ func (m *Model) prevWindow() (since, until time.Time, ok bool) {
 		ps, pu := prev.Window(now)
 		return ps, pu, true
 	}
-	switch m.rng {
-	case Range7d:
-		return cur.AddDate(0, 0, -7), cur, true
-	case Range30d:
-		return cur.AddDate(0, 0, -30), cur, true
-	default: // RangeToday
-		y, mo, d := now.Date()
-		end := time.Date(y, mo, d, now.Hour(), 0, 0, 0, now.Location())
-		return cur.Add(-end.Sub(cur)), cur, true
-	}
+	end := m.data.snapshotClock(m.qctx(), now)
+	days := sp.R.spanDays()
+	return cur.AddDate(0, 0, -days), end.AddDate(0, 0, -days), true
 }
 
 // prevTotals returns the grand total for the immediately-prior equal-length

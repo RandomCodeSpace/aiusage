@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,7 +57,7 @@ func newExportCmd() *cobra.Command {
 	return cmd
 }
 
-func runExport(c *cobra.Command, o exportOpts) error {
+func runExport(c *cobra.Command, o exportOpts) (resultErr error) {
 	format := strings.ToLower(strings.TrimSpace(o.format))
 	if format != "json" && format != "csv" {
 		return fmt.Errorf("invalid --format %q: want json or csv", o.format)
@@ -85,7 +86,7 @@ func runExport(c *cobra.Command, o exportOpts) error {
 	if err != nil {
 		return err
 	}
-	defer closeFn()
+	defer func() { resultErr = errors.Join(resultErr, closeFn()) }()
 	return streamEventExport(cmdContext(c), st.Reader,
 		store.Filter{Since: since, Until: until}, format, o.includeRaw, w)
 }
@@ -137,22 +138,47 @@ func streamEventExport(ctx context.Context, reader *store.Reader, filter store.F
 // a created/truncated file. A file holding raw payloads is created 0600: raw
 // can carry full transcript content. The returned closeFn closes the file (and
 // is a no-op for stdout).
-func exportWriter(c *cobra.Command, out string, includeRaw bool) (io.Writer, func(), error) {
+type exportFile interface {
+	io.Writer
+	Chmod(os.FileMode) error
+	Truncate(int64) error
+	Close() error
+}
+
+var openExportFile = func(path string, flag int, mode os.FileMode) (exportFile, error) {
+	return os.OpenFile(path, flag, mode)
+}
+
+func exportWriter(c *cobra.Command, out string, includeRaw bool) (io.Writer, func() error, error) {
 	if strings.TrimSpace(out) == "" {
-		return c.OutOrStdout(), func() {}, nil
+		return c.OutOrStdout(), func() error { return nil }, nil
 	}
 	mode := os.FileMode(0o644)
 	if includeRaw {
 		mode = 0o600
 	}
-	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	openFlags := os.O_CREATE | os.O_WRONLY
+	if !includeRaw {
+		openFlags |= os.O_TRUNC
+	}
+	f, err := openExportFile(out, openFlags, mode)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create output file %s: %w", out, err)
 	}
 	if includeRaw {
 		// The create mode above only applies to new files; tighten pre-existing
 		// ones too before transcript content is written into them.
-		_ = f.Chmod(0o600)
+		if err := f.Chmod(0o600); err != nil {
+			return nil, nil, errors.Join(fmt.Errorf("secure raw output %s: %w", out, err), f.Close())
+		}
+		if err := f.Truncate(0); err != nil {
+			return nil, nil, errors.Join(fmt.Errorf("truncate raw output %s: %w", out, err), f.Close())
+		}
 	}
-	return f, func() { f.Close() }, nil
+	return f, func() error {
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("close output file %s: %w", out, err)
+		}
+		return nil
+	}, nil
 }

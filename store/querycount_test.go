@@ -267,10 +267,10 @@ func TestSummaryAccelerationRouting(t *testing.T) {
 	assertRoute("stale unpriced", q, []bool{true, false, false})
 }
 
-// TestActivityAttributionUsesMaterializedCounts keeps the hot attribution
-// query set-based. The divisor is joined once from activity_usage_counts; a
-// correlated COUNT over activity_events would rescan the ledger per call.
-func TestActivityAttributionUsesMaterializedCounts(t *testing.T) {
+// TestActivityAttributionUsesSetBasedCounts keeps the hot attribution query
+// set-based and authoritative. A correlated COUNT would rescan per call;
+// trusting the persisted derived count table could inflate a damaged ledger.
+func TestActivityAttributionUsesSetBasedCounts(t *testing.T) {
 	st := openCounting(t)
 	ctx := context.Background()
 	at := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
@@ -296,11 +296,38 @@ func TestActivityAttributionUsesMaterializedCounts(t *testing.T) {
 		t.Fatalf("SummarizeActivity prepared %d statements, want 1:\n%s", len(queries), strings.Join(queries, "\n---\n"))
 	}
 	q := strings.ToLower(queries[0])
-	if !strings.Contains(q, "join activity_usage_counts") {
-		t.Fatalf("activity query does not join materialized counts:\n%s", queries[0])
+	if !strings.Contains(q, "join expected_activity_counts") || strings.Contains(q, "activity_usage_counts") {
+		t.Fatalf("activity query does not use authoritative grouped counts:\n%s", queries[0])
 	}
 	if strings.Contains(q, "select count(*) from activity_events") {
 		t.Fatalf("activity query restored a correlated divisor scan:\n%s", queries[0])
+	}
+}
+
+func TestActivityFallbackKeepsOneStatement(t *testing.T) {
+	st := openCounting(t)
+	seedActivityCounts(t, st)
+	if _, err := st.db.Exec(`DELETE FROM activity_usage_counts`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, top := range []bool{false, true} {
+		queries := queriesDuring(func() {
+			if top {
+				rows, err := st.TopActivity(ctx, ActivityFilter{GroupBy: []string{"name"}}, ActivityByCost, 10)
+				if err != nil || len(rows) != 3 {
+					t.Fatalf("TopActivity rows=%d err=%v", len(rows), err)
+				}
+			} else {
+				sum, err := st.SummarizeActivity(ctx, ActivityFilter{})
+				if err != nil || sum.Totals.AttributedCostMicroUSD != 1400 {
+					t.Fatalf("SummarizeActivity=%+v err=%v", sum, err)
+				}
+			}
+		})
+		if len(queries) != 1 {
+			t.Fatalf("top=%v prepared %d statements, want 1", top, len(queries))
+		}
 	}
 }
 

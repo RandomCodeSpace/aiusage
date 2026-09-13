@@ -1,11 +1,44 @@
 package codex
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
 )
+
+// recordType reads through the top-level discriminator without decoding a
+// following message body. The standard decoder handles escaping and any fields
+// preceding type; records that can affect accounting still get a full decode.
+func recordType(raw []byte) (string, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, err := d.Token()
+	if err != nil {
+		return "", err
+	}
+	if token != json.Delim('{') {
+		return "", errors.New("record is not an object")
+	}
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return "", err
+		}
+		if key == "type" {
+			var typ string
+			err := d.Decode(&typ)
+			return strings.TrimSpace(typ), err
+		}
+		var ignored json.RawMessage
+		if err := d.Decode(&ignored); err != nil {
+			return "", err
+		}
+	}
+	_, err = d.Token()
+	return "", err
+}
 
 // JSON helpers for parsing Codex session lines. All are whitespace- and
 // string-numeric tolerant so partial or loosely-typed records still parse.

@@ -136,13 +136,17 @@ func bucketCost(costs *Costs, i int, b store.Bucket) Cost {
 }
 
 func bucketPayload(b store.Bucket, c Cost) bucketJSON {
+	approximate := c.Approximate
+	if c.resolved {
+		approximate = c.machineApproximate
+	}
 	// Keys is emitted untouched: JSON is a machine surface and must report what
 	// the ledger holds. The human wording travels beside it in ProviderLabel.
 	return bucketJSON{
 		Bucket:              b,
 		ProviderLabel:       providerLabel(b.Keys),
 		DisplayCostMicroUSD: c.MicroUSD,
-		CostApproximate:     c.Approximate,
+		CostApproximate:     approximate,
 		CostKnown:           c.Known,
 	}
 }

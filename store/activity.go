@@ -64,6 +64,48 @@ FROM activity_events
 WHERE usage_dedup_key <> ''
 GROUP BY usage_dedup_key`
 
+// Compare the complete keyed relation in both directions. Totals alone miss
+// counts moved between keys. MATERIALIZED shares the authoritative grouping
+// between the detector and fallback without a correlated scan per call.
+const activityCountsCTE = `WITH expected_activity_counts AS MATERIALIZED (
+ SELECT usage_dedup_key, COUNT(*) AS activity_count FROM activity_events
+ WHERE usage_dedup_key <> '' GROUP BY usage_dedup_key
+), activity_counts_status AS MATERIALIZED (
+ SELECT EXISTS (
+  SELECT usage_dedup_key, activity_count FROM expected_activity_counts
+  EXCEPT SELECT usage_dedup_key, activity_count FROM activity_usage_counts
+ ) OR EXISTS (
+  SELECT usage_dedup_key, activity_count FROM activity_usage_counts
+  EXCEPT SELECT usage_dedup_key, activity_count FROM expected_activity_counts
+ ) AS stale
+)`
+
+func (s *Reader) activityUsageCountsStale(ctx context.Context) (bool, error) {
+	var stale bool
+	if err := s.db.QueryRowContext(ctx, activityCountsCTE+` SELECT stale FROM activity_counts_status`).Scan(&stale); err != nil {
+		return false, fmt.Errorf("store: check activity usage counts: %w", err)
+	}
+	return stale, nil
+}
+
+func (l *Ledger) rebuildActivityUsageCounts(ctx context.Context) error {
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin activity usage counts rebuild: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM activity_usage_counts`); err != nil {
+		return fmt.Errorf("store: clear activity usage counts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, rebuildActivityUsageCountsSQL); err != nil {
+		return fmt.Errorf("store: fill activity usage counts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit activity usage counts rebuild: %w", err)
+	}
+	return nil
+}
+
 // activityIndexDDL and activityTriggerDDL complete the v5 step. The triggers are
 // what make this table append-only on the same terms as usage_events; the
 // indexes serve the four questions the activity surface asks (frequency over a
@@ -204,16 +246,15 @@ const (
 	ActivityByTokens ActivityOrder = "tokens"
 )
 
-// orderExpr maps a rank metric to its SQL ordering expression. The expressions
-// are the same aggregates the select list computes.
+// orderExpr maps a rank metric to its selected aggregate's SQL alias.
 func (o ActivityOrder) orderExpr() (string, error) {
 	switch o {
 	case ActivityByCalls, "":
-		return "COUNT(*)", nil
+		return "calls", nil
 	case ActivityByCost:
-		return activityCostSQL, nil
+		return "attributed_cost", nil
 	case ActivityByTokens:
-		return activityTokensSQL, nil
+		return "attributed_tokens", nil
 	default:
 		return "", fmt.Errorf("store: invalid activity order %q", o)
 	}
@@ -232,10 +273,12 @@ func (o ActivityOrder) orderExpr() (string, error) {
 // stamp would then divide one turn's tokens by 1, 3 and 3 and attribute 167% of
 // it — an OVERSTATEMENT, the one direction this table promises never to go.
 //
-// activity_usage_counts removes the possibility instead of documenting it.
-// Every successful activity insert increments its nonempty usage key in the
-// same transaction, and migration 8 fills the table set-wise from history. The
-// divisor is therefore exactly the number of rows summing over that usage row,
+// Each read groups the authoritative activity ledger for the nonempty usage
+// keys in its selected rows. It counts ALL calls sharing those keys, including
+// calls outside the time/name/tool filter. The persisted activity_usage_counts
+// table remains derived maintenance state checked by EnsureRollup and Verify;
+// a read never trusts it. The divisor is therefore exactly the number of rows
+// summing over that usage row,
 // so integer division makes the shares sum to AT MOST the turn's real total by
 // construction, whatever any adapter stamped or how many passes it took.
 // calls_in_turn stays as what the source reported; it is useful evidence, just
@@ -245,7 +288,7 @@ func (o ActivityOrder) orderExpr() (string, error) {
 // skip it), so it short-circuits to 1. Empty keys are deliberately absent from
 // the count table.
 const activityDivisorSQL = `(CASE WHEN a.usage_dedup_key = '' THEN 1
-	ELSE COALESCE(c.activity_count, 1) END)`
+	ELSE c.activity_count END)`
 
 // The attribution expressions, in one place so SummarizeActivity and
 // TopActivity can never disagree about what "attributed" means. Integer
@@ -262,12 +305,12 @@ const (
 // It is a var rather than a const only because its last column is assembled
 // from model's vendor price-source vocabulary at init (computedCostCountSQL);
 // nothing writes to it after that.
-var activitySelectSQL = `COUNT(*),
+var activitySelectSQL = `COUNT(*) AS calls,
 	COUNT(DISTINCT CASE WHEN a.session_id <> '' THEN a.session_id END),
 	COALESCE(SUM(u.input_tokens / ` + activityDivisorSQL + `),0),
 	COALESCE(SUM(u.output_tokens / ` + activityDivisorSQL + `),0),
-	` + activityTokensSQL + `,
-	` + activityCostSQL + `,
+	` + activityTokensSQL + ` AS attributed_tokens,
+	` + activityCostSQL + ` AS attributed_cost,
 	COALESCE(SUM(CASE WHEN u.dedup_key IS NULL THEN 1 ELSE 0 END),0),
 	COALESCE(SUM(CASE WHEN u.dedup_key IS NOT NULL AND u.cost_micro_usd IS NULL THEN 1 ELSE 0 END),0),
 	` + computedCostCountSQL("u.cost_micro_usd", "u.price_source")
@@ -277,9 +320,9 @@ var activitySelectSQL = `COUNT(*),
 // a usage_events dedup key, since insertEventsTx rejects an empty one — and a
 // LEFT JOIN keeps the call while contributing no tokens, where an inner join
 // would silently drop it from the frequency answer too.
-const activityFromSQL = ` FROM activity_events a
+const activityFromSQL = ` FROM selected_activity a
 	LEFT JOIN usage_events u ON u.dedup_key = a.usage_dedup_key
-	LEFT JOIN activity_usage_counts c ON c.usage_dedup_key = a.usage_dedup_key`
+	LEFT JOIN expected_activity_counts c ON c.usage_dedup_key = a.usage_dedup_key`
 
 // buildActivityWhere builds the WHERE clause (with a leading " WHERE " when
 // non-empty) and the positional args for an ActivityFilter. Columns are
@@ -367,6 +410,42 @@ func activityGroupExprs(f ActivityFilter) ([]string, error) {
 	return out, nil
 }
 
+// Select the filtered activity rows before deriving their usage keys. This
+// retains the filter's index plan instead of scanning unrelated rows to satisfy
+// DISTINCT/group ordering. Divisors then group all authoritative calls sharing
+// each selected key in the same statement, so out-of-window calls still divide
+// their turn's cost and stale derived counts cannot affect the answer.
+func activityBucketQuery(groupExprs []string, where, suffix string) string {
+	projection := activitySelectSQL
+	group := ""
+	if len(groupExprs) > 0 {
+		joined := strings.Join(groupExprs, ", ")
+		projection = joined + ", " + projection
+		group = " GROUP BY " + joined
+	}
+	const selected = `WITH selected_activity AS MATERIALIZED (
+ SELECT a.tool,a.kind,a.name,a.session_id,a.project,a.model,a.event_time_unix,a.usage_dedup_key
+ FROM activity_events a`
+	const counts = `
+), expected_activity_counts AS MATERIALIZED (
+ SELECT s.usage_dedup_key,COUNT(*) AS activity_count
+ FROM (SELECT DISTINCT usage_dedup_key FROM selected_activity WHERE usage_dedup_key<>'') k
+ CROSS JOIN activity_events s ON s.usage_dedup_key=k.usage_dedup_key
+ GROUP BY s.usage_dedup_key
+) SELECT `
+	var query strings.Builder
+	query.Grow(len(selected) + len(where) + len(counts) + len(projection) +
+		len(activityFromSQL) + len(group) + len(suffix))
+	query.WriteString(selected)
+	query.WriteString(where)
+	query.WriteString(counts)
+	query.WriteString(projection)
+	query.WriteString(activityFromSQL)
+	query.WriteString(group)
+	query.WriteString(suffix)
+	return query.String()
+}
+
 // SummarizeActivity aggregates agent activity (tool calls, skill invocations,
 // hook firings) matching ActivityFilter, grouped per its GroupBy, with tokens
 // and cost ATTRIBUTED from the ledger: each call takes its joined usage row's
@@ -381,21 +460,13 @@ func (s *Reader) SummarizeActivity(ctx context.Context, f ActivityFilter) (*Acti
 	}
 	where, args := buildActivityWhere(f)
 
-	var sb strings.Builder
-	sb.WriteString("SELECT ")
-	for _, ge := range groupExprs {
-		sb.WriteString(ge)
-		sb.WriteString(", ")
-	}
-	sb.WriteString(activitySelectSQL)
-	sb.WriteString(activityFromSQL)
-	sb.WriteString(where)
+	suffix := ""
 	if len(groupExprs) > 0 {
-		joined := strings.Join(groupExprs, ", ")
-		sb.WriteString(" GROUP BY " + joined + " ORDER BY " + joined)
+		suffix = " ORDER BY " + strings.Join(groupExprs, ", ")
 	}
+	q := activityBucketQuery(groupExprs, where, suffix)
 
-	buckets, err := s.queryActivityBuckets(ctx, sb.String(), args, f.GroupBy)
+	buckets, err := s.queryActivityBuckets(ctx, q, args, f.GroupBy)
 	if err != nil {
 		return nil, err
 	}
@@ -451,15 +522,14 @@ func (s *Reader) TopActivity(ctx context.Context, f ActivityFilter, by ActivityO
 	where, args := buildActivityWhere(f)
 
 	joined := strings.Join(groupExprs, ", ")
-	q := "SELECT " + joined + ", " + activitySelectSQL + activityFromSQL + where +
-		" GROUP BY " + joined +
-		// The group expressions break ties, so a ranking is deterministic
-		// rather than at the mercy of scan order.
-		" ORDER BY " + order + " DESC, " + joined
+	// The group expressions break ties, so a ranking is deterministic
+	// rather than at the mercy of scan order.
+	suffix := " ORDER BY " + order + " DESC, " + joined
 	if limit > 0 {
-		q += " LIMIT ?"
+		suffix += " LIMIT ?"
 		args = append(args, limit)
 	}
+	q := activityBucketQuery(groupExprs, where, suffix)
 	return s.queryActivityBuckets(ctx, q, args, f.GroupBy)
 }
 
@@ -507,7 +577,7 @@ func (s *Reader) queryActivityBuckets(ctx context.Context, q string, args []any,
 func (s *Reader) distinctActivitySessions(ctx context.Context, where string, args []any) (int64, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT CASE WHEN a.session_id <> '' THEN a.session_id END)`+
-		activityFromSQL+where, args...)
+		` FROM activity_events a`+where, args...)
 	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: distinct activity sessions: %w", err)
@@ -519,9 +589,8 @@ func (s *Reader) distinctActivitySessions(ctx context.Context, where string, arg
 // the same idempotence usage_events gets: ON CONFLICT(dedup_key) DO NOTHING
 // keeps a re-read silent while a CHECK violation (unknown kind, empty name,
 // turn_seq past calls_in_turn) still errors, which a blanket OR IGNORE would
-// swallow. Per-row failures are skipped and summarised in skipErr so one poison
-// row cannot abort a batch that is re-derived every cycle; err is reserved for
-// failures of the batch itself.
+// swallow. Only CHECK failures and empty keys are skipped and summarised in
+// skipErr; every other insert error fails the batch.
 func insertActivityTx(ctx context.Context, tx *sql.Tx, acts []model.ActivityEvent) (inserted int, skipErr, err error) {
 	if len(acts) == 0 {
 		return 0, nil, nil
@@ -560,7 +629,11 @@ func insertActivityTx(ctx context.Context, tx *sql.Tx, acts []model.ActivityEven
 			a.TurnSeq, calls, a.SourcePath,
 		)
 		if execErr != nil {
-			skips.add(a.DedupKey, fmt.Errorf("store: insert activity %s: %w", a.DedupKey, execErr))
+			rowErr := fmt.Errorf("store: insert activity %s: %w", a.DedupKey, execErr)
+			if !isSkippableRowError(execErr) {
+				return inserted, nil, rowErr
+			}
+			skips.add(a.DedupKey, rowErr)
 			continue
 		}
 		if n, _ := res.RowsAffected(); n > 0 {

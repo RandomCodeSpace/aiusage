@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,7 +274,7 @@ var benchLine = []byte(`{"type":"assistant","timestamp":"2026-05-10T13:14:19.329
 func BenchmarkParseLine(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, ok := parseLine(benchLine, "/p/f.jsonl", "seg", "sess"); !ok {
+		if _, ok, err := parseLine(benchLine, "/p/f.jsonl", "seg", "sess"); !ok || err != nil {
 			b.Fatal("parse failed")
 		}
 	}
@@ -357,8 +358,8 @@ func TestFailedParseWithholdsCheckpoint(t *testing.T) {
 	src := adapter.Source{Tool: model.ToolClaudeCode, Class: model.EventLevel, Path: root}
 
 	obs, err := a.CollectIncremental(context.Background(), src, nil)
-	if err != nil {
-		t.Fatalf("collect: %v", err) // per-file errors stay non-fatal
+	if !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), badPath) {
+		t.Fatalf("collect error = %v, want permission diagnostic naming %s", err, badPath)
 	}
 	if len(obs.Events) != 1 || obs.Events[0].MessageID != "m1" {
 		t.Fatalf("want only the readable file's event, got %d", len(obs.Events))

@@ -26,6 +26,7 @@ import (
 func newPinnedModel(t *testing.T, src DataSource, fixed time.Time) Model {
 	t.Helper()
 	m := NewModel(src, Options{DBPath: "/tmp/usage.db"})
+	t.Cleanup(m.zoneMgr.Close)
 	m.data.now = func() time.Time { return fixed }
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	return loadOnce(tm.(Model))
@@ -168,42 +169,103 @@ func TestStaleFlightDropped(t *testing.T) {
 	}
 }
 
-// TestSupersededFlightRunsNoQueries is the cost half of the generation
-// contract: dropping a stale flight's RESULT is not enough, it must also stop
-// paying for it. Superseding a flight cancels its context, so when the doomed
-// goroutine finally runs it issues zero queries and reports the cancellation —
-// while the current generation still applies normally.
+// Superseded loads must neither query nor change the current cache clock,
+// even when they run after invalidation or after a newer day has loaded.
 func TestSupersededFlightRunsNoQueries(t *testing.T) {
-	f := &fakeData{}
-	m := newTestModel(t, f)
+	for _, tc := range []struct {
+		name     string
+		oldNow   time.Time
+		newFirst bool
+	}{
+		{"old first same day", time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local), false},
+		{"old last across midnight", time.Date(2026, 9, 12, 23, 59, 0, 0, time.Local), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "usage.db")
+			st, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			insert := func(id string, at time.Time, total int64) {
+				t.Helper()
+				_, err := st.InsertEvents(context.Background(), []model.UsageEvent{{Tool: model.ToolCodex, Model: "m", SessionID: id, EventTime: at, InputTokens: total, TotalTokens: total, Kind: model.KindUsage, DedupKey: id}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := tc.oldNow.Add(-time.Minute)
+			insert("initial", now.Add(-time.Minute), 100)
+			f := &countingSource{src: st}
+			m := newPinnedModel(t, f, now)
+			m.dbPath = path
+			m.data.now = func() time.Time { return now }
+			now = tc.oldNow
+			cmdA := m.startLoad() // queued, not executed
+			now = tc.oldNow.Add(2 * time.Minute)
+			insert("new", tc.oldNow.Add(time.Minute), 200)
+			insert("prior", tc.oldNow.Add(time.Minute).AddDate(0, 0, -7), 300)
+			m.data.Invalidate()
+			cmdB := m.startLoad() // cancels A and owns the refreshed cache
+			var msgB tea.Msg
+			if tc.newFirst {
+				msgB = cmdB()
+			}
+			clockBefore := m.data.snapshotNow
+			queriesBefore := f.calls.Load()
+			msgA := cmdA()
+			if n := f.calls.Load() - queriesBefore; n != 0 {
+				t.Fatalf("superseded flight ran %d queries, want 0", n)
+			}
+			if !errors.Is(msgA.(dataLoadedMsg).err, context.Canceled) {
+				t.Fatalf("superseded flight err = %v, want context.Canceled", msgA.(dataLoadedMsg).err)
+			}
+			if !m.data.snapshotNow.Equal(clockBefore) {
+				t.Errorf("superseded flight changed snapshot clock from %v to %v", clockBefore, m.data.snapshotNow)
+			}
+			lastMTime := m.lastMTime
+			m = send(m, msgA)
+			if m.fresh != FreshCutIn || !m.lastMTime.Equal(lastMTime) {
+				t.Fatal("superseded result changed freshness or lastMTime")
+			}
+			if !tc.newFirst {
+				msgB = cmdB()
+			}
+			queriesBefore = f.calls.Load()
+			m = send(m, msgB)
+			if n := f.calls.Load() - queriesBefore; n != 0 {
+				t.Fatalf("current apply ran %d queries, want 0", n)
+			}
+			if m.fresh != FreshLive || m.err != nil || !m.lastMTime.Equal(msgB.(dataLoadedMsg).mtime) {
+				t.Fatalf("current apply freshness=%v err=%v mtime=%v", m.fresh, m.err, m.lastMTime)
+			}
+			if !m.data.snapshotNow.Equal(now) || m.overview.Totals.Total != 300 || m.overview.Prev.Total != 300 {
+				t.Fatalf("current clock=%v total=%d prior=%d, want %v / 300 / 300", m.data.snapshotNow, m.overview.Totals.Total, m.overview.Prev.Total, now)
+			}
+			_, priorUntil, ok := m.prevWindow()
+			if !ok || !priorUntil.Equal(now.AddDate(0, 0, -7)) {
+				t.Fatalf("prior endpoint=%v, want %v", priorUntil, now.AddDate(0, 0, -7))
+			}
+		})
+	}
+}
 
-	// Two range cycles: both land on windows the startup load never warmed, so
-	// the flights have real queries to run and cancellation has something to
-	// prevent.
-	tm, cmdA := m.Update(keyMsg("t")) // gen G: context taken
-	m = tm.(Model)
-	tm, cmdB := m.Update(keyMsg("t")) // gen G+1 supersedes it: G's context cancelled
-	m = tm.(Model)
-
-	var msgA tea.Msg
-	n := queriesDuring(f, func() { msgA = cmdA() })
-	if n != 0 {
-		t.Fatalf("superseded flight ran %d queries, want 0", n)
-	}
-	if !errors.Is(msgA.(dataLoadedMsg).err, context.Canceled) {
-		t.Fatalf("superseded flight err = %v, want context.Canceled", msgA.(dataLoadedMsg).err)
-	}
-
-	m = send(m, msgA) // still dropped on the generation check, cancelled or not
-	if m.fresh != FreshCutIn {
-		t.Fatalf("superseded flight changed freshness to %v, want cutIn", m.fresh)
-	}
-	m = send(m, cmdB()) // the surviving generation is unaffected
-	if m.fresh != FreshLive {
-		t.Fatalf("current-generation apply freshness = %v, want live", m.fresh)
-	}
-	if len(m.overview.ByTool) == 0 {
-		t.Fatal("current-generation apply produced no overview data")
+// Invalidation can happen before the next dispatch cancels the old context.
+// The cache identity must fence that still-running flight's clock writes too,
+// including cache-only fallback after a pinned timeline becomes empty.
+func TestInvalidatedFlightCannotSeedSnapshot(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		now := time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local)
+		m := newPinnedModel(t, &emptySource{}, now)
+		m.scrubPinned = pinned
+		cmd := m.startLoad()
+		m.data.Invalidate()
+		if msg := cmd().(dataLoadedMsg); msg.err != nil {
+			t.Fatal(msg.err)
+		}
+		if !m.data.snapshotNow.IsZero() {
+			t.Fatalf("pinned=%v invalidated flight seeded the new snapshot: %v", pinned, m.data.snapshotNow)
+		}
 	}
 }
 
@@ -317,11 +379,13 @@ func TestRefreshTickWhileLoadingStillDispatches(t *testing.T) {
 type gateSource struct {
 	noActivity
 	release chan struct{}
+	entered chan struct{}
 	calls   atomic.Int64
 }
 
 func (g *gateSource) Summarize(context.Context, store.Filter) (*store.Summary, error) {
 	if g.calls.Add(1) == 1 {
+		close(g.entered)
 		<-g.release
 	}
 	return &store.Summary{Totals: store.Bucket{Events: 1, Total: 10}}, nil
@@ -331,7 +395,9 @@ func (g *gateSource) Summarize(context.Context, store.Filter) (*store.Summary, e
 // flight when Invalidate ran must not deposit its (pre-invalidation) result in
 // the fresh cache — the next identical query has to hit the source again.
 func TestInFlightLoadDoesNotRepolluteInvalidatedCache(t *testing.T) {
-	g := &gateSource{release: make(chan struct{})}
+	g := &gateSource{release: make(chan struct{}), entered: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(g.release) })
+	t.Cleanup(release)
 	d := NewData(g)
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local)
 
@@ -340,12 +406,18 @@ func TestInFlightLoadDoesNotRepolluteInvalidatedCache(t *testing.T) {
 		defer close(done)
 		_, _ = d.Totals(context.Background(), now, Span{R: RangeAll}, nil)
 	}()
-	for g.calls.Load() == 0 { // wait until the query is in flight
-		time.Sleep(time.Millisecond)
+	select {
+	case <-g.entered:
+	case <-time.After(time.Second):
+		t.Fatal("source did not enter Summarize within one second")
 	}
 	d.Invalidate()
-	close(g.release)
-	<-done
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("source did not finish Summarize within one second after release")
+	}
 
 	if _, err := d.Totals(context.Background(), now, Span{R: RangeAll}, nil); err != nil {
 		t.Fatalf("Totals: %v", err)
@@ -458,40 +530,32 @@ func TestCacheKeysStableWithinDay(t *testing.T) {
 	}
 }
 
-// TestPrevTotalsKeysStableWithinHour: the delta-chip window (which used to read
-// raw time.Now per call) must re-key at most once per hour for today and once
-// per day for 7d — never per second.
-func TestPrevTotalsKeysStableWithinHour(t *testing.T) {
-	f := &fakeData{}
-	m := newTestModel(t, f)
-
-	m.rng = RangeToday
-	m.loadNow = time.Date(2026, 8, 9, 14, 5, 0, 0, time.Local)
-	m.prevTotals() // warm
-	n := queriesDuring(f, func() {
-		m.loadNow = time.Date(2026, 8, 9, 14, 55, 30, 0, time.Local)
+// TestPrevTotalsKeysFollowSnapshot: current and prior queries retain one cap
+// until the displayed data refreshes. Refresh must advance both endpoints.
+func TestPrevTotalsKeysFollowSnapshot(t *testing.T) {
+	for _, r := range []Range{RangeToday, Range7d, Range30d} {
+		f := &fakeData{}
+		early := time.Date(2026, 8, 9, 9, 5, 30, 0, time.Local)
+		m := newPinnedModel(t, f, early)
+		m.rng = r
 		m.prevTotals()
-	})
-	if n != 0 {
-		t.Fatalf("today: same-hour clock drift caused %d re-queries, want 0", n)
-	}
-	n = queriesDuring(f, func() {
-		m.loadNow = time.Date(2026, 8, 9, 15, 5, 0, 0, time.Local)
-		m.prevTotals()
-	})
-	if n == 0 {
-		t.Fatal("today: crossing the hour did not re-key the previous-period window")
-	}
-
-	m.rng = Range7d
-	m.loadNow = time.Date(2026, 8, 9, 9, 0, 0, 0, time.Local)
-	m.prevTotals() // warm
-	n = queriesDuring(f, func() {
-		m.loadNow = time.Date(2026, 8, 9, 21, 30, 45, 0, time.Local)
-		m.prevTotals()
-	})
-	if n != 0 {
-		t.Fatalf("7d: same-day clock drift caused %d re-queries, want 0", n)
+		_, before, _ := m.prevWindow()
+		m.loadNow = early.Add(12 * time.Hour)
+		if n := queriesDuring(f, func() { m.prevTotals() }); n != 0 {
+			t.Fatalf("%s warm comparison ran %d queries", r.Label(), n)
+		}
+		_, held, _ := m.prevWindow()
+		if !held.Equal(before) {
+			t.Fatal("warm snapshot changed its comparison cap")
+		}
+		m.data.Invalidate()
+		if n := queriesDuring(f, func() { m.prevTotals() }); n != 1 {
+			t.Fatalf("%s refreshed comparison ran %d queries, want 1", r.Label(), n)
+		}
+		_, refreshed, _ := m.prevWindow()
+		if !refreshed.Equal(m.loadNow.AddDate(0, 0, -r.spanDays())) {
+			t.Fatalf("refreshed cap %v does not follow %v", refreshed, m.loadNow)
+		}
 	}
 }
 

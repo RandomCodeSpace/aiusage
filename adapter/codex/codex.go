@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -161,8 +162,10 @@ func (a Adapter) scanRoot(ctx context.Context, root string, seen map[string]stru
 // only token_count payloads and turn_context lines matter to this adapter.
 // Unquoted so whitespace-padded type strings (" token_count ") still match.
 var (
-	markerTokenCount  = []byte(`token_count`)
+	// Also catches last/total_token_usage when a discriminator was renamed.
+	markerToken       = []byte(`token_`)
 	markerTurnContext = []byte(`turn_context`)
+	markerEventMsg    = []byte(`event_msg`)
 	// The two tool-call payload shapes. Their *_output counterparts contain the
 	// same substrings and so pass this gate too; the payload type check in
 	// parseCallLine rejects them, which is the cheap-probe/exact-check split the
@@ -174,7 +177,7 @@ var (
 // lineIsInteresting reports whether a raw line can carry anything this adapter
 // reads: token counts, the model carry-forward, or a tool call.
 func lineIsInteresting(raw []byte) bool {
-	return bytes.Contains(raw, markerTokenCount) ||
+	return bytes.Contains(raw, markerToken) ||
 		bytes.Contains(raw, markerTurnContext) ||
 		bytes.Contains(raw, markerFunctionCall) ||
 		bytes.Contains(raw, markerCustomCall)
@@ -215,6 +218,10 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("codex: stat %s: %w", src.Path, err)
 	}
+	return a.collectReader(ctx, src, cp, f, fi)
+}
+
+func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint, f io.ReadSeeker, fi os.FileInfo) (adapter.Observation, error) {
 	size := fi.Size()
 	mtimeNS := fi.ModTime().UnixNano()
 
@@ -259,6 +266,9 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		r        = bufio.NewReaderSize(f, 64*1024)
 	)
 
+	var diagnostics error
+	formatDrift, nonempty := false, false
+	recognized := start > 0
 	for {
 		if ctx.Err() != nil {
 			return adapter.Observation{Events: events, Activity: activity}, ctx.Err()
@@ -266,23 +276,53 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		raw, rerr := r.ReadBytes('\n')
 		terminated := rerr == nil
 		if rerr != nil && rerr != io.EOF {
-			break // unreadable remainder: keep what we have, checkpoint stops here
+			return adapter.Observation{Events: events, Activity: activity}, fmt.Errorf("codex: read %s: %w", src.Path, rerr)
 		}
-		if len(bytes.TrimSpace(raw)) > 0 && lineIsInteresting(raw) {
-			var line map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &line); err != nil {
-				// Malformed line: skip it and keep parsing — one bad line must
-				// not silently drop the rest of the file. But an unterminated
-				// malformed tail is likely a write in progress: leave the
-				// offset before it so the completed line is read next cycle.
-				if !terminated {
-					break
+		if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 {
+			// A writer may stop anywhere in the first or final record, including
+			// before a recognizable type. Retry the unfinished bytes on growth.
+			if !terminated && !json.Valid(raw) {
+				break
+			}
+			// Ordinary messages cannot affect accounting. Retain the cheap
+			// marker gate, including recognizable usage whose discriminator
+			// drifted, before allocating maps for the complete payload.
+			decode := lineIsInteresting(raw) || bytes.Contains(raw, markerEventMsg) || trimmed[0] != '{'
+			if !decode {
+				typ, err := recordType(raw)
+				decode = err != nil
+				switch typ {
+				case "session_meta", "response_item", "compacted":
+					recognized = true
 				}
-			} else if ev, ok := parseUsageLine(line, mtime, session, src.Path,
-				&curModel, &prevTotal, &havePrev); ok {
-				events = append(events, ev)
-			} else if a, ok := parseCallLine(line, mtime, session, src.Path, curModel); ok {
-				activity = append(activity, a)
+			}
+			if !decode {
+				nonempty = true
+			} else {
+				var line map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &line); err != nil {
+					if !terminated {
+						break
+					}
+					nonempty = true
+					diagnostics = errors.Join(diagnostics, fmt.Errorf("codex: %s offset %d: malformed record", src.Path, consumed))
+				} else {
+					nonempty = true
+					switch typeOf(line["type"]) {
+					case "session_meta", "turn_context", "event_msg", "response_item", "compacted":
+						recognized = true
+					}
+					if usage, err := validateUsageShape(line); err != nil {
+						formatDrift = true
+						diagnostics = errors.Join(diagnostics, fmt.Errorf("codex: %s offset %d: %w", src.Path, consumed, err))
+					} else if lineIsInteresting(raw) {
+						if ev, ok := parseUsageLine(line, usage, mtime, session, src.Path, &curModel, &prevTotal, &havePrev); ok {
+							events = append(events, ev)
+						} else if a, ok := parseCallLine(line, mtime, session, src.Path, curModel); ok {
+							activity = append(activity, a)
+						}
+					}
+				}
 			}
 		}
 		if terminated {
@@ -295,6 +335,16 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		break
 	}
 
+	if err := ctx.Err(); err != nil {
+		return adapter.Observation{Events: events, Activity: activity}, err
+	}
+	if nonempty && !recognized {
+		formatDrift = true
+		diagnostics = errors.Join(diagnostics, fmt.Errorf("codex: %s: %w: no recognized session records", src.Path, adapter.ErrSourceFormat))
+	}
+	if formatDrift {
+		return adapter.Observation{Events: events, Activity: activity}, diagnostics
+	}
 	newState, err := json.Marshal(ckptState{
 		Model: curModel, HavePrev: havePrev,
 		Input: prevTotal.input, Cached: prevTotal.cached, Output: prevTotal.output,
@@ -310,13 +360,85 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			Tool: model.ToolCodex, SourcePath: src.Path,
 			Size: size, MTimeNS: mtimeNS, Offset: consumed, State: string(newState),
 		},
-	}, nil
+	}, diagnostics
+}
+
+// usageObjects keeps the objects decoded for validation available to accounting.
+// A token_count record must not decode payload, info, and both token maps twice.
+type usageObjects struct {
+	payload, info, last, total map[string]json.RawMessage
+}
+
+// validateUsageShape distinguishes known usage drift from unrelated additions.
+// No model or cumulative state changes until every present usage object passes.
+func validateUsageShape(line map[string]json.RawMessage) (usageObjects, error) {
+	typ := typeOf(line["type"])
+	payload := objOf(line["payload"])
+	payloadType := typeOf(payload["type"])
+	info := objOf(payload["info"])
+	decoded := usageObjects{payload: payload, info: info}
+	usageShape := payloadType == "token_count" || info["last_token_usage"] != nil || info["total_token_usage"] != nil
+	if typ != "event_msg" {
+		if usageShape {
+			return usageObjects{}, fmt.Errorf("%w: token usage requires type=event_msg", adapter.ErrSourceFormat)
+		}
+		return decoded, nil
+	}
+	if payload == nil || payloadType == "" {
+		return usageObjects{}, fmt.Errorf("%w: event_msg missing payload/type", adapter.ErrSourceFormat)
+	}
+	if payloadType != "token_count" {
+		if usageShape {
+			return usageObjects{}, fmt.Errorf("%w: usage info requires payload.type=token_count", adapter.ErrSourceFormat)
+		}
+		return decoded, nil
+	}
+	if info == nil {
+		// A rate-limit update can explicitly carry no usage yet.
+		if bytes.Equal(bytes.TrimSpace(payload["info"]), []byte("null")) && objOf(payload["rate_limits"]) != nil {
+			return decoded, nil
+		}
+		return usageObjects{}, fmt.Errorf("%w: token_count missing info", adapter.ErrSourceFormat)
+	}
+	found := false
+	for _, key := range []string{"last_token_usage", "total_token_usage"} {
+		raw := info[key]
+		if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		usage := objOf(raw)
+		if usage == nil {
+			return usageObjects{}, fmt.Errorf("%w: %s is not a token object", adapter.ErrSourceFormat, key)
+		}
+		for _, aliases := range [][]string{{"input_tokens", "prompt_tokens", "input"}, {"output_tokens", "completion_tokens", "output"}} {
+			numeric := false
+			for _, alias := range aliases {
+				if _, ok := asInt(usage[alias]); ok {
+					numeric = true
+					break
+				}
+			}
+			if !numeric {
+				return usageObjects{}, fmt.Errorf("%w: %s missing numeric %s", adapter.ErrSourceFormat, key, aliases[0])
+			}
+		}
+		if key == "last_token_usage" {
+			decoded.last = usage
+		} else {
+			decoded.total = usage
+		}
+		found = true
+	}
+	if !found {
+		return usageObjects{}, fmt.Errorf("%w: token_count info missing usage", adapter.ErrSourceFormat)
+	}
+	return decoded, nil
 }
 
 // parseUsageLine handles one decoded JSONL line, updating the model
 // carry-forward and cumulative baseline in place. Returns a usage event when
 // the line is a non-zero token_count record.
-func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, path string,
+func parseUsageLine(line map[string]json.RawMessage, usage usageObjects, mtime time.Time, session, path string,
 	curModel *string, prevTotal *rawTokens, havePrev *bool) (model.UsageEvent, bool) {
 
 	typ := typeOf(line["type"])
@@ -332,11 +454,11 @@ func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, p
 		return model.UsageEvent{}, false
 	}
 
-	payload := objOf(line["payload"])
+	payload := usage.payload
 	if payload == nil || typeOf(payload["type"]) != "token_count" {
 		return model.UsageEvent{}, false
 	}
-	info := objOf(payload["info"])
+	info := usage.info
 	if info == nil {
 		return model.UsageEvent{}, false
 	}
@@ -354,10 +476,10 @@ func parseUsageLine(line map[string]json.RawMessage, mtime time.Time, session, p
 		tok    rawTokens
 		usable bool
 	)
-	if last := objOf(info["last_token_usage"]); last != nil {
+	if last := usage.last; last != nil {
 		tok = readRaw(last)
 		usable = true
-	} else if cum := objOf(info["total_token_usage"]); cum != nil {
+	} else if cum := usage.total; cum != nil {
 		cur := readRaw(cum)
 		if *havePrev {
 			tok = cur.satSub(*prevTotal)

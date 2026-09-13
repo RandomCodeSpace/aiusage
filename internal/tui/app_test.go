@@ -3,7 +3,7 @@ package tui
 import (
 	"cmp"
 	"context"
-	"runtime"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -339,6 +339,7 @@ func queriesDuring(f *fakeData, fn func()) int64 {
 func newTestModelW(t *testing.T, src DataSource, width int) Model {
 	t.Helper()
 	m := NewModel(src, Options{DBPath: "/tmp/usage.db"})
+	t.Cleanup(m.zoneMgr.Close)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
 	m = tm.(Model)
 	return loadOnce(m)
@@ -356,6 +357,7 @@ func loadOnce(m Model) Model {
 func newTestModelWH(t *testing.T, src DataSource, width, height int) Model {
 	t.Helper()
 	m := NewModel(src, Options{DBPath: "/tmp/usage.db"})
+	t.Cleanup(m.zoneMgr.Close)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	m = tm.(Model)
 	return loadOnce(m)
@@ -481,17 +483,55 @@ func click(t *testing.T, m Model, zoneID string) (Model, bool) {
 	return send(m, msg), true
 }
 
-// resolveZone renders the frame and waits (up to a bounded number of yields)
-// for the async zone worker to register the named zone's bounds.
+// resolveZone waits for this frame's geometry, never a prior registration.
 func resolveZone(m Model, zoneID string) *zone.ZoneInfo {
-	_ = m.View().Content
-	for i := 0; i < 2000; i++ {
-		if z := m.zoneMgr.Get(zoneID); z != nil && !z.IsZero() {
+	z, _, _ := resolveCurrentZone(m, zoneID)
+	return z
+}
+
+func resolveCurrentZone(m Model, id string) (*zone.ZoneInfo, string, time.Duration) {
+	prior := m.zoneMgr.Get(id)
+	start := time.Now()
+	frame := m.View().Content
+	end := time.Now()
+	lines := strings.Split(frame, "\n")
+	z := waitZone(func() *zone.ZoneInfo { return m.zoneMgr.Get(id) }, func(z *zone.ZoneInfo) bool {
+		return z != prior && zoneFromFrame(z, start, end) && z.StartY >= 0 && z.EndY < len(lines) &&
+			z.StartX >= 0 && z.EndX < m.width && z.StartY <= z.EndY && z.StartX <= z.EndX
+	}, 500*time.Millisecond)
+	return z, frame, time.Since(start)
+}
+
+// bubblezone v2.0.0 stamps each Scan with time.Now().Nanosecond(), but exposes
+// no frame barrier. Read that stamp only in this test harness; geometry alone
+// cannot distinguish a queued old row from the current frame after a resize.
+func zoneFromFrame(z *zone.ZoneInfo, start, end time.Time) bool {
+	if z == nil || z.IsZero() || end.Sub(start) >= time.Second {
+		return false
+	}
+	it := reflect.ValueOf(z).Elem().FieldByName("iteration").Int()
+	a, b := int64(start.Nanosecond()), int64(end.Nanosecond())
+	if a <= b {
+		return a <= it && it <= b
+	}
+	return it >= a || it <= b
+}
+
+func waitZone(get func() *zone.ZoneInfo, ready func(*zone.ZoneInfo) bool, timeout time.Duration) *zone.ZoneInfo {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		if z := get(); ready(z) {
 			return z
 		}
-		runtime.Gosched()
+		select {
+		case <-deadline.C:
+			return nil
+		case <-poll.C:
+		}
 	}
-	return m.zoneMgr.Get(zoneID)
 }
 
 func TestViewSwitching(t *testing.T) {

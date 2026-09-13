@@ -46,9 +46,8 @@
 // unpriced event is not a free one — a NULL cost stays nil, never 0. A real
 // cost is stamped with the source goose recorded it under
 // ("goose-provider_reported" / "goose-estimated" / "goose-carried_forward"), and
-// the collector's pricing ladder overwrites it whenever a price table knows the
-// model, so the stamp only survives where aiusage could not price the event at
-// all.
+// the collector preserves this vendor stamp. Its pricing ladder applies only
+// when the source supplies no usable cost.
 //
 // ACTIVITY. Tool calls come from `messages`, which is a different table with a
 // watermark of its own. They are NEVER attributed: usage_ledger rows carry no
@@ -70,6 +69,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -428,8 +428,13 @@ func buildEvent(r ledgerRow, path string) (model.UsageEvent, bool, bool) {
 	// A NULL cost is UNPRICED, never free: leaving CostMicroUSD nil stores SQL
 	// NULL, and 0 would assert the request cost nothing in a table that can
 	// never be corrected in place.
-	if r.cost.Valid && r.cost.Float64 > 0 {
-		ev.SetCost(int64(math.Round(r.cost.Float64*1e6)), priceSource(r.costSource.String))
+	if r.cost.Valid && r.cost.Float64 >= 1e-6 {
+		micro := math.Round(r.cost.Float64 * 1e6)
+		// Comparisons also reject NaN and infinities. The upper bound is
+		// exclusive because float64(MaxInt64) rounds up to 1<<63.
+		if micro > 0 && micro < float64(math.MaxInt64) {
+			ev.SetCost(int64(micro), priceSource(r.costSource.String))
+		}
 	}
 	return ev, true, true
 }
@@ -538,7 +543,12 @@ func nullFloat(v sql.NullFloat64) *float64 {
 // of its last checkpoint and is exposed to SQLite's documented wrong-result
 // behaviour when the file changes underneath it.
 func openReadOnly(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	dsn := u.String() + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err

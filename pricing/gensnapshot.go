@@ -7,6 +7,8 @@
 //
 //	go run gensnapshot.go                       # fetch pricing.RefreshURL
 //	go run gensnapshot.go -from prices.json     # use a table already on disk
+//	go run gensnapshot.go -modelsdev            # fetch Models.dev prices
+//	go run gensnapshot.go -modelsdev -from api.json # use a saved Models.dev API response
 //
 // It keeps upstream's field NAMES verbatim, so one decoder serves the snapshot
 // and the runtime-refreshed table alike, and it decides which fields survive
@@ -63,20 +65,35 @@ type snapshot struct {
 func main() {
 	from := flag.String("from", "", "read the table from this file instead of fetching it "+
 		"(upstream's bare model map or aiusage's own cached envelope)")
-	out := flag.String("out", filepath.Join("data", "litellm_snapshot.json"), "snapshot to write")
+	out := flag.String("out", "", "snapshot to write (defaults to data/<feed>_snapshot.json)")
+	modelsdev := flag.Bool("modelsdev", false, "generate the Models.dev snapshot")
 	flag.Parse()
 
-	data, source, err := load(*from)
+	url, filename := pricing.RefreshURL, "litellm_snapshot.json"
+	if *modelsdev {
+		url, filename = pricing.ModelsDevURL, "modelsdev_snapshot.json"
+	}
+	if *out == "" {
+		*out = filepath.Join("data", filename)
+	}
+	data, source, err := load(*from, url)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gensnapshot:", err)
 		os.Exit(1)
 	}
-	snap, err := build(data, source)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "gensnapshot:", err)
-		os.Exit(1)
+	var encoded []byte
+	var detail string
+	if *modelsdev {
+		encoded, err = pricing.BuildModelsDevSnapshot(data)
+		detail = fmt.Sprintf("%d bytes", len(encoded))
+	} else {
+		var snap snapshot
+		snap, err = build(data, source)
+		if err == nil {
+			encoded, err = json.MarshalIndent(snap, "", " ")
+			detail = fmt.Sprintf("%d models, fetched %s", snap.Meta.Models, snap.Meta.Fetched)
+		}
 	}
-	encoded, err := json.MarshalIndent(snap, "", " ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gensnapshot:", err)
 		os.Exit(1)
@@ -85,25 +102,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gensnapshot:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("%s: %d models, fetched %s\n", *out, snap.Meta.Models, snap.Meta.Fetched)
+	fmt.Printf("%s: %s\n", *out, detail)
 }
 
 // load returns the raw table plus the source string to record in _meta.
-func load(path string) ([]byte, string, error) {
+func load(path, url string) ([]byte, string, error) {
 	if path == "" {
-		resp, err := http.Get(pricing.RefreshURL)
+		resp, err := http.Get(url)
 		if err != nil {
 			return nil, "", err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, "", fmt.Errorf("fetch %s: status %d", pricing.RefreshURL, resp.StatusCode)
+			return nil, "", fmt.Errorf("fetch %s: status %d", url, resp.StatusCode)
 		}
 		data, err := io.ReadAll(resp.Body)
-		return data, pricing.RefreshURL, err
+		return data, url, err
 	}
 	data, err := os.ReadFile(path)
-	return data, pricing.RefreshURL, err
+	return data, url, err
 }
 
 // build cuts the snapshot: upstream's bare model map or aiusage's cached

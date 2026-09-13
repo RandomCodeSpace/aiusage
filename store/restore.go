@@ -304,7 +304,7 @@ func restoreOnline(ctx context.Context, source, target string) error {
 		if !ok {
 			return fmt.Errorf("SQLite driver does not expose the Online Restore API")
 		}
-		restore, err := restoreConn.NewRestore(source)
+		restore, err := restoreConn.NewRestore(sqliteFileURI(source, true))
 		if err != nil {
 			return err
 		}

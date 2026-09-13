@@ -168,6 +168,59 @@ func TestStatisticsAndBenchmarkParser(t *testing.T) {
 	}
 }
 
+func TestBenchmarkContractRejectsMissingEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alter func(side, side)
+	}{
+		{"both omit view", func(b, c side) {
+			delete(b.bench, "BenchmarkProductionColdLoad/ByTool")
+			delete(c.bench, "BenchmarkProductionColdLoad/ByTool")
+		}},
+		{"both omit workload", func(b, c side) {
+			delete(b.bench, "BenchmarkReload")
+			delete(c.bench, "BenchmarkReload")
+		}},
+		{"allocation unit", func(b, c side) { delete(c.bench["BenchmarkView"], "B/op") }},
+		{"query unit", func(b, c side) { delete(c.bench["BenchmarkRangeCycleBurst"], "queries/op") }},
+		{"source unit", func(b, c side) { delete(c.bench["BenchmarkSourceFarmUnchanged"], "sources/op") }},
+		{"partial unit", func(b, c side) { c.bench["BenchmarkView"]["allocs/op"] = []float64{1} }},
+		{"inconsistent unit", func(b, c side) {
+			c.bench["BenchmarkView"]["B/op"] = append(repeatFloat(1), repeatFloat(1)...)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, c := passingSide(), passingSide()
+			tc.alter(b, c)
+			for _, item := range compareBenchmarks(b.bench, c.bench) {
+				if item.Category == "benchmark" && item.Status == "FAIL" {
+					return
+				}
+			}
+			t.Fatal("incomplete benchmark evidence passed")
+		})
+	}
+}
+
+func TestTimingRejectsUnsupportedSampleCounts(t *testing.T) {
+	for _, n := range []int{0, 9, 11, 19, 21} {
+		values := make([]float64, n)
+		for i := range values {
+			values[i] = 100
+		}
+		if got := timingRegression("test", "count", values, values); got[0].Status != "FAIL" {
+			t.Errorf("%d samples passed: %+v", n, got)
+		}
+	}
+	values := append(repeatFloat(100), repeatFloat(100)...)
+	if got := timingRegression("test", "twenty", values, values); got[0].Status != "PASS" {
+		t.Fatalf("supported twenty-sample retry failed: %+v", got)
+	}
+	if got := percentile([]float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, .95); got != 10 {
+		t.Fatalf("ten-sample nearest-rank p95 = %v, want maximum", got)
+	}
+}
+
 func passingSide() side {
 	process := map[string]*processMetric{
 		"version": {
@@ -221,6 +274,21 @@ func passingSide() side {
 		"BenchmarkSourceFarmUnchanged": withExtras(benchmarkMetrics(100_000_000, 8*MiB, 10_000), map[string]float64{
 			"sources/op": 2500, "inserted/op": 0,
 		}),
+	}
+	for _, name := range requiredBenchmarks() {
+		if bench[name] != nil {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "BenchmarkProductionRender120x40/"):
+			bench[name] = benchmarkMetrics(10_000_000, 3*MiB, 30_000)
+		case strings.HasPrefix(name, "BenchmarkProductionRender200x60/"):
+			bench[name] = benchmarkMetrics(20_000_000, 7*MiB, 60_000)
+		case strings.HasPrefix(name, "BenchmarkProductionColdLoad/"):
+			bench[name] = withExtras(benchmarkMetrics(1_000_000_000, 1, 1), map[string]float64{"queries/op": 4, "query-ms/op": 1000})
+		case strings.HasPrefix(name, "BenchmarkProductionUIThread/"):
+			bench[name] = withExtra(benchmarkMetrics(1_000_000, 1, 1), "queries/op", 0)
+		}
 	}
 	return side{
 		process:     process,

@@ -335,6 +335,9 @@ type Data struct {
 	now   func() time.Time
 	mu    sync.Mutex
 	cache *lru[*store.Summary]
+	// snapshotNow caps live usage and its comparison at one captured instant.
+	// It advances with cache invalidation or a local calendar day change.
+	snapshotNow time.Time
 	// act caches the activity ledger's grouped summaries and rank is its
 	// ranking twin. They are separate instances, not one cache of `any`: the
 	// two answer different questions and their keys are built differently (a
@@ -347,20 +350,31 @@ type Data struct {
 	// dollars, and one cache holding both under one key would serve a skill
 	// ranking to an agent pivot — the exact cross-partition confusion the store
 	// refuses to express in SQL, reintroduced in memory.
-	tctx   *lru[*store.TurnContextSummary]
-	tcRank *lru[[]store.TurnContextBucket]
+	tctx        *lru[*store.TurnContextSummary]
+	tcRank      *lru[[]store.TurnContextBucket]
+	codeChanges *lru[sessionCodeChangesResult]
+}
+
+type sessionCodeChangesResult struct {
+	summary store.CodeChangeSummary
+	err     error
+}
+
+type sessionCodeChangesSource interface {
+	SessionCodeChanges(context.Context, string, string, string) (store.CodeChangeSummary, error)
 }
 
 // NewData builds a Data over src.
 func NewData(src DataSource) *Data {
 	return &Data{
-		src:    src,
-		now:    time.Now,
-		cache:  newLRU[*store.Summary](summaryCacheCap),
-		act:    newLRU[*store.ActivitySummary](summaryCacheCap),
-		rank:   newLRU[[]store.ActivityBucket](summaryCacheCap),
-		tctx:   newLRU[*store.TurnContextSummary](summaryCacheCap),
-		tcRank: newLRU[[]store.TurnContextBucket](summaryCacheCap),
+		src:         src,
+		now:         time.Now,
+		cache:       newLRU[*store.Summary](summaryCacheCap),
+		act:         newLRU[*store.ActivitySummary](summaryCacheCap),
+		rank:        newLRU[[]store.ActivityBucket](summaryCacheCap),
+		tctx:        newLRU[*store.TurnContextSummary](summaryCacheCap),
+		tcRank:      newLRU[[]store.TurnContextBucket](summaryCacheCap),
+		codeChanges: newLRU[sessionCodeChangesResult](summaryCacheCap),
 	}
 }
 
@@ -372,10 +386,92 @@ func (d *Data) Invalidate() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cache = newLRU[*store.Summary](summaryCacheCap)
+	d.snapshotNow = time.Time{}
 	d.act = newLRU[*store.ActivitySummary](summaryCacheCap)
 	d.rank = newLRU[[]store.ActivityBucket](summaryCacheCap)
 	d.tctx = newLRU[*store.TurnContextSummary](summaryCacheCap)
 	d.tcRank = newLRU[[]store.TurnContextBucket](summaryCacheCap)
+	d.codeChanges = newLRU[sessionCodeChangesResult](summaryCacheCap)
+}
+
+func sessionCodeChangesKey(tool, session, project string) string {
+	return strconv.Quote(tool) + "|" + strconv.Quote(session) + "|" + strconv.Quote(project)
+}
+
+// SessionCodeChanges reads lifetime recorded counts, independent of model and
+// reporting window. Optional sources that cannot report them remain unknown.
+func (d *Data) SessionCodeChanges(ctx context.Context, tool, session, project string) (store.CodeChangeSummary, error) {
+	src, supported := d.src.(sessionCodeChangesSource)
+	if !supported {
+		return store.CodeChangeSummary{}, nil
+	}
+	k := sessionCodeChangesKey(tool, session, project)
+	d.mu.Lock()
+	cache := d.codeChanges
+	result, ok := cache.get(k)
+	d.mu.Unlock()
+	if ok {
+		return result.summary, result.err
+	}
+	if err := ctx.Err(); err != nil {
+		return store.CodeChangeSummary{}, err
+	}
+	result.summary, result.err = src.SessionCodeChanges(ctx, tool, session, project)
+	if ctx.Err() == nil {
+		d.mu.Lock()
+		// Capture before querying so invalidation discards late results. Keep
+		// failures until refresh too: the UI can show unavailable without an
+		// automatic retry loop or a synchronous query.
+		cache.put(k, result)
+		d.mu.Unlock()
+	}
+	return result.summary, result.err
+}
+
+// SessionCodeChangesCached never queries, including on unsupported sources.
+func (d *Data) SessionCodeChangesCached(tool, session, project string) (store.CodeChangeSummary, error, bool) {
+	if _, supported := d.src.(sessionCodeChangesSource); !supported {
+		return store.CodeChangeSummary{}, nil, true
+	}
+	d.mu.Lock()
+	result, ok := d.codeChanges.get(sessionCodeChangesKey(tool, session, project))
+	d.mu.Unlock()
+	return result.summary, result.err, ok
+}
+
+type snapshotGenerationKey struct{}
+type snapshotReadOnlyKey struct{}
+
+var snapshotReadContext = context.WithValue(context.Background(), snapshotReadOnlyKey{}, true)
+
+// loadContext binds a background flight to the cache instance at dispatch.
+// Invalidation swaps that instance, so an obsolete flight cannot set the new
+// snapshot clock even if it runs before its context is cancelled.
+func (d *Data) loadContext(ctx context.Context) context.Context {
+	d.mu.Lock()
+	generation := d.cache
+	d.mu.Unlock()
+	return context.WithValue(ctx, snapshotGenerationKey{}, generation)
+}
+
+// Cache-only lookups can read the cap but never set it.
+func (d *Data) snapshotClock(ctx context.Context, now time.Time) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	readOnly, _ := ctx.Value(snapshotReadOnlyKey{}).(bool)
+	generation, _ := ctx.Value(snapshotGenerationKey{}).(*lru[*store.Summary])
+	if ctx.Err() != nil || (generation != nil && generation != d.cache) {
+		return now
+	}
+	y, m, day := now.Date()
+	sy, sm, sd := d.snapshotNow.Date()
+	if d.snapshotNow.IsZero() || y != sy || m != sm || day != sd {
+		if !readOnly {
+			d.snapshotNow = now
+		}
+		return now
+	}
+	return d.snapshotNow
 }
 
 // filterFor builds a store.Filter from a range, drill stack and group-by dims.
@@ -383,8 +479,11 @@ func (d *Data) Invalidate() {
 // load generation resolves the same instant, so a flight dispatched just before
 // a day/hour boundary and its apply-side reload just after still derive
 // identical windows — and therefore identical cache keys.
-func (d *Data) filterFor(now time.Time, sp Span, crumbs []Crumb, groupBy []string) store.Filter {
+func (d *Data) filterFor(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, groupBy []string) store.Filter {
 	since, until := sp.Window(now)
+	if sp.Step == 0 && sp.R != RangeAll {
+		until = d.snapshotClock(ctx, now)
+	}
 	f := store.Filter{Since: since, Until: until, GroupBy: groupBy}
 	for _, c := range crumbs {
 		applyCrumb(&f, c)
@@ -417,17 +516,19 @@ const cacheKeyBuf = 192
 
 // cacheKey derives a stable string key from a filter. The layout is
 // since|until|groupBy|tools|models|projects|sessions with each list
-// comma-joined — byte for byte what the strings.Builder form produced, since a
-// changed key would silently miss every warm entry a load generation depends
-// on.
+// comma-joined. A present model filter starts with '=' so the empty-model
+// crumb remains distinct from the absence of a model filter.
 func cacheKey(f store.Filter) string {
 	var scratch [cacheKeyBuf]byte
 	b := scratch[:0]
 	b = f.Since.AppendFormat(b, time.RFC3339)
 	b = append(b, '|')
 	b = f.Until.AppendFormat(b, time.RFC3339)
-	for _, list := range [...][]string{f.GroupBy, f.Tools, f.Models, f.Projects, f.Sessions} {
+	for dim, list := range [...][]string{f.GroupBy, f.Tools, f.Models, f.Projects, f.Sessions} {
 		b = append(b, '|')
+		if dim == 2 && len(list) > 0 { // explicit model-filter presence
+			b = append(b, '=')
+		}
 		for i, v := range list {
 			if i > 0 {
 				b = append(b, ',')
@@ -484,7 +585,7 @@ func (d *Data) summarize(ctx context.Context, f store.Filter) (*store.Summary, e
 
 // Totals returns the grand-total bucket for the current range and drill stack.
 func (d *Data) Totals(ctx context.Context, now time.Time, sp Span, crumbs []Crumb) (store.Bucket, error) {
-	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, nil))
+	s, err := d.summarize(ctx, d.filterFor(ctx, now, sp, crumbs, nil))
 	if err != nil {
 		return store.Bucket{}, err
 	}
@@ -493,7 +594,7 @@ func (d *Data) Totals(ctx context.Context, now time.Time, sp Span, crumbs []Crum
 
 // TotalsCached is the cache-only twin of Totals.
 func (d *Data) TotalsCached(now time.Time, sp Span, crumbs []Crumb) (store.Bucket, bool) {
-	s, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, nil))
+	s, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, nil))
 	if !ok {
 		return store.Bucket{}, false
 	}
@@ -503,7 +604,7 @@ func (d *Data) TotalsCached(now time.Time, sp Span, crumbs []Crumb) (store.Bucke
 // GroupBy returns the summary grouped by a single dimension under the current
 // range and drill stack, sorted per the sort mode.
 func (d *Data) GroupBy(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, error) {
-	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, []string{dim}))
+	s, err := d.summarize(ctx, d.filterFor(ctx, now, sp, crumbs, []string{dim}))
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +615,7 @@ func (d *Data) GroupBy(ctx context.Context, now time.Time, sp Span, crumbs []Cru
 
 // GroupByCached is the cache-only twin of GroupBy.
 func (d *Data) GroupByCached(now time.Time, sp Span, crumbs []Crumb, dim string, srt Sort) (*store.Summary, bool) {
-	s, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, []string{dim}))
+	s, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, []string{dim}))
 	if !ok {
 		return nil, false
 	}
@@ -527,7 +628,7 @@ func (d *Data) GroupByCached(now time.Time, sp Span, crumbs []Crumb, dim string,
 // current range and drill stack, in the store's key order. One grouped query
 // replaces a per-key N+1 (model owners, per-bucket scrub compositions).
 func (d *Data) GroupByDims(ctx context.Context, now time.Time, sp Span, crumbs []Crumb, dims []string) (*store.Summary, error) {
-	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, dims))
+	s, err := d.summarize(ctx, d.filterFor(ctx, now, sp, crumbs, dims))
 	if err != nil {
 		return nil, err
 	}
@@ -785,7 +886,7 @@ func sortTimeline(b []store.Bucket, dim string) {
 // current range, ascending by time.
 func (d *Data) Timeline(ctx context.Context, now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, error) {
 	dim := timelineDim(sp.R)
-	s, err := d.summarize(ctx, d.filterFor(now, sp, crumbs, []string{dim}))
+	s, err := d.summarize(ctx, d.filterFor(ctx, now, sp, crumbs, []string{dim}))
 	if err != nil {
 		return nil, dim, err
 	}
@@ -797,7 +898,7 @@ func (d *Data) Timeline(ctx context.Context, now time.Time, sp Span, crumbs []Cr
 // TimelineCached is the cache-only twin of Timeline.
 func (d *Data) TimelineCached(now time.Time, sp Span, crumbs []Crumb) (*store.Summary, string, bool) {
 	dim := timelineDim(sp.R)
-	s, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, []string{dim}))
+	s, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, []string{dim}))
 	if !ok {
 		return nil, dim, false
 	}
@@ -812,7 +913,7 @@ func (d *Data) TimelineCached(now time.Time, sp Span, crumbs []Crumb) (*store.Su
 // so rapid presses cancel before opening work they will discard.
 func (d *Data) timelineWarm(now time.Time, sp Span, crumbs []Crumb) bool {
 	dim := timelineDim(sp.R)
-	_, ok := d.cachedSummary(d.filterFor(now, sp, crumbs, []string{dim}))
+	_, ok := d.cachedSummary(d.filterFor(snapshotReadContext, now, sp, crumbs, []string{dim}))
 	return ok
 }
 

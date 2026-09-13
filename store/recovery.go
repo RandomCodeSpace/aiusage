@@ -39,12 +39,14 @@ type Verification struct {
 	IntegrityOK         bool              `json:"integrity_ok"`
 	ForeignKeysOK       bool              `json:"foreign_keys_ok"`
 	ApplicationSchemaOK bool              `json:"application_schema_ok"`
-	RollupChecked       bool              `json:"rollup_checked"`
-	RollupStale         bool              `json:"rollup_stale"`
-	IntegrityErrors     []string          `json:"integrity_errors,omitempty"`
-	ForeignKeyErrors    []string          `json:"foreign_key_errors,omitempty"`
-	SchemaErrors        []string          `json:"schema_errors,omitempty"`
-	RowCounts           map[string]int64  `json:"row_counts,omitempty"`
+	// RollupChecked covers both derived usage rollup and activity counts.
+	RollupChecked bool `json:"rollup_checked"`
+	// RollupStale is true when either derived table disagrees with its ledger.
+	RollupStale      bool             `json:"rollup_stale"`
+	IntegrityErrors  []string         `json:"integrity_errors,omitempty"`
+	ForeignKeyErrors []string         `json:"foreign_key_errors,omitempty"`
+	SchemaErrors     []string         `json:"schema_errors,omitempty"`
+	RowCounts        map[string]int64 `json:"row_counts,omitempty"`
 }
 
 // StateError turns a completed non-ok verification into an error suitable for
@@ -306,7 +308,12 @@ func Verify(ctx context.Context, path string) (Verification, error) {
 		return result, nil
 	}
 
-	stale, err := (&Reader{db: db, path: absolute}).RollupStale(ctx)
+	reader := &Reader{db: db, path: absolute}
+	stale, err := reader.RollupStale(ctx)
+	var activityStale bool
+	if err == nil {
+		activityStale, err = reader.activityUsageCountsStale(ctx)
+	}
 	if err != nil {
 		if ctx.Err() != nil || isBusySQLiteError(err) {
 			return Verification{}, fmt.Errorf("store: verify rollup in %s: %w", absolute, err)
@@ -317,10 +324,16 @@ func Verify(ctx context.Context, path string) (Verification, error) {
 		return result, nil
 	}
 	result.RollupChecked = true
-	result.RollupStale = stale
-	if stale {
+	result.RollupStale = stale || activityStale
+	if result.RollupStale {
 		result.State = VerificationRepairable
 		result.Reason = "derived rollup does not match the ledger; run aiusage once or let the collector rebuild it"
+		if activityStale {
+			result.Reason = "derived activity usage counts do not match the activity ledger; run aiusage once or let the collector rebuild them"
+			if stale {
+				result.Reason = "derived usage rollup and activity usage counts do not match their ledgers; run aiusage once or let the collector rebuild them"
+			}
+		}
 		return result, nil
 	}
 
@@ -472,7 +485,7 @@ func openRecoveryReadOnly(ctx context.Context, path string) (*sql.DB, string, er
 		return nil, absolute, fmt.Errorf("store: database path is not a regular file: %s", absolute)
 	}
 
-	dsn := sqliteReadOnlyURI(absolute)
+	dsn := sqliteFileURI(absolute, true)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, absolute, fmt.Errorf("store: open %s read-only: %w", absolute, err)
@@ -485,19 +498,30 @@ func openRecoveryReadOnly(ctx context.Context, path string) (*sql.DB, string, er
 	return db, absolute, nil
 }
 
-func sqliteReadOnlyURI(path string) string {
-	slashed := filepath.ToSlash(path)
-	if !strings.HasPrefix(slashed, "/") {
-		slashed = "/" + slashed
-	}
-	u := url.URL{Scheme: "file", Path: slashed}
+// sqliteFileURI encodes an absolute filesystem path without treating literal
+// question marks, fragments or percent signs as URI syntax.
+func sqliteFileURI(path string, readOnly bool) string {
+	u := sqlitePathURL(path)
 	q := u.Query()
-	q.Set("mode", "ro")
-	q.Add("_pragma", "query_only(1)")
+	if readOnly {
+		q.Set("mode", "ro")
+		q.Add("_pragma", "query_only(1)")
+	} else {
+		q.Add("_pragma", "journal_mode(WAL)")
+		q.Add("_pragma", "synchronous(NORMAL)")
+	}
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func sqlitePathURL(path string) url.URL {
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return url.URL{Scheme: "file", Path: slashed}
 }
 
 func integrityCheck(ctx context.Context, db *sql.DB) ([]string, error) {
@@ -722,6 +746,10 @@ func schemaRequirements(version int) ([]requiredTable, []requiredIndex, []requir
 	if version >= 8 {
 		tables = append(tables, requiredTable{"activity_usage_counts", []string{"usage_dedup_key", "activity_count"}})
 	}
+	if version >= 9 {
+		tables = append(tables, requiredTable{"code_changes", []string{"tool", "change_id", "session_id", "project", "known", "lines_added", "lines_removed", "updated_at_unix_ms", "observed_time_unix"}})
+		indexes = append(indexes, requiredIndex{"idx_code_changes_session", "code_changes", []string{"tool", "session_id", "project"}})
+	}
 	return tables, indexes, triggers
 }
 
@@ -769,6 +797,9 @@ func availableRowCounts(ctx context.Context, db *sql.DB, version int) (map[strin
 	}
 	if version >= 8 {
 		tables = append(tables, "activity_usage_counts")
+	}
+	if version >= 9 {
+		tables = append(tables, "code_changes")
 	}
 	counts := make(map[string]int64, len(tables))
 	for _, table := range tables {
@@ -851,7 +882,8 @@ func copyOnline(ctx context.Context, source, destination string, onBatch func(in
 		if !ok {
 			return fmt.Errorf("SQLite driver does not expose the Online Backup API")
 		}
-		backup, err := backupConn.NewBackup(destination)
+		u := sqlitePathURL(destination)
+		backup, err := backupConn.NewBackup(u.String())
 		if err != nil {
 			return err
 		}
@@ -938,7 +970,7 @@ func stepOnlineTransferWithPolicy(ctx context.Context, backup onlineStepper, fin
 // file; switching the closed snapshot to DELETE makes the final file usable
 // without a WAL/SHM pair. No application row or source file is changed.
 func makeBackupStandalone(ctx context.Context, path string) error {
-	u, err := url.Parse(sqliteReadOnlyURI(path))
+	u, err := url.Parse(sqliteFileURI(path, true))
 	if err != nil {
 		return fmt.Errorf("store: build backup URI for %s: %w", path, err)
 	}

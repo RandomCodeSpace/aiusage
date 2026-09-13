@@ -7,9 +7,10 @@
 //     (say output only) replaces just the rates it names: the rest come from
 //     the rung below, because "override this rate" is not "delete the others";
 //  2. the runtime-refreshed LiteLLM table cached in the data dir;
-//  3. the go:embed'ed filtered LiteLLM snapshot — the guaranteed floor, so a
-//     firewalled install still prices;
-//  4. nothing. A model no rung can price is UNPRICED, never $0.00.
+//  3. the runtime-refreshed, provider-scoped Models.dev table;
+//  4. the embedded LiteLLM and Models.dev snapshots for offline use;
+//  5. nothing. A model no rung can price stays unpriced. Zero requires an
+//     explicitly verified free service.
 //
 // VENDOR COST vs ESTIMATE: Some adapters emit cost already stamped by the
 // provider (copilot's nano-aiu, crush's session cost, pi/openclaw via the
@@ -65,6 +66,8 @@ const longContextStamp = "+long-context"
 // per single token). A zero field means "not published", not "free"; Cost
 // resolves each zero to the documented fallback rate.
 type Rates struct {
+	// Free distinguishes a verified free service from an unpublished zero rate.
+	Free         bool
 	Input        float64
 	Output       float64
 	CacheRead    float64 // 0 -> the input rate: a cache read is a discounted input token
@@ -94,7 +97,8 @@ type Rates struct {
 // Threshold is per model and comes from the LiteLLM field name (see
 // longContextCard): the live table publishes five distinct boundaries — 128K,
 // 200K, 256K, 272K and 512K — so a hardcoded 200K would be wrong for four of
-// them. A zero rate here falls back to the same-named base rate, never to zero:
+// them. A zero rate here falls back to the same-named base rate, except an
+// absent 1h write rate uses the resolved long-context 5m write rate:
 // LiteLLM publishes an above-threshold rate only for the buckets it prices, and
 // inventing a multiple of the base rate for the rest would be a made-up number.
 type LongContext struct {
@@ -109,10 +113,9 @@ type LongContext struct {
 	CacheWrite1h float64
 }
 
-// Priceable reports whether the rates carry any usable price. An all-zero entry
-// is a table row without pricing, which must fall through to the next rung
-// rather than value the event at zero.
-func (r Rates) Priceable() bool { return r.Input > 0 || r.Output > 0 }
+// Priceable reports whether the rates carry a price or a verified free status.
+// An ordinary all-zero entry remains unknown.
+func (r Rates) Priceable() bool { return r.Free || r.Input > 0 || r.Output > 0 }
 
 // fill returns r with every unset (zero) rate taken from base. It is how a
 // PARTIAL config override composes with the rung it displaces: a user who sets
@@ -272,14 +275,18 @@ func (r Rates) longApplies(c Charge) bool {
 }
 
 // Cost values a charge at these rates, in micro-USD, rounding half up. The
-// result is never negative: token counts and rates are both non-negative.
+// result is never negative and saturates at math.MaxInt64 micro-USD.
 //
 // A request over the model's long-context threshold is billed ENTIRELY off the
 // second rate card — every bucket, not the excess above the line.
 func (r Rates) Cost(c Charge) int64 {
+	if r.Free {
+		return 0
+	}
 	in, out := r.Input, r.Output
 	cacheRead, write5m, write1h := r.CacheRead, r.CacheWrite5m, r.CacheWrite1h
 	if r.longApplies(c) {
+		write1h = r.Long.CacheWrite1h
 		if r.Long.Input > 0 {
 			in = r.Long.Input
 		}
@@ -291,9 +298,6 @@ func (r Rates) Cost(c Charge) int64 {
 		}
 		if r.Long.CacheWrite5m > 0 {
 			write5m = r.Long.CacheWrite5m
-		}
-		if r.Long.CacheWrite1h > 0 {
-			write1h = r.Long.CacheWrite1h
 		}
 	}
 	// The batch tier is applied AFTER the card is chosen and still wins, because
@@ -342,7 +346,11 @@ func microUSD(usd float64) int64 {
 	if usd <= 0 {
 		return 0
 	}
-	return int64(math.Floor(usd*1e6 + 0.5))
+	micro := math.Floor(usd*1e6 + 0.5)
+	if micro >= float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(micro)
 }
 
 // Table is one rung of the ladder: a model->rates map plus the price_source
@@ -350,6 +358,8 @@ func microUSD(usd float64) int64 {
 type Table struct {
 	Source string
 	Models map[string]Rates
+	// ProviderScoped tables require the recorded provider as well as the model.
+	ProviderScoped bool
 }
 
 // Lookup resolves rates for a (provider, model) pair, trying the provider's
@@ -359,6 +369,18 @@ type Table struct {
 func (t *Table) Lookup(provider, name string) (Rates, bool) {
 	if t == nil || len(t.Models) == 0 {
 		return Rates{}, false
+	}
+	if t.ProviderScoped {
+		if provider == model.ProviderGitHub {
+			provider = "github-copilot"
+		}
+		if provider == "" {
+			return Rates{}, false
+		}
+		name = strings.TrimSpace(name)
+		name = strings.TrimPrefix(name, provider+"/")
+		r, ok := t.Models[provider+"/"+name]
+		return r, ok && r.Priceable()
 	}
 	for _, key := range lookupKeys(provider, name) {
 		if r, ok := t.Models[key]; ok && r.Priceable() {
@@ -437,6 +459,9 @@ func (e *Engine) Price(c Charge) (int64, string, bool) {
 		source := t.Source
 		if t == e.overrides {
 			r, source = mergeOverride(r, source, tables[i+1:], c)
+		}
+		if r.Free {
+			return 0, source + "+free", true
 		}
 		micro := r.Cost(c)
 		if micro == 0 && c.Tokens() > 0 {

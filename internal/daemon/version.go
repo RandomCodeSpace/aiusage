@@ -20,7 +20,10 @@ import (
 // versionPath is the file recording the running daemon's build identity. It
 // sits beside the pidfile in the XDG state dir.
 func versionPath(pidPath string) string {
-	return filepath.Join(filepath.Dir(pidPath), "daemon.version")
+	if filepath.Base(pidPath) == "aiusage.pid" {
+		return filepath.Join(filepath.Dir(pidPath), "daemon.version")
+	}
+	return strings.TrimSuffix(pidPath, filepath.Ext(pidPath)) + ".version"
 }
 
 // writeVersion records the daemon's build identity (best-effort). Empty id

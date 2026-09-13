@@ -267,10 +267,8 @@ func barsPanel(c Ctx, d byEntityData, w, h int, focus bool) string {
 		body := glyph + rc.pad(1) + nameStyle.Render(rc.PadRight(displayName(rc, name, nameW), nameW)) + rc.pad(1) +
 			bar + rc.pad(1) + rc.Number.Render(rc.PadLeft(rc.Humanize(b.Total), numW)) + rc.pad(1) +
 			rc.Subtle.Render(rc.PadLeft(rc.Percent(b.Total, d.grand), shareW))
-		// Every bar descends into Browse filtered by this entity, so every named
-		// row wears the chevron; an unnamed ("—") bucket has no value to filter on
-		// and therefore no affordance.
-		marker := rc.FocusMark(idx == d.selected) + rc.pad(1) + rc.DrillMark(name != "") + rc.pad(1)
+		// Empty model IDs are supported drill filters too.
+		marker := rc.FocusMark(idx == d.selected) + rc.pad(1) + rc.DrillMark(name != "" || d.dim == "model") + rc.pad(1)
 		rows = append(rows, c.mark(BarZone(name), marker+body))
 	}
 	content := title + "\n" + strings.Join(rows, "\n")

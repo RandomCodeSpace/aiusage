@@ -30,26 +30,15 @@ func zoneCenter(m Model, id string) (x, y int, ok bool) {
 	return (z.StartX + z.EndX) / 2, (z.StartY + z.EndY) / 2, true
 }
 
-// pressZone sends a real mouse press of button at the centre of the named zone
-// through Update, driving any dispatched load to completion.
-func pressZone(t *testing.T, m Model, id string, button tea.MouseButton) (Model, bool) {
-	t.Helper()
-	x, y, ok := zoneCenter(m, id)
-	if !ok {
-		return m, false
-	}
-	return step(t, m, tea.MouseClickMsg{Button: button, X: x, Y: y}), true
-}
-
-// mustPress is pressZone with a hard failure when the zone is not on screen —
-// an interactive surface that cannot be hit is the bug this suite exists for.
+// mustPress fails when the zone is not on screen: an interactive surface that
+// cannot be hit is the bug this suite exists for.
 func mustPress(t *testing.T, m Model, id string, button tea.MouseButton) Model {
 	t.Helper()
-	m2, ok := pressZone(t, m, id, button)
-	if !ok {
-		t.Fatalf("zone %q is not on screen: it cannot be pressed", id)
+	z, frame, elapsed := resolveCurrentZone(m, id)
+	if z == nil {
+		t.Fatalf("zone %q is not on the current frame after %s at %dx%d; actual=%+v\n%s", id, elapsed, m.width, m.height, m.zoneMgr.Get(id), frame)
 	}
-	return m2
+	return step(t, m, tea.MouseClickMsg{Button: button, X: (z.StartX + z.EndX) / 2, Y: (z.StartY + z.EndY) / 2})
 }
 
 // wheelOver sends a real wheel notch over the centre of the named zone.

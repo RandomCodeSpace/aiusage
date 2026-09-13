@@ -454,6 +454,13 @@ func legacyDB(t *testing.T, version int) string {
 	if version >= 7 {
 		ddl += strings.Join(turnContextV7Statements(), ";\n") + ";\n"
 	}
+	if version >= 8 {
+		for _, step := range migrations {
+			if step.version == 8 {
+				ddl += strings.Join(step.statements, ";\n") + ";\n"
+			}
+		}
+	}
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatalf("create v%d schema: %v", version, err)
 	}

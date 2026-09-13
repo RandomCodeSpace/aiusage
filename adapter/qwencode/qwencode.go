@@ -353,6 +353,10 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	if err != nil {
 		return adapter.Observation{}, fmt.Errorf("qwencode: stat %s: %w", src.Path, err)
 	}
+	return a.collectReader(ctx, src, cp, f, fi)
+}
+
+func (a Adapter) collectReader(ctx context.Context, src adapter.Source, cp *model.SourceCheckpoint, f io.ReadSeeker, fi os.FileInfo) (adapter.Observation, error) {
 	size, mtimeNS := fi.Size(), fi.ModTime().UnixNano()
 
 	var start int64
@@ -371,12 +375,15 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 	}
 
 	var (
-		obs      adapter.Observation
-		mtime    = fi.ModTime().UTC()
-		consumed = start
-		skipped  int
-		complete bool
-		r        = bufio.NewReaderSize(f, 64*1024)
+		obs          adapter.Observation
+		mtime        = fi.ModTime().UTC()
+		consumed     = start
+		skipped      int
+		complete     bool
+		recognized   = start > 0
+		nonempty     bool
+		formatDetail string
+		r            = bufio.NewReaderSize(f, 64*1024)
 	)
 	for {
 		if ctx.Err() != nil {
@@ -390,29 +397,41 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 			// partial offset would make the next poll's unchanged-file check
 			// skip the file outright, and the unread tail would wait for the
 			// next append that may never come.
-			break
+			return obs, fmt.Errorf("qwencode: read %s: %w", src.Path, rerr)
 		}
 		if len(bytes.TrimSpace(raw)) > 0 {
+			if !terminated && !json.Valid(raw) {
+				complete = true
+				break // keep a partial append before its incomplete final record
+			}
+			nonempty = true
+			if !json.Valid(raw) {
+				skipped++ // complete poison is consumed; format anchors are checked separately
+				consumed += int64(len(raw))
+				continue
+			}
+			known, detail := ledgerRecordShape(raw)
 			var rec record
-			if err := json.Unmarshal(raw, &rec); err != nil {
-				// A malformed line must not drop the rest of the file. An
-				// unterminated malformed tail is a write in progress, though:
-				// leave the offset before it so the completed line is read next
-				// cycle.
-				if !terminated {
-					complete = true
-					break
-				}
+			if detail != "" {
 				skipped++
-			} else if ev, ok := rec.event(src.Path, mtime); ok {
-				obs.Events = append(obs.Events, ev)
-				if tc, ok := rec.turnContext(ev); ok {
-					obs.TurnContexts = append(obs.TurnContexts, tc)
+				if formatDetail == "" {
+					formatDetail = detail
 				}
-			} else if rec.ID == "" {
-				// No provider UUID: not a record this harness wrote. Counted,
-				// never keyed — see record.event.
-				skipped++
+			} else if known {
+				if err := json.Unmarshal(raw, &rec); err != nil {
+					skipped++
+					if formatDetail == "" {
+						formatDetail = "record fields"
+					}
+				} else {
+					recognized = true
+					if ev, ok := rec.event(src.Path, mtime); ok {
+						obs.Events = append(obs.Events, ev)
+						if tc, ok := rec.turnContext(ev); ok {
+							obs.TurnContexts = append(obs.TurnContexts, tc)
+						}
+					}
+				}
 			}
 		}
 		if terminated {
@@ -427,6 +446,15 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		break
 	}
 
+	if err := ctx.Err(); err != nil {
+		return obs, err
+	}
+	if formatDetail != "" {
+		return obs, fmt.Errorf("qwencode: ledger %w: skipped %d unusable record(s) in %s; missing or incompatible %s", adapter.ErrSourceFormat, skipped, src.Path, formatDetail)
+	}
+	if nonempty && !recognized {
+		return obs, fmt.Errorf("qwencode: ledger %w: no recognized record anchors", adapter.ErrSourceFormat)
+	}
 	if complete {
 		obs.Checkpoint = &model.SourceCheckpoint{
 			Tool: model.ToolQwenCode, SourcePath: src.Path,
@@ -434,9 +462,53 @@ func (a Adapter) CollectIncremental(ctx context.Context, src adapter.Source, cp 
 		}
 	}
 	if skipped > 0 {
-		return obs, fmt.Errorf("qwencode: skipped %d unusable record(s) in %s", skipped, src.Path)
+		return obs, fmt.Errorf("qwencode: skipped %d unusable record(s) in %s: malformed JSON", skipped, src.Path)
 	}
 	return obs, nil
+}
+
+// ledgerRecordShape keeps absent legacy/zero buckets distinct from a renamed
+// current accounting shape. Unknown additions never enter the audit payload.
+func ledgerRecordShape(raw []byte) (bool, string) {
+	var shape struct {
+		Version  json.RawMessage `json:"schemaVersion"`
+		ID       *string         `json:"id"`
+		Input    *int64          `json:"inputTokens"`
+		Output   *int64          `json:"outputTokens"`
+		Total    *int64          `json:"totalTokens"`
+		Cached   json.RawMessage `json:"cachedTokens"`
+		Thoughts json.RawMessage `json:"thoughtsTokens"`
+	}
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		return false, "record/id/counter fields"
+	}
+	if shape.ID == nil && len(shape.Version) == 0 && shape.Input == nil && shape.Output == nil && shape.Total == nil && len(shape.Cached)+len(shape.Thoughts) == 0 {
+		return false, "" // an unrelated record kind; a whole unknown file fails below
+	}
+	if shape.ID == nil || strings.TrimSpace(*shape.ID) == "" {
+		return false, "id"
+	}
+	for _, field := range []json.RawMessage{shape.Cached, shape.Thoughts} {
+		if len(field) == 0 {
+			continue
+		}
+		var count int64
+		if bytes.Equal(bytes.TrimSpace(field), []byte("null")) || json.Unmarshal(field, &count) != nil {
+			return false, "cached/thoughts counter"
+		}
+	}
+	if len(shape.Version) > 0 {
+		var version int
+		if json.Unmarshal(shape.Version, &version) != nil || version <= 0 {
+			return false, "schemaVersion"
+		}
+		if shape.Input == nil || shape.Output == nil || shape.Total == nil {
+			return false, "versioned inputTokens/outputTokens/totalTokens"
+		}
+	} else if shape.Input == nil && shape.Output == nil && shape.Total == nil && len(shape.Cached)+len(shape.Thoughts) == 0 {
+		return false, "legacy token counter"
+	}
+	return true, ""
 }
 
 // record is the ALLOW-LIST of ledger fields this adapter reads. It is a typed
@@ -483,10 +555,9 @@ type record struct {
 // replaces a tail read. Refusing keeps the ledger honest and the skip is
 // reported.
 //
-// schemaVersion is NOT gated. Refusing a version this package predates would
-// turn a harness upgrade into silent data loss; a future record whose fields
-// were renamed decodes to zero tokens and is dropped by the all-zero filter
-// below, which is the same outcome without the guesswork.
+// Version numbers are not an upper bound: a newer writer retaining these
+// accounting anchors stays readable. Collection diagnoses incompatible shapes
+// before calling event; a renamed counter must not become a clean zero.
 func (r record) event(path string, mtime time.Time) (model.UsageEvent, bool) {
 	if r.ID == "" {
 		return model.UsageEvent{}, false

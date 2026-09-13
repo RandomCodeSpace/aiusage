@@ -71,6 +71,7 @@ func newScrubModel(t *testing.T) (*scrubData, Model) {
 	t.Helper()
 	f := &scrubData{}
 	m := NewModel(f, Options{DBPath: "/tmp/usage.db"})
+	t.Cleanup(m.zoneMgr.Close)
 	m.data.now = func() time.Time { return time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local) }
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = loadOnce(tm.(Model))

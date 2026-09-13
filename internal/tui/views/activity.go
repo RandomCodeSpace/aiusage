@@ -398,6 +398,11 @@ func activityRankPanel(c Ctx, d ActivityData, rows []invRow, w, h int, focus boo
 		// "1-12/200" readout below counts what is HELD, which would otherwise
 		// read as the whole vocabulary.
 		title = d.panelTitle() + " · top " + strconv.Itoa(d.Limit) + " by " + d.OrderLbl
+		if d.OrderLbl == "name" {
+			rank := d.countLabel()
+			n := strconv.Itoa(d.Limit)
+			title = pickForm([]string{d.panelTitle() + " · top " + n + " by " + rank + " · sorted by name", "top " + n + " by " + rank + " · name order", "top " + n + " " + rank + " · A–Z"}, inner)
+		}
 	}
 
 	if len(rows) == 0 {

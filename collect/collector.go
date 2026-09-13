@@ -21,8 +21,9 @@
 //
 // INJECTION SEAMS: RunOnce accepts a Pricer interface to price each new event
 // at ingest time, and an optional Refresher to update the price table before
-// stamping. A Pricer implementation returns microUSD, source, and ok; ok=false
-// leaves the event unpriced (CostMicroUSD = nil). Cost stamped by an adapter
+// stamping. A versioned pricer also fills missing historical costs when the
+// store supports price sync. A Pricer returns microUSD, source, and ok;
+// ok=false leaves the event unpriced (CostMicroUSD = nil). Cost stamped by an adapter
 // (attached to the event before collection) is never overwritten by the ladder:
 // the Pricer is consulted only for events that arrive UNPRICED. WithPricer() /
 // WithoutRaw() are Options that configure a cycle; Options are composable and
@@ -32,7 +33,8 @@
 // supply a checkpoint (SourceCheckpoint) to skip unchanged sources — a seam for
 // efficiency, not correctness. The checkpoint rides the same transaction as its
 // events, so a crash cannot advance a checkpoint past the rows it accounts for.
-// A checkpoint load failure falls back to a full read, which is always correct.
+// A checkpoint load failure stops that source: some adapters keep monetary
+// baselines in the checkpoint, so a full read could double charge history.
 //
 // SINGLE-TRANSACTION OBSERVATION: events, activity records, and turn contexts
 // from one source observation land in ONE transaction per source, alongside the
@@ -72,7 +74,8 @@ var nowFn = func() time.Time { return time.Now().UTC() }
 // the cost in micro-USD and the price_source that produced it. ok=false leaves
 // the event unpriced (a NULL cost column) — the honest state, since a stored 0
 // would claim the request was free. Reporting prices NULL rows from the current
-// table at display time instead.
+// table at display time instead. A versioned pricer also lets collection fill
+// missing stored costs when rates become available later.
 type Pricer interface {
 	PriceEvent(e model.UsageEvent) (microUSD int64, source string, ok bool)
 }
@@ -94,7 +97,8 @@ type cycleOptions struct {
 }
 
 // WithPricer stamps a cost on every new event from the price table in effect at
-// ingest. Without it (the default) events are stored unpriced.
+// ingest. A pricer with Revision() string also enables historical price sync
+// on stores that support it. Without a pricer, events are stored unpriced.
 func WithPricer(p Pricer) Option {
 	return func(o *cycleOptions) { o.pricer = p }
 }
@@ -133,6 +137,7 @@ type CycleStats struct {
 	EventsSeen     int      // observed event-level records (pre-dedup)
 	Snapshots      int      // aggregate snapshots observed
 	Errors         []string // non-fatal per-adapter / per-source errors
+	PricesSynced   int      // existing unpriced rows given a computed cost
 
 	// ActivitySeen counts observed tool/skill/hook invocations (pre-dedup) and
 	// ActivityInserted the new activity dedup keys actually written. They are
@@ -162,6 +167,9 @@ type CycleStats struct {
 	// adapter and source being processed are already counted — so a truncated
 	// cycle must never be read (or logged) as a completed one.
 	Canceled bool
+
+	// CodeChangesUpdated counts per-turn snapshots inserted or changed.
+	CodeChangesUpdated int
 }
 
 // AllFailed reports whether the cycle produced only errors: every discovered
@@ -212,6 +220,27 @@ func RunOnce(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.Di
 		_ = r.Refresh(ctx)
 	}
 
+	// Optional capabilities preserve the existing Store and Pricer contracts.
+	// The ledger persists progress; unchanged source checkpoints must not stop
+	// older usage from receiving a price that was unavailable at ingestion.
+	if p, ok := o.pricer.(interface{ Revision() string }); ok {
+		if revision := p.Revision(); revision != "" {
+			if s, ok := st.(interface {
+				SyncUnpriced(context.Context, string, func(model.UsageEvent) (int64, string, bool)) (int, error)
+			}); ok {
+				var err error
+				stats.PricesSynced, err = s.SyncUnpriced(ctx, revision, o.pricer.PriceEvent)
+				if err != nil {
+					stats.Errors = append(stats.Errors, fmt.Sprintf("price sync: %v", err))
+					if ctx.Err() != nil {
+						stats.Canceled = true
+						return stats, ctx.Err()
+					}
+				}
+			}
+		}
+	}
+
 	for _, ad := range reg.All() {
 		if err := ctx.Err(); err != nil {
 			stats.Canceled = true
@@ -234,7 +263,7 @@ func RunOnce(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.Di
 			errsBefore := len(stats.Errors)
 			progressed := false
 
-			obs, err := collectSource(ctx, ad, st, src, &stats)
+			obs, err := collectSource(ctx, ad, st, src)
 			if err != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("collect %s %s: %v", ad.ID(), src.Path, err))
 				// Best-effort: a bad source must not abort the cycle. Still
@@ -266,11 +295,12 @@ func RunOnce(ctx context.Context, reg *adapter.Registry, st Store, dc adapter.Di
 			stats.ActivityInserted += applied.Activity
 			stats.TurnContextsSeen += len(obs.TurnContexts)
 			stats.TurnContextsInserted += applied.TurnContexts
+			stats.CodeChangesUpdated += applied.CodeChanges
 			if sErr != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("insert events %s %s: %v", ad.ID(), src.Path, sErr))
 			}
-			if applied.Events > 0 || applied.Activity > 0 ||
-				(sErr == nil && (len(obs.Events) > 0 || len(obs.Activity) > 0)) {
+			if applied.Events > 0 || applied.Activity > 0 || applied.CodeChanges > 0 ||
+				(sErr == nil && (len(obs.Events) > 0 || len(obs.Activity) > 0 || len(obs.CodeChanges) > 0)) {
 				progressed = true
 			}
 
@@ -329,17 +359,16 @@ func stripRaw(obs *adapter.Observation) {
 }
 
 // collectSource reads one source, going through the incremental path when the
-// adapter supports it. A checkpoint load failure is non-fatal: collection
-// falls back to a full read, which is always correct.
-func collectSource(ctx context.Context, ad adapter.Adapter, st Store, src adapter.Source, stats *CycleStats) (adapter.Observation, error) {
+// adapter supports it. A checkpoint load failure holds this source until its
+// saved state can be read; a successful absent checkpoint is a first read.
+func collectSource(ctx context.Context, ad adapter.Adapter, st Store, src adapter.Source) (adapter.Observation, error) {
 	inc, ok := ad.(adapter.Incremental)
 	if !ok {
 		return ad.Collect(ctx, src)
 	}
 	cp, err := st.Checkpoint(ctx, src.Tool, src.Path)
 	if err != nil {
-		stats.Errors = append(stats.Errors, fmt.Sprintf("checkpoint %s %s: %v", ad.ID(), src.Path, err))
-		cp = nil
+		return adapter.Observation{}, fmt.Errorf("load checkpoint: %w", err)
 	}
 	return inc.CollectIncremental(ctx, src, cp)
 }
@@ -354,7 +383,7 @@ func collectSource(ctx context.Context, ad adapter.Adapter, st Store, src adapte
 // step with the ladder.
 func storeObservation(ctx context.Context, st Store, obs adapter.Observation, observedAt time.Time, cp *model.SourceCheckpoint, p Pricer) (store.Applied, error) {
 	events, activity, contexts := obs.Events, obs.Activity, obs.TurnContexts
-	if len(events) == 0 && len(activity) == 0 && len(contexts) == 0 && cp == nil {
+	if len(events) == 0 && len(activity) == 0 && len(contexts) == 0 && len(obs.CodeChanges) == 0 && cp == nil {
 		return store.Applied{}, nil
 	}
 	stamped := make([]model.UsageEvent, len(events))
@@ -385,8 +414,15 @@ func storeObservation(ctx context.Context, st Store, obs adapter.Observation, ob
 		}
 		ctxs[i] = c
 	}
+	changes := make([]model.CodeChange, len(obs.CodeChanges))
+	for i, change := range obs.CodeChanges {
+		if change.ObservedTime.IsZero() {
+			change.ObservedTime = observedAt
+		}
+		changes[i] = change
+	}
 	return st.ApplyBatch(ctx, store.ObservationBatch{
-		Events: stamped, Activity: acts, TurnContexts: ctxs, Checkpoint: cp,
+		Events: stamped, Activity: acts, TurnContexts: ctxs, CodeChanges: changes, Checkpoint: cp,
 	})
 }
 
