@@ -10,29 +10,26 @@ import (
 )
 
 // Theme holds the intentional palette and the reusable lipgloss styles for the
-// whole TUI. Colors are AdaptiveColor so the UI reads well in both light and
-// dark terminals while keeping WCAG-AA contrast on both floors.
+// whole TUI. The application inherits the terminal's background and base text;
+// adaptive colors are reserved for hierarchy, interaction, and status.
 //
-// Direction: a graphite "trading desk" dashboard. Exactly one cold-cyan
-// interaction accent (the focus bar and the active chip), a warm amber
-// "now"/scrub readout,
-// and the per-component (input/output/cache) token series colored from the
-// ANSI palette in buildCtx and rendered in every chart, bar and split.
+// Direction: restrained terminal-native chrome. A magenta interaction accent
+// marks focus, warm amber marks live/scrub state, and red/green carry status.
+// Per-component token series use the ANSI palette in buildCtx.
 type Theme struct {
-	// Core palette. Bg/Surface/SurfaceHi/SurfaceTop are the 4-step elevation
-	// ladder (views.ElevGround..views.ElevChip); Elev() hands them to the views
-	// as an indexable ladder so no view ever names a color.
-	Bg         compat.AdaptiveColor
-	Surface    compat.AdaptiveColor
-	SurfaceHi  compat.AdaptiveColor // focused pane / selected row floor (L2)
-	SurfaceTop compat.AdaptiveColor // chips, active tab, table header band (L3)
-	Border     compat.AdaptiveColor // the outer app frame — the ONE border
-	Text       compat.AdaptiveColor
+	// Core palette. The elevation fields retain the view contract and geometry,
+	// but all map to NoColor so the user's terminal remains the visual floor.
+	Bg         color.Color
+	Surface    color.Color
+	SurfaceHi  color.Color          // focused pane / selected row floor (L2)
+	SurfaceTop color.Color          // chips, active tab, table header band (L3)
+	Border     compat.AdaptiveColor // outer app frame boundary
+	Text       color.Color
 	Muted      compat.AdaptiveColor
 	Faint      compat.AdaptiveColor // gridlines, rules, ghosted series, disabled
 
 	// Semantic palette.
-	Accent compat.AdaptiveColor // the ONE interaction accent (cold cyan)
+	Accent compat.AdaptiveColor // the ONE interaction accent (magenta)
 	Now    compat.AdaptiveColor // live/today/scrub readout (warm amber)
 
 	// The three token series (input, output, cache) are colored from the ANSI
@@ -65,17 +62,18 @@ func adaptive(light, dark string) compat.AdaptiveColor {
 
 // NewTheme builds the default theme.
 func NewTheme() Theme {
+	native := lipgloss.NoColor{}
 	t := Theme{
-		Bg:         adaptive("#FBFCFE", "#0B0E14"),
-		Surface:    adaptive("#F1F4F9", "#11161F"),
-		SurfaceHi:  adaptive("#E7ECF4", "#161D29"),
-		SurfaceTop: adaptive("#DCE4F0", "#1E2735"),
-		Border:     adaptive("#D2DAE6", "#232B38"),
-		Text:       adaptive("#10151D", "#E8EEF6"),
-		Muted:      adaptive("#5A6B82", "#7C8DA6"),
+		Bg:         native,
+		Surface:    native,
+		SurfaceHi:  native,
+		SurfaceTop: native,
+		Border:     adaptive("#788596", "#65758B"),
+		Text:       native,
+		Muted:      adaptive("#526276", "#9AA9BD"),
 		Faint:      adaptive("#9AA3AE", "#4A535F"),
 
-		Accent: adaptive("#0E8C97", "#3DD6E0"),
+		Accent: adaptive("#9C36B5", "#EB99E3"),
 		Now:    adaptive("#B5780A", "#F2B441"),
 
 		Positive: adaptive("#1A7F37", "#56D364"),
@@ -96,8 +94,8 @@ func NewTheme() Theme {
 	t.Stat = lipgloss.NewStyle().Bold(true).Foreground(t.Text)
 	t.StatLabel = lipgloss.NewStyle().Foreground(t.Muted)
 
-	// The chrome bars are painted blocks too: header/breadcrumb/footer sit one
-	// step above the app ground so the body's cards read as floating on them.
+	// Chrome inherits the terminal floor. Padding and text hierarchy distinguish
+	// it without flooding the terminal with a synthetic background.
 	t.HeaderBar = lipgloss.NewStyle().Foreground(t.Text).Background(t.SurfaceHi).Padding(0, 1)
 	t.FooterBar = lipgloss.NewStyle().Foreground(t.Muted).Background(t.SurfaceHi).Padding(0, 1)
 
@@ -106,24 +104,20 @@ func NewTheme() Theme {
 	return t
 }
 
-// Elev is the 4-step elevation ladder handed to the views, indexed by
-// views.ElevGround..views.ElevChip.
+// Elev supplies the existing four-step view contract. Every step inherits the
+// terminal background; glyphs, rules, weight, and accents carry hierarchy.
 func (t Theme) Elev() [4]color.Color {
 	return [4]color.Color{t.Bg, t.Surface, t.SurfaceHi, t.SurfaceTop}
 }
 
-// blockPad is the uniform card padding. It is deliberately the exact cell cost
-// the rounded border + Padding(0,1) used to carry (4 columns, 2 rows) so every
-// width/height budget in the views survives the borders being removed —
-// lipgloss v2 Width/Height are border- AND padding-inclusive.
+// blockPad is the uniform card padding. It preserves the existing geometry.
 const (
 	blockPadY = 1
 	blockPadX = 2
 )
 
-// Idle returns the resting panel style: a painted card at elevation L1, no
-// border. Borders retreat to the outer app frame (issue #22); depth is carried
-// by the ladder and structure by the titled rule.
+// Idle returns the resting panel style. The terminal supplies its floor;
+// structure comes from padding, titled rules, and the outer frame.
 func (t Theme) Idle() lipgloss.Style {
 	return lipgloss.NewStyle().Background(t.Surface).Padding(blockPadY, blockPadX)
 }
@@ -134,18 +128,14 @@ func (t Theme) Errored() lipgloss.Style {
 	return lipgloss.NewStyle().Background(t.Surface).Padding(blockPadY, blockPadX)
 }
 
-// AppFrame is the ink of the ONE border the design language allows: the outer
-// app frame. It styles the frame's glyphs, which render.go lays out by hand —
-// a bordered lipgloss style re-flows the whole frame and costs a third of the
-// render budget. Everything inside the frame is painted, never boxed.
+// AppFrame styles the neutral outer boundary while retaining the terminal's
+// own background.
 func (t Theme) AppFrame() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.Border).Background(t.Bg)
 }
 
-// toolAccents maps each known tool to a distinct accent color so per-tool bars
-// and rows are visually distinguishable. copilot/gemini are nudged off cyan so
-// they don't collide with the interaction Accent. Unknown tools fall back to the
-// theme accent.
+// toolAccents maps each known tool to a distinct color so per-tool bars and
+// rows are distinguishable. Unknown tools fall back to the theme accent.
 var toolAccents = map[string]compat.AdaptiveColor{
 	model.ToolClaudeCode: adaptive("#B25000", "#E8924A"), // amber
 	model.ToolCodex:      adaptive("#1A7F37", "#3FB950"), // green

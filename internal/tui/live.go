@@ -46,7 +46,7 @@ import (
 // The deliberate trade: a burst no longer LOADS the windows it merely passes
 // through, so coming back to one costs a flight instead of hitting a cache the
 // wasted work had incidentally warmed. That is the right way round — a revisit
-// is one background load behind the "◐ sync" chip with the previous picture
+// is one background load behind the "◐ loading" chip with the previous picture
 // still up, while the speculative warming cost every intermediate window a full
 // aggregation whether or not the reader ever stopped on it. Windows actually
 // LOADED stay memoized across toggles exactly as before: the summary cache
@@ -148,11 +148,11 @@ func (g *flightGate) stop() {
 }
 
 // loadCmd runs the queries the current view needs OFF the UI thread, warming
-// the shared *Data cache, then returns a dataLoadedMsg. It reuses reload() on a
-// throwaway copy of the model: that copy shares the *Data pointer (so the cache
-// it warms is the live one) but owns value copies of every view struct, so its
-// mutations never touch the live model. The real reload() on dataLoadedMsg then
-// hits the warm cache and does no SQLite work on the UI thread.
+// the shared *Data cache, then returns a dataLoadedMsg. The usage workspace
+// captures its two-query identity in a compact request; legacy views reuse
+// reload() on a throwaway model copy because their query sets depend on broader
+// view state. The real reload() on dataLoadedMsg then hits the warm cache and
+// does no SQLite work on the UI thread.
 //
 // The flight's context is taken HERE, on the UI thread at dispatch time, not
 // inside the returned closure: taking it is what cancels the previous flight,
@@ -163,12 +163,28 @@ func (m Model) loadCmd() tea.Cmd {
 	return m.loadCmdAfter(0)
 }
 
-func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
-	mc := m
+func (m *Model) loadCmdAfter(delay time.Duration) tea.Cmd {
+	loadCtx := m.data.loadContext(m.flight.next())
+	m.detail.stop() // a navigation moots the detail query under the old selection
+	if m.view == ViewOverview && !m.classicOverview {
+		return workspaceLoadRequest{
+			data:   m.data,
+			ctx:    loadCtx,
+			span:   m.span(),
+			crumbs: cloneCrumbs(m.crumbs),
+			group:  m.workspaceRequestedGroup(),
+			now:    m.loadNow,
+			gen:    m.loadGen,
+			dbPath: m.dbPath,
+		}.cmd(delay)
+	}
+
+	// Legacy views still use reload on an isolated model copy because their
+	// query sets depend on more view state than the workspace's two summaries.
+	mc := *m
 	dbPath := m.dbPath
 	gen := m.loadGen
-	mc.loadCtx = m.data.loadContext(m.flight.next())
-	m.detail.stop() // a navigation moots the detail query under the old selection
+	mc.loadCtx = loadCtx
 	return func() tea.Msg {
 		if delay > 0 {
 			timer := time.NewTimer(delay)
@@ -192,6 +208,48 @@ func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
 		}
 		mc.reload()
 		return dataLoadedMsg{gen: gen, now: mc.loadNow, mtime: mt, err: mc.err}
+	}
+}
+
+// workspaceLoadRequest is the complete query identity of the usage workspace.
+// Keeping it independent of Model matters on the UI thread: Model contains the
+// rendered workspace and is tens of kilobytes, while the background flight only
+// needs these values to warm the two cache entries applyReload consumes.
+type workspaceLoadRequest struct {
+	data   *Data
+	ctx    context.Context
+	span   Span
+	crumbs []Crumb
+	group  string
+	now    time.Time
+	gen    uint64
+	dbPath string
+}
+
+func (r workspaceLoadRequest) cmd(delay time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-r.ctx.Done():
+				return dataLoadedMsg{gen: r.gen, now: r.now, err: r.ctx.Err()}
+			}
+		}
+
+		// Keep the refresh watermark at-or-before the cache snapshot, matching the
+		// legacy flight's stat-before-query contract.
+		mt := fileMTime(r.dbPath)
+		now := r.now
+		if now.IsZero() {
+			now = r.data.now()
+		}
+		_, _, err := r.data.Timeline(r.ctx, now, r.span, r.crumbs)
+		if err == nil {
+			_, err = r.data.GroupByDims(r.ctx, now, r.span, r.crumbs, workspaceGroupDims(r.group))
+		}
+		return dataLoadedMsg{gen: r.gen, now: now, mtime: mt, err: err}
 	}
 }
 
@@ -224,7 +282,7 @@ func fileMTime(path string) time.Time {
 // startLoad opens a new load generation and returns its load cmd: it bumps the
 // generation (superseding any in-flight load, whose apply will now be dropped),
 // resolves the generation clock, cuts the freshness chip and dispatches. The
-// chip cut is synchronous — the very next frame carries "◐ sync" with the old
+// chip cut is synchronous — the very next frame carries "◐ loading" with the old
 // picture still behind it (the J-cut). Cold stays cold: with no picture to
 // hold, the branded loading screen owns the frame instead. Kept as the single
 // dispatch path so generation, clock and freshness never drift apart.
@@ -327,6 +385,12 @@ func (m Model) handleDataLoaded(msg dataLoadedMsg) (Model, tea.Cmd) {
 		// contract as a failed flight: hold the picture unless there is none.
 		if prior != FreshCold {
 			m.fresh = FreshStale
+		}
+		return m, nil
+	}
+	if m.detailWanted && m.view == ViewOverview {
+		if prior != FreshCold {
+			m.fresh = FreshCutIn
 		}
 		return m, nil
 	}

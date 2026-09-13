@@ -141,8 +141,8 @@ func activityV5Statements() []string {
 
 // ActivityFilter selects and groups agent activity for reporting. It mirrors
 // Filter's vocabulary so a surface can carry one set of crumbs across both
-// ledgers, minus the dimensions activity has no column for (provider, service
-// tier) and plus the two it introduces (kind, name).
+// ledgers, plus the two activity introduces (kind, name). Provider filters use
+// the linked usage row because activity has no recorded provider of its own.
 type ActivityFilter struct {
 	Since time.Time // inclusive lower bound on event_time (zero = open)
 	Until time.Time // exclusive upper bound on event_time (zero = open)
@@ -153,6 +153,10 @@ type ActivityFilter struct {
 	Projects []string // restrict to these projects (empty = all)
 	Sessions []string // restrict to these sessions (empty = all)
 	Models   []string // restrict to these models (empty = all)
+	// Providers restricts to linked usage with these recorded providers. Empty
+	// means all; [""] selects linked usage with an unknown provider. Unlinked
+	// activity and turn contexts are excluded whenever this filter is set.
+	Providers []string
 	// Values restricts the TURN-CONTEXT queries to these context values (empty =
 	// all) — agent types, skill names, MCP server or tool names, plugin names,
 	// whichever dimension the query named. It is ignored by
@@ -357,6 +361,10 @@ func buildActivityWhere(f ActivityFilter) (string, []any) {
 	addIn("a.project", f.Projects)
 	addIn("a.session_id", f.Sessions)
 	addIn("a.model", f.Models)
+	// A missing usage link yields NULL, which cannot match even the recorded
+	// unknown provider. Keep this predicate usable by listing and count queries
+	// as well as the selected-activity CTE, without changing their joins.
+	addIn("(SELECT u.provider FROM usage_events u WHERE u.dedup_key = a.usage_dedup_key)", f.Providers)
 
 	if len(conds) == 0 {
 		return "", nil

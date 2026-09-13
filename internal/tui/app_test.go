@@ -368,6 +368,16 @@ func newTestModel(t *testing.T, src DataSource) Model {
 	return newTestModelW(t, src, 120)
 }
 
+// classicOverview selects the retained chart-first Overview for tests whose
+// subject is its scrub, hero or memo contract. The production default remains
+// the usage workspace.
+func classicOverview(m Model) Model {
+	m.classicOverview = true
+	m.heroPivot = false
+	m.reload()
+	return m
+}
+
 // keyMsg builds a key-press message for a single token.
 func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
@@ -694,6 +704,7 @@ func TestRangeAndSortCycle(t *testing.T) {
 		t.Fatalf("range change did not reset crumbs: %v", m.crumbs)
 	}
 
+	m.sort = SortTotal // make the cycle contract independent of the new Cost default
 	for _, want := range []Sort{SortEvents, SortName, SortCost, SortTotal} {
 		m = step(t, m, keyMsg("s"))
 		if m.sort != want {
@@ -730,6 +741,7 @@ func TestFilterFlow(t *testing.T) {
 func TestOverviewScrub(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	m = send(m, keyMsg("1")) // Overview (hour, 2 buckets for today)
+	m = classicOverview(m)
 	if len(m.tlData.Buckets) != 2 {
 		t.Fatalf("overview trend buckets = %d, want 2", len(m.tlData.Buckets))
 	}
@@ -775,6 +787,7 @@ func TestOverviewScrub(t *testing.T) {
 func TestVerticalArrowsDoNotScrub(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	m = send(m, keyMsg("1")) // overview
+	m = classicOverview(m)
 	start := m.scrubIndex
 
 	m = send(m, keyMsg("up"))
@@ -794,6 +807,7 @@ func TestVerticalArrowsDoNotScrub(t *testing.T) {
 	// Horizontal axis still scrubs on the overview trend.
 	m = newTestModel(t, &fakeData{})
 	m = send(m, keyMsg("1")) // overview, scrub starts at index 0 of 2
+	m = classicOverview(m)
 	m = send(m, keyMsg("right"))
 	if m.scrubIndex != 1 {
 		t.Fatalf("right did not scrub: index = %d, want 1", m.scrubIndex)
@@ -841,6 +855,7 @@ func TestMouseClickRowSelects(t *testing.T) {
 func TestMouseWheelScrubsOverview(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
 	m = send(m, keyMsg("1")) // Overview (owns the trend scrub)
+	m = classicOverview(m)
 	wheelDown := tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 5, Y: 5}
 	m = send(m, wheelDown)
 	if !m.scrubPinned {

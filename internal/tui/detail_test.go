@@ -75,6 +75,7 @@ func newScrubModel(t *testing.T) (*scrubData, Model) {
 	m.data.now = func() time.Time { return time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local) }
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = loadOnce(tm.(Model))
+	m = classicOverview(m)
 	if n := len(m.tlData.Buckets); n != 30 {
 		t.Fatalf("timeline buckets = %d, want 30", n)
 	}

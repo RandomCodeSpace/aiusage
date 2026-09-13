@@ -149,6 +149,7 @@ func TestToolCapabilitiesCoversTheRegistryAndTheRetired(t *testing.T) {
 func TestRootHandsCapabilitiesToTheTUI(t *testing.T) {
 	isolateState(t)
 	db := filepath.Join(t.TempDir(), "usage.db")
+	seedTUIStore(t, db)
 	home := t.TempDir()
 	cfgPath := offlineConfig(t)
 

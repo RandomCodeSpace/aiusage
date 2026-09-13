@@ -117,7 +117,7 @@ func (m *Model) detailFailed() bool {
 func (m *Model) loadDetail() {
 	switch m.view {
 	case ViewOverview:
-		m.loadOverview()
+		m.loadOverviewSnapshot(false)
 	case ViewByTool:
 		m.loadByToolDetail()
 	case ViewByModel:
@@ -138,7 +138,7 @@ func (m Model) handleDetailLoaded(msg detailLoadedMsg) (Model, tea.Cmd) {
 	case ViewOverview:
 		// Apply only a complete cached snapshot. Invalidation can happen after
 		// the flight finished; a miss requests another background load.
-		m.loadOverviewWith(true)
+		m.loadOverviewSnapshot(true)
 		if m.detailWanted {
 			if m.fresh != FreshCold {
 				m.fresh = FreshCutIn

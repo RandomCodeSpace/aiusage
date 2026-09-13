@@ -498,6 +498,8 @@ func applyCrumb(f *store.Filter, c Crumb) {
 		f.Tools = append(f.Tools, c.Value)
 	case "model":
 		f.Models = append(f.Models, c.Value)
+	case "provider":
+		f.Providers = append(f.Providers, c.Value)
 	case "project":
 		f.Projects = append(f.Projects, c.Value)
 	case "session":
@@ -524,9 +526,9 @@ func cacheKey(f store.Filter) string {
 	b = f.Since.AppendFormat(b, time.RFC3339)
 	b = append(b, '|')
 	b = f.Until.AppendFormat(b, time.RFC3339)
-	for dim, list := range [...][]string{f.GroupBy, f.Tools, f.Models, f.Projects, f.Sessions} {
+	for dim, list := range [...][]string{f.GroupBy, f.Tools, f.Models, f.Projects, f.Sessions, f.Providers} {
 		b = append(b, '|')
-		if dim == 2 && len(list) > 0 { // explicit model-filter presence
+		if len(list) > 0 && (dim == 2 || dim == 5 || (dim == 3 && list[0] == "")) { // explicit model/provider-filter presence
 			b = append(b, '=')
 		}
 		for i, v := range list {
@@ -660,6 +662,8 @@ func applyActivityCrumb(f *store.ActivityFilter, c Crumb) {
 		f.Tools = append(f.Tools, c.Value)
 	case "model":
 		f.Models = append(f.Models, c.Value)
+	case "provider":
+		f.Providers = append(f.Providers, c.Value)
 	case "project":
 		f.Projects = append(f.Projects, c.Value)
 	case "session":
@@ -676,8 +680,11 @@ func activityKey(f store.ActivityFilter) string {
 	b = f.Since.AppendFormat(b, time.RFC3339)
 	b = append(b, '|')
 	b = f.Until.AppendFormat(b, time.RFC3339)
-	for _, list := range [...][]string{f.GroupBy, f.Tools, f.Kinds, f.Names, f.Projects, f.Sessions, f.Models} {
+	for dim, list := range [...][]string{f.GroupBy, f.Tools, f.Kinds, f.Names, f.Projects, f.Sessions, f.Models, f.Providers} {
 		b = append(b, '|')
+		if len(list) > 0 && (dim == 6 || dim == 7 || (dim == 4 && list[0] == "")) {
+			b = append(b, '=')
+		}
 		for i, v := range list {
 			if i > 0 {
 				b = append(b, ',')

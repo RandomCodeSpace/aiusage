@@ -287,7 +287,7 @@ func (m Model) drag(msg tea.MouseMotionMsg) Model {
 
 // zoneAt returns the most specific registered zone id under the mouse, or "".
 // It checks the small registry of known ids (cheap; the set is bounded).
-func (m Model) zoneAt(msg tea.MouseMsg) string {
+func (m *Model) zoneAt(msg tea.MouseMsg) string {
 	if m.zoneMgr == nil {
 		return ""
 	}

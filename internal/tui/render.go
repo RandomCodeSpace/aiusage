@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
@@ -47,12 +48,28 @@ func (m Model) render() string {
 		return m.scan(m.appFrame(m.renderLoading()))
 	}
 
+	if m.workspace.overlay != "" {
+		return m.renderWorkspaceOverlay()
+	}
+
 	bl := m.bodyLayout()
+	showHeader, showBreadcrumb := m.lay.ShowHeader, m.lay.ShowBreadcrumb
+	if m.view == ViewOverview && !m.classicOverview && m.height < 18 {
+		extra := 0
+		if showHeader {
+			extra++
+		}
+		if showBreadcrumb {
+			extra++
+		}
+		showHeader, showBreadcrumb = false, false
+		bl = bl.WithBodyHeight(bl.BodyH + extra)
+	}
 	bodyH := bl.BodyH
 	body := m.clampBlock(m.renderBody(bl), bl.BodyW, bodyH)
 
 	rows := make([]string, 0, 6)
-	if m.lay.ShowHeader {
+	if showHeader {
 		rows = append(rows, m.renderHeader())
 	}
 
@@ -63,7 +80,7 @@ func (m Model) render() string {
 	} else {
 		rows = append(rows, m.tabStripRow())
 	}
-	if m.lay.ShowBreadcrumb {
+	if showBreadcrumb {
 		rows = append(rows, m.renderBreadcrumb())
 	}
 	if m.bannerRows() > 0 {
@@ -81,8 +98,8 @@ func (m Model) render() string {
 	return m.scan(m.appFrame(m.clampFrame(lipgloss.JoinVertical(lipgloss.Left, rows...))))
 }
 
-// appFrame wraps the assembled chrome in the ONE border the design language
-// allows (issue #22). The interior is exactly frameW×frameH — which is what
+// appFrame wraps the assembled chrome in the outer terminal boundary.
+// The interior is exactly frameW×frameH — which is what
 // ComputeLayout was handed, so nothing inside can overflow it.
 //
 // The border is drawn by hand rather than through a bordered lipgloss style.
@@ -314,6 +331,12 @@ func (m Model) renderBreadcrumb() string {
 	// The sort chip is an action chip, so it is a press target: the zone wraps the
 	// WHOLE chip, padding included, not just the label.
 	sortLbl := m.zoneMark(views.ZoneSort, m.headerChip("sort "+m.sort.Label(), m.th.Accent))
+	if m.view == ViewOverview && !m.classicOverview {
+		sortLbl = ""
+		if m.filter != "" {
+			sortLbl = m.zoneMark("workspace-filter", m.th.Subtle.Render("Filter: "+m.filter))
+		}
+	}
 	iw := m.frameW() - 2
 	if iw < 1 {
 		iw = 1
@@ -336,6 +359,9 @@ func (m Model) renderBody(lay views.Layout) string {
 	}
 	switch m.view {
 	case ViewOverview:
+		if !m.classicOverview {
+			return m.renderWorkspace(lay.BodyW, lay.BodyH)
+		}
 		ov := m.overview
 		ov.Sys = m.sysGauges() // inject live resource gauges at render time
 		ov.Gen = m.dataGen     // render-memo dataset identity (applied generation)
@@ -370,6 +396,14 @@ func (m Model) renderBody(lay views.Layout) string {
 }
 
 func (m Model) renderFooter() string {
+	if m.view == ViewOverview && !m.classicOverview && !m.filtering {
+		parts := []string{m.zoneMark("workspace-back", "Back"), m.zoneMark("workspace-up", "↑"), m.zoneMark("workspace-down", "↓"), m.zoneMark("workspace-footer-open", "Open"), m.zoneMark("workspace-footer-details", "Details"), m.zoneMark("workspace-footer-more", "More")}
+		if m.workspace.chooser != "" {
+			parts = []string{m.zoneMark("workspace-choice-close", "Esc Close"), m.zoneMark("workspace-choice-prev", "←"), m.zoneMark("workspace-choice-next", "→"), m.zoneMark("workspace-choice-apply", "Enter Apply")}
+		}
+		return m.th.FooterBar.Render(strings.Join(parts, "  "))
+	}
+
 	if m.filtering {
 		bar := m.th.FooterBar.Render(m.filterUI.View())
 		return lipgloss.NewStyle().MaxWidth(m.frameW()).Render(bar)
@@ -383,11 +417,23 @@ func (m Model) renderFooter() string {
 	return lipgloss.NewStyle().MaxWidth(m.frameW()).Render(bar)
 }
 
+var workspaceHelpLabels = [...][2]string{{"↑/↓", "select row"}, {"Enter/Esc", "open/back"}, {"o/s/c", "group/sort/chart"}, {"d/i/u", "details/cost/tips"}, {"F6–F9", "Today/7d/30d/All"}, {"a/p", "more/pivot"}, {"?/q", "help/quit"}}
+
 // renderHelpOverlay renders the expanded help as a painted card (no border —
 // the app frame is the only box).
 func (m Model) renderHelpOverlay() string {
 	m.help.ShowAll = true
-	content := m.help.View(m.keys)
+	var content string
+	if m.view == ViewOverview && !m.classicOverview {
+		bindings := make([]key.Binding, 0, len(workspaceHelpLabels)+2)
+		for _, label := range workspaceHelpLabels {
+			bindings = append(bindings, key.NewBinding(key.WithKeys(label[0]), key.WithHelp(label[0], label[1])))
+		}
+		bindings = append(bindings, m.keys.StepBack, m.keys.StepFwd)
+		content = m.help.FullHelpView([][]key.Binding{bindings})
+	} else {
+		content = m.help.View(m.keys)
+	}
 	w := m.frameW()
 	if w < 3 {
 		w = 3

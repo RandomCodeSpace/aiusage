@@ -62,8 +62,9 @@ var flags globalFlags
 // doctor/completion/help/version are diagnostics that should never have a side
 // effect. Database maintenance also skips auto-start so verification does not
 // mutate process state and backup does not unexpectedly start collection.
-// Everything else (the root TUI default plus today/last/summary/sources/export)
-// is data-facing and triggers ensureDaemon.
+// Everything else (today/last/summary/sources/export) is data-facing and
+// triggers ensureDaemon. The root TUI is read-only and skips daemon supervision
+// directly in PersistentPreRunE.
 //
 // setup is skipped for the plain reason that it is the command that does the
 // installing.
@@ -107,19 +108,12 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// PersistentPreRunE runs before every command's RunE. It auto-starts the
-		// per-user daemon for data-facing actions (skipping run/once/doctor/etc.)
-		// unless --no-daemon is set. A spawn failure here is non-fatal: report it
-		// and continue so a reporting/TUI command still works without collection.
+		// per-user daemon for data-facing subcommands (skipping run/once/doctor/etc.)
+		// unless --no-daemon is set. The root TUI only reads existing data and
+		// never enters daemon supervision. A spawn failure here is non-fatal:
+		// report it and continue so a reporting command still works.
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
-			if flags.noDaemon || skipsDaemon(c) {
-				return nil
-			}
-			// Bare `aiusage` only launches the TUI (the data-facing action) when
-			// stdout is a terminal; otherwise RunE prints help. A piped/redirected
-			// invocation is a help/diagnostic action, so it must NOT spawn a
-			// background daemon. Subcommands (today/summary/...) are explicitly
-			// data-facing and spawn regardless of TTY.
-			if !c.HasParent() && !isTTY() {
+			if flags.noDaemon || skipsDaemon(c) || !c.HasParent() {
 				return nil
 			}
 			cfg, err := loadConfig()
@@ -149,7 +143,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, err := openStore(cfg)
+			st, err := openTUIStore(cfg)
 			if err != nil {
 				return err
 			}
@@ -275,6 +269,16 @@ func uiStatePath(cfg config.Config) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(cfg.PIDPath), "ui-state.json")
+}
+
+func openTUIStore(cfg config.Config) (*store.Reader, error) {
+	reader, err := store.OpenReadOnly(cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"TUI database %s is not ready for read-only use: %w; run `aiusage once` or `aiusage run` to initialize or migrate it",
+			cfg.DBPath, err)
+	}
+	return reader, nil
 }
 
 // openStore opens the configured database and returns the FULL handle. The

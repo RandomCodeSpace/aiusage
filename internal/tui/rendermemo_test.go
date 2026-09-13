@@ -16,7 +16,7 @@ var ansiMemo = regexp.MustCompile("\x1b\\[[0-9;]*m")
 // excludes the scrub index).
 
 func TestSecondViewRenderDoesNotRebuildChart(t *testing.T) {
-	m := newTestModel(t, &fakeData{}) // loaded 120x40 Overview
+	m := classicOverview(newTestModel(t, &fakeData{})) // loaded 120x40 classic Overview
 	_ = m.View().Content
 	base := m.heroMemo.Builds()
 	if base == 0 {
@@ -58,7 +58,7 @@ func TestSecondViewRenderDoesNotRebuildChart(t *testing.T) {
 // declares two. That band went through the memo only after the gate was
 // widened — before, it rebuilt the chart on every View and every scrub step.
 func TestDegradedBandRendersThroughMemo(t *testing.T) {
-	m := newTestModelWH(t, &fakeData{}, 90, 26)
+	m := classicOverview(newTestModelWH(t, &fakeData{}, 90, 26))
 	out := ansiMemo.ReplaceAllString(m.View().Content, "")
 	if n := strings.Count(out, "SCALE "); n != 1 {
 		t.Fatalf("90x26 carries %d SCALE readouts; pick a size back in the single-pane band", n)

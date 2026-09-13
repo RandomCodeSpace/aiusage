@@ -94,7 +94,8 @@ type Model struct {
 
 	// heroPivot flips the Overview hero from the detented two-pane trend to the
 	// leverage-ratio pivot. Presentation only — it reads the applied timeline.
-	heroPivot bool
+	heroPivot       bool
+	classicOverview bool
 
 	// pivot is the Activity tab's reading: the activity ledger, or ONE of the
 	// five turn-context dimensions. Unlike heroPivot it is NOT presentation —
@@ -159,8 +160,10 @@ type Model struct {
 	// Container resource gauges (CPU/mem/disk for the current pod, not the node).
 	// mon samples on its own tick; sys holds the latest reading for the Overview
 	// gauge strip. Live system state — deliberately never persisted to the DB.
-	mon *sysmon.Monitor
-	sys sysmon.Snapshot
+	mon        *sysmon.Monitor
+	sys        sysmon.Snapshot
+	sysHistory sysHistory
+	workspace  usageWorkspace
 
 	// heroMemo caches the rendered hero chart + KPI sparklines across frames
 	// (issue #4, 1f); a pointer so it survives Bubble Tea's value copies.
@@ -274,7 +277,8 @@ func NewModel(src DataSource, opt Options) Model {
 		view:          view,
 		rng:           rng,
 		pivot:         pivot,
-		sort:          SortTotal,
+		sort:          SortCost,
+		workspace:     newUsageWorkspace(),
 		filterUI:      ti,
 		browse:        b,
 		help:          h,
@@ -291,7 +295,7 @@ func NewModel(src DataSource, opt Options) Model {
 
 // span is the window every query keys off: the active range plus its step
 // offset (0 = the live window).
-func (m Model) span() Span { return Span{R: m.rng, Step: m.step} }
+func (m *Model) span() Span { return Span{R: m.rng, Step: m.step} }
 
 // spanLabel names the window currently shown (see Span.Label). It is what the
 // header pill and the panel titles carry, so a stepped view says which window
@@ -388,7 +392,7 @@ func buildCtx(th Theme, zm *zone.Manager, leverageFloor int64, caps map[string]m
 		WarnColor:   th.Warn,
 		// Token-series colors use the ANSI palette so they adapt to the user's
 		// terminal theme. input=green(2), output=blue(4), cache=red(1) — avoiding
-		// the reserved cyan(6) accent and yellow(3) "now"/scrub. cache combines the
+		// the interaction accent and yellow(3) "now"/scrub. cache combines the
 		// DB read+creation sub-types (split kept only for cost calc).
 		Comp: views.CompSpecs(lipgloss.Color("2"), lipgloss.Color("4"), lipgloss.Color("1")),
 
@@ -424,9 +428,13 @@ func (m *Model) toggleHelp() {
 }
 
 // setView switches the active tab, persists it, and dispatches an async load.
-// The previous frame stays on screen (behind the "◐ sync" chip) until the warm
+// The previous frame stays on screen (behind the "◐ loading" chip) until the warm
 // load applies — no store queries run on the UI thread here.
 func (m *Model) setView(v View) tea.Cmd {
+	if v == ViewOverview {
+		m.classicOverview = false
+		m.heroPivot = false
+	}
 	m.view = v
 	m.syncViewKeys()
 	m.persistUI()
@@ -508,6 +516,14 @@ func (m Model) drillBrowse() (tea.Model, tea.Cmd) {
 
 // back pops the scrub pin or the drill stack.
 func (m Model) back() (tea.Model, tea.Cmd) {
+	if m.view == ViewActivity && m.workspace.returnFromActivity {
+		m.workspace.returnFromActivity = false
+		m.view = ViewOverview
+		m.classicOverview = false
+		m.syncViewKeys()
+		return m.workspaceBack()
+	}
+
 	if m.scrubPinned {
 		m.scrubPinned = false
 		m.syncScrub()
@@ -579,6 +595,17 @@ func (m Model) helpRows() int {
 		return 0
 	}
 	hr := helpReserve
+	if m.view == ViewOverview && !m.classicOverview {
+		// Workspace help is one bounded column. Count enabled rows instead of
+		// rendering the complete styled card during every layout calculation.
+		hr = len(workspaceHelpLabels) + m.th.Idle().GetVerticalFrameSize()
+		if m.keys.StepBack.Enabled() {
+			hr++
+		}
+		if m.keys.StepFwd.Enabled() {
+			hr++
+		}
+	}
 	if max := m.lay.BodyH - 1; hr > max {
 		hr = max
 	}

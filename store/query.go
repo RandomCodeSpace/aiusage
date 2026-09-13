@@ -34,6 +34,7 @@ func buildWhere(f Filter) (string, []any) {
 	}
 	addIn("tool", f.Tools)
 	addIn("model", f.Models)
+	addIn("provider", f.Providers)
 	addIn("project", f.Projects)
 	addIn("session_id", f.Sessions)
 

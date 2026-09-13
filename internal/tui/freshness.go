@@ -15,7 +15,7 @@ import (
 // heartbeat cell and the dead-collector banner — lives here too.
 //
 // The J-cut: startLoad flips the enum to FreshCutIn synchronously, so the very
-// next frame carries the "◐ sync" chip with the old picture still behind it;
+// next frame carries the "◐ loading" chip with the old picture still behind it;
 // the data then lands in a single frame on dataLoadedMsg. The L-cut: a failed
 // load holds the last good picture and routes the failure to the chip
 // (FreshStale) — the full-body error panel renders only while FreshCold, when
@@ -40,7 +40,7 @@ const (
 	// FreshLive: the applied dataset matches the last observed db state.
 	FreshLive
 	// FreshCutIn: a load is in flight; the last picture is held behind the
-	// "◐ sync" chip.
+	// "◐ loading" chip.
 	FreshCutIn
 	// FreshStale: the last load failed; the last good picture is held and the
 	// failure lives in the chip, aged from lastLoadAt.
@@ -70,7 +70,7 @@ func (m Model) freshnessChipForms() []string {
 	case FreshLive:
 		return []string{m.headerChip("● live", m.th.Positive)}
 	case FreshCutIn:
-		return []string{m.headerChip("◐ sync", m.th.Now)}
+		return []string{m.headerChip("◐ loading", m.th.Now), m.headerChip("◐ read", m.th.Now)}
 	case FreshStale:
 		base := "◔ stale"
 		aged := base

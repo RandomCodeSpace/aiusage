@@ -43,7 +43,7 @@ func heroCharted(m Model) (bool, string) {
 // the KPI strip claimed its rows before the hero had a floor.
 func TestClassicTerminalRendersTheHeroChart(t *testing.T) {
 	for _, h := range []int{24, 30, 40, 50} {
-		m := newTestModelWH(t, &fakeData{}, 80, h)
+		m := classicOverview(newTestModelWH(t, &fakeData{}, 80, h))
 		charted, out := heroCharted(m)
 		if !charted {
 			t.Fatalf("80x%d renders no built hero chart:\n%s", h, out)
@@ -59,7 +59,7 @@ func TestHeroChartIsMonotonicInWidth(t *testing.T) {
 	for _, h := range []int{24, 30, 44} {
 		charted := -1
 		for w := 42; w <= 160; w += 2 {
-			m := newTestModelWH(t, &fakeData{}, w, h)
+			m := classicOverview(newTestModelWH(t, &fakeData{}, w, h))
 			got, out := heroCharted(m)
 			if got && charted < 0 {
 				charted = w

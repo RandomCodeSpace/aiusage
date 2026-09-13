@@ -68,7 +68,7 @@ func TestEveryCostTotalIsBounded(t *testing.T) {
 // than an unmarked one. Losing the tile is a documented trade (the hero outranks
 // it); losing only its marks would be a lie.
 func TestOverviewDropsTheWholeTileNotItsMarks(t *testing.T) {
-	m := newTestModelWH(t, &pricedSource{}, 100, 44)
+	m := classicOverview(newTestModelWH(t, &pricedSource{}, 100, 44))
 	out := ansiFold.ReplaceAllString(m.View().Content, "")
 	if strings.Contains(out, "spend") {
 		t.Fatalf("the cost tile IS present at w=100; this test's premise is stale:\n%s", out)
