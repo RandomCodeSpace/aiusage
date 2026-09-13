@@ -78,6 +78,21 @@ chart controls, metric summaries, rows, details, suggestions, and More use the
 same state transitions whether activated by keyboard or mouse. Mouse wheel
 input scrolls the active list or detail where scrolling is available.
 
+Repeated actions have separate hit regions in the toolbar, selected pane,
+suggestion card, and footer. A click at one location cannot replace another
+location's target. If an SSH client does not translate touch into terminal mouse
+events, use the same actions through the keys above. Text selection and copying
+depend on the terminal client's native selection mode or modifier; aiusage does
+not provide a clipboard command or claim that touch selection works in every
+client.
+
+List search narrows the visible comparison rows without changing the usage
+scope or headline totals. Model and project rows open sessions; harness and
+provider rows open models. Back restores the prior scope, group, sort, search,
+selected identity, and list position. A refresh that removes the selected row
+chooses a remaining row and clears the explicit selection marker. Range changes
+retain scope and reject results from an older pending read.
+
 ## Reading the data
 
 Summary values and table rows come from production usage queries. Runtime code
@@ -110,6 +125,73 @@ repository diff, and must not be presented as model-attributed output.
 Suggestions are deterministic local rules over bounded aggregate evidence.
 They work without an AI endpoint and do not send prompts, source code, or
 transcripts over the network.
+
+Missing price coverage has first priority, followed by cache write/read evidence.
+For example, 3 unpriced events out of 10 produce an Inspect Cost suggestion with
+that denominator and the known amount. Cache writes with few reads produce an
+Inspect Cache suggestion to examine the recorded counters. They do not establish
+a cache hit rate or savings: reads can fall outside the period, and upstream
+sources can omit writes. High cost or concentration alone produces no suggestion.
+Empty usage also produces none. Stale evidence stays labeled and asks the user to
+refresh before drawing conclusions. Sources without the relevant counters get
+no inferred recommendation.
+
+## Accounting and code-change limits
+
+All count denominators describe usage events, not requests. Cache means recorded
+read plus write tokens; aggregate data cannot recover an omitted cache subtype.
+The stored total remains authoritative when token components overlap. A zero
+component in a nonempty range is a recorded zero counter, with an explicit warning
+that an omitted upstream field can also normalize to zero.
+
+Cost inspectors show exact micro-dollar precision. A fully reported or computed
+zero is distinct from unknown cost. Mixed pricing shows reported, computed, and
+unpriced event counts together; partial cost is a lower bound. Timeline buckets,
+contributors, and headline values use the same captured scope, period, and local
+timezone. Activity-call shares and turn-context attribution remain independent
+accounting views; adding them together would count the same usage repeatedly.
+
+Only modern OpenCode SQLite currently supplies recorded code-change snapshots.
+Its user-message summary provides additions/deletions and a stable change ID.
+The latest snapshot replaces the prior one, so repeated polling does not inflate
+counts and later decreases remain visible. Explicit integer zero counts are
+known zero; absent, null, or empty summaries are unknown, since they cannot
+distinguish an undo from missing reporting. Mixed known/unknown snapshots show
+partial coverage.
+
+The normalized code-change record has no model identity or source-proven link to
+the assistant usage that caused an edit. A session can contain multiple models.
+OpenCode's JSON path and the other harness adapters do not emit code-change
+records. The first release therefore keeps model counts unavailable and shows
+supported session-lifetime observations only. Repeated edits are not unique
+surviving output, and line counts do not measure quality. Constructed fixtures
+prove mutable-count handling; the checked-in OpenCode live SQL fixture proves
+the surrounding schema but contains no nonzero edit-count observation.
+
+## Responsive acceptance
+
+Terminal rows and columns determine layout. Physical screen inches do not.
+The allocator budgets the header, footer, range controls, summary, and machine
+readings before adding comparison, detail, and chart panes.
+
+| Frame or mode | Allocation or fallback | Evidence |
+|---|---|---|
+| 120×40 desktop, 200×60 large | Content-sized comparison, selected detail, side chart and suggestion | Geometry, viewport, and per-location mouse tests |
+| 55×52 tall narrow | Single column with comparisons and selected detail | Bounds, selection, and mouse tests |
+| 160×12 short wide | Compact stats and machine readings; optional panes fold | Responsive frame tests |
+| 42×12 minimum | Compact summary and machine readings; More retains comparison/details | Minimum frame and inline-choice tests |
+| Below 42×12 | Bounded resize message gives the supported minimum | One-cell-under tests |
+| Native light/dark and `NO_COLOR` | Native background, labels, borders, and non-color selection markers | Native-theme and monochrome tests |
+| Reduced motion | `AIUSAGE_REDUCED_MOTION=1` or `NO_COLOR=1` makes the heartbeat static; current readings still update | Freshness tests |
+| Physical Termius/touch and native text selection | Client-dependent input; keyboard fallback remains available | Manual acceptance; PTY does not prove it |
+
+The production migration retains all five destinations and their classic
+interactions. The new workspace owns navigation and presentation; the existing
+store owns aggregate queries, the independent daemon owns collection, and the
+background machine monitor owns current CPU/memory/disk samples. The provider
+predicate is the required backend addition. No new schema or remote analyzer is
+needed for this workspace. Classic Overview is the retained navigation fallback;
+it does not reverse schema changes from earlier releases.
 
 ## Implementation handoff
 
