@@ -365,7 +365,8 @@ func (m *Manager) removeCreatedDirs(logDir string, logDirCreated bool, dir strin
 
 func (m *Manager) restartLaunchd(ctx context.Context) (Result, error) {
 	var r Result
-	if !fileExists(filepath.Join(m.unitDir(), CollectPlist)) {
+	path := filepath.Join(m.unitDir(), CollectPlist)
+	if !fileExists(path) {
 		return r, nil
 	}
 	loaded, running, known := m.launchdState(ctx)
@@ -375,8 +376,14 @@ func (m *Manager) restartLaunchd(ctx context.Context) (Result, error) {
 	if !loaded || !running {
 		return r, nil
 	}
-	daemon.RotateLog(launchdLogPath(filepath.Join(m.unitDir(), CollectPlist)))
-	if _, err := m.launchctl(ctx, "kickstart", "-k", m.launchTarget()); err != nil {
+	daemon.RotateLog(launchdLogPath(path))
+	if _, err := m.launchctl(ctx, "bootout", m.launchTarget()); err != nil {
+		return r, fmt.Errorf("restart %s: stop current job: %w", CollectLabel, err)
+	}
+	if _, err := m.launchctl(ctx, "bootstrap", m.launchDomain(), path); err != nil {
+		return r, fmt.Errorf("restart %s: reload job: %w", CollectLabel, err)
+	}
+	if _, err := m.launchctl(ctx, "kickstart", m.launchTarget()); err != nil {
 		return r, fmt.Errorf("restart %s: %w", CollectLabel, err)
 	}
 	_, running, known = m.launchdState(ctx)

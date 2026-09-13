@@ -354,8 +354,15 @@ func TestLaunchdStopStartRestartAndRemovalPreserveData(t *testing.T) {
 	if err != nil || !res.Collecting {
 		t.Fatalf("Restart = %+v, %v", res, err)
 	}
-	if !f.ran("launchctl kickstart -k " + m.launchTarget()) {
-		t.Fatalf("Restart did not force-restart the running job: %v", f.calls)
+	wantRestart := strings.Join([]string{
+		"launchctl print " + m.launchTarget(),
+		"launchctl bootout " + m.launchTarget(),
+		"launchctl bootstrap " + m.launchDomain() + " " + filepath.Join(m.UnitDir, CollectPlist),
+		"launchctl kickstart " + m.launchTarget(),
+		"launchctl print " + m.launchTarget(),
+	}, "\n")
+	if got := strings.Join(f.calls, "\n"); got != wantRestart {
+		t.Fatalf("Restart command sequence:\n%s\nwant:\n%s", got, wantRestart)
 	}
 	if _, err := m.Remove(t.Context(), false); err != nil {
 		t.Fatal(err)
@@ -434,15 +441,17 @@ func TestLaunchdLifecycleFailuresRemainVisible(t *testing.T) {
 		}
 	})
 
-	t.Run("restart refused", func(t *testing.T) {
-		m, f := testLaunchdManager(t)
-		writeTestLaunchAgent(t, m)
-		f.loaded, f.running = true, true
-		f.failOnce["kickstart"] = 1
-		if _, err := m.Restart(t.Context()); err == nil {
-			t.Fatal("refused launchd restart was reported as successful")
-		}
-	})
+	for _, verb := range []string{"bootout", "bootstrap", "kickstart"} {
+		t.Run("restart "+verb+" refused", func(t *testing.T) {
+			m, f := testLaunchdManager(t)
+			writeTestLaunchAgent(t, m)
+			f.loaded, f.running = true, true
+			f.failOnce[verb] = 1
+			if _, err := m.Restart(t.Context()); err == nil || !strings.Contains(err.Error(), verb+" refused") {
+				t.Fatalf("refused launchd %s = %v", verb, err)
+			}
+		})
+	}
 
 	t.Run("stop unknown", func(t *testing.T) {
 		m, f := testLaunchdManager(t)
