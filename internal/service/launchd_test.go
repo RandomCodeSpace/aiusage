@@ -98,6 +98,16 @@ func (f *fakeLaunchd) ran(want string) bool {
 	return false
 }
 
+func (f *fakeLaunchd) count(want string) int {
+	count := 0
+	for _, call := range f.calls {
+		if strings.Contains(call, want) {
+			count++
+		}
+	}
+	return count
+}
+
 func testLaunchdManager(t *testing.T) (*Manager, *fakeLaunchd) {
 	t.Helper()
 	f := newFakeLaunchd()
@@ -184,10 +194,13 @@ func TestLaunchdInstallIsValidatedIdempotentAndObservable(t *testing.T) {
 	if !res.Collecting || !res.Changed || !hasStamp(path) || !f.loaded || !f.running {
 		t.Fatalf("install = %+v, loaded=%t running=%t", res, f.loaded, f.running)
 	}
-	for _, want := range []string{"plutil -lint", "launchctl enable", "launchctl bootstrap", "launchctl kickstart -k", "launchctl print"} {
+	for _, want := range []string{"plutil -lint", "launchctl enable", "launchctl bootstrap", "launchctl kickstart " + m.launchTarget(), "launchctl print"} {
 		if !f.ran(want) {
 			t.Errorf("install never ran %q: %v", want, f.calls)
 		}
+	}
+	if f.ran("launchctl kickstart -k") {
+		t.Fatalf("install force-restarted a RunAtLoad job: %v", f.calls)
 	}
 
 	f.calls = nil
@@ -256,6 +269,9 @@ func TestLaunchdActivationFailureRestoresForcedReplacement(t *testing.T) {
 	}
 	if !f.loaded || !f.running {
 		t.Fatalf("rollback did not restore prior running job: loaded=%t running=%t", f.loaded, f.running)
+	}
+	if f.count("launchctl kickstart "+m.launchTarget()) != 2 || f.ran("launchctl kickstart -k") {
+		t.Fatalf("activation or rollback used the wrong start semantics: %v", f.calls)
 	}
 }
 
@@ -326,12 +342,27 @@ func TestLaunchdStopStartRestartAndRemovalPreserveData(t *testing.T) {
 	if err != nil || !stopped || f.loaded {
 		t.Fatalf("StopCollection = %t, %v, loaded=%t", stopped, err, f.loaded)
 	}
+	f.calls = nil
 	if err := m.StartCollection(t.Context()); err != nil || !f.loaded || !f.running {
 		t.Fatalf("StartCollection = %v, loaded=%t running=%t", err, f.loaded, f.running)
 	}
+	if !f.ran("launchctl kickstart "+m.launchTarget()) || f.ran("launchctl kickstart -k") {
+		t.Fatalf("StartCollection used the wrong start semantics: %v", f.calls)
+	}
+	f.calls = nil
 	res, err := m.Restart(t.Context())
 	if err != nil || !res.Collecting {
 		t.Fatalf("Restart = %+v, %v", res, err)
+	}
+	wantRestart := strings.Join([]string{
+		"launchctl print " + m.launchTarget(),
+		"launchctl bootout " + m.launchTarget(),
+		"launchctl bootstrap " + m.launchDomain() + " " + filepath.Join(m.UnitDir, CollectPlist),
+		"launchctl kickstart " + m.launchTarget(),
+		"launchctl print " + m.launchTarget(),
+	}, "\n")
+	if got := strings.Join(f.calls, "\n"); got != wantRestart {
+		t.Fatalf("Restart command sequence:\n%s\nwant:\n%s", got, wantRestart)
 	}
 	if _, err := m.Remove(t.Context(), false); err != nil {
 		t.Fatal(err)
@@ -410,15 +441,17 @@ func TestLaunchdLifecycleFailuresRemainVisible(t *testing.T) {
 		}
 	})
 
-	t.Run("restart refused", func(t *testing.T) {
-		m, f := testLaunchdManager(t)
-		writeTestLaunchAgent(t, m)
-		f.loaded, f.running = true, true
-		f.failOnce["kickstart"] = 1
-		if _, err := m.Restart(t.Context()); err == nil {
-			t.Fatal("refused launchd restart was reported as successful")
-		}
-	})
+	for _, verb := range []string{"bootout", "bootstrap", "kickstart"} {
+		t.Run("restart "+verb+" refused", func(t *testing.T) {
+			m, f := testLaunchdManager(t)
+			writeTestLaunchAgent(t, m)
+			f.loaded, f.running = true, true
+			f.failOnce[verb] = 1
+			if _, err := m.Restart(t.Context()); err == nil || !strings.Contains(err.Error(), verb+" refused") {
+				t.Fatalf("refused launchd %s = %v", verb, err)
+			}
+		})
+	}
 
 	t.Run("stop unknown", func(t *testing.T) {
 		m, f := testLaunchdManager(t)

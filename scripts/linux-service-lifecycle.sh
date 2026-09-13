@@ -78,13 +78,16 @@ sudo loginctl enable-linger "$test_user"
 sudo systemctl start "user@$test_uid.service"
 
 for _ in $(seq 1 20); do
-	if [[ -S "$runtime_dir/bus" ]]; then
+	if run_user test -S "$runtime_dir/bus"; then
 		break
 	fi
 	sleep 1
 done
-if [[ ! -S "$runtime_dir/bus" ]]; then
+if ! run_user test -S "$runtime_dir/bus"; then
 	echo "disposable systemd user manager did not create its bus" >&2
+	dpkg-query -W dbus-user-session >&2 || true
+	sudo systemctl status "user@$test_uid.service" "user-runtime-dir@$test_uid.service" --no-pager >&2 || true
+	sudo journalctl -u "user@$test_uid.service" -u "user-runtime-dir@$test_uid.service" --no-pager -n 100 >&2 || true
 	exit 1
 fi
 run_user systemctl --user show-environment >/dev/null
@@ -108,7 +111,7 @@ state_dir="$test_home/.local/state/aiusage"
 discovery_dir="$test_home/empty-discovery"
 unit_dir="$test_home/.config/systemd/user"
 unit_path="$unit_dir/$label"
-db_path="$data_dir/usage.db"
+db_path="$data_dir/lifecycle.db"
 pid_path="$state_dir/aiusage.pid"
 version_path="$state_dir/daemon.version"
 log_path="$state_dir/aiusage.log"
@@ -125,8 +128,12 @@ if [[ "$once_output" != "adapters=15 sources=0 seen=0 inserted=0 activity=0 snap
 	echo "lifecycle seed collection differs: $once_output" >&2
 	exit 1
 fi
+if ! run_user test -f "$db_path"; then
+	echo "seed collection did not create the configured database" >&2
+	exit 1
+fi
 
-run_user "$binary" setup >"$lifecycle_root/setup.txt"
+run_user "$binary" --config "$config_dir/config.json" setup >"$lifecycle_root/setup.txt"
 grep -F "persistence: linger confirmed" "$lifecycle_root/setup.txt" >/dev/null
 if [[ "$(find "$unit_dir" -maxdepth 1 -type f -name 'aiusage*.service' | wc -l)" -ne 1 ]]; then
 	echo "setup did not install exactly one aiusage service" >&2
@@ -165,7 +172,7 @@ restart_pid="$(wait_for_new_pid "$first_pid")"
 sudo systemctl stop "user@$test_uid.service"
 sudo systemctl start "user@$test_uid.service"
 for _ in $(seq 1 30); do
-	if [[ -S "$runtime_dir/bus" ]] && run_user systemctl --user is-active "$label" 2>/dev/null | grep -Fx active >/dev/null; then
+	if run_user test -S "$runtime_dir/bus" && run_user systemctl --user is-active "$label" 2>/dev/null | grep -Fx active >/dev/null; then
 		break
 	fi
 	sleep 1
@@ -206,7 +213,7 @@ if [[ -e "$unit_path" ]] || run_user systemctl --user is-active "$label" >/dev/n
 	echo "forced cleanup left the systemd service installed or active" >&2
 	exit 1
 fi
-if [[ ! -f "$db_path" || ! -f "$data_dir/preserve-me" ]]; then
+if ! run_user test -f "$db_path" || ! run_user test -f "$data_dir/preserve-me"; then
 	echo "service removal deleted user data" >&2
 	exit 1
 fi
@@ -264,7 +271,7 @@ for _ in $(seq 1 10); do
 	sleep 1
 done
 
-if [[ ! -f "$db_path" || ! -f "$data_dir/preserve-me" ]]; then
+if ! run_user test -f "$db_path" || ! run_user test -f "$data_dir/preserve-me"; then
 	echo "failure rollback or fallback deleted user data" >&2
 	exit 1
 fi

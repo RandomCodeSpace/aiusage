@@ -164,7 +164,8 @@ wait_for_new_pid() {
 	old_pid="$1"
 	for _ in $(seq 1 45); do
 		new_pid="$(launch_pid)"
-		if [[ "$new_pid" =~ ^[1-9][0-9]*$ && "$new_pid" != "$old_pid" ]] && kill -0 "$new_pid" 2>/dev/null; then
+		if [[ "$new_pid" =~ ^[1-9][0-9]*$ && "$new_pid" != "$old_pid" ]] && kill -0 "$new_pid" 2>/dev/null &&
+			[[ "$(cat "$version_path" 2>/dev/null)" == "$version" ]]; then
 			printf '%s\n' "$new_pid"
 			return 0
 		fi
@@ -183,6 +184,7 @@ kill -KILL "$first_pid"
 restart_pid="$(wait_for_new_pid "$first_pid")"
 
 /bin/launchctl bootout "$launch_target"
+rm -f -- "$version_path"
 /bin/launchctl bootstrap "$launch_domain" "$plist_path"
 bootstrap_pid="$(wait_for_new_pid "$restart_pid")"
 
