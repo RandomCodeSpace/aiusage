@@ -397,7 +397,7 @@ func (m Model) renderBody(lay views.Layout) string {
 
 func (m Model) renderFooter() string {
 	if m.view == ViewOverview && !m.classicOverview && !m.filtering {
-		parts := []string{m.zoneMark("workspace-back", "Back"), m.zoneMark("workspace-up", "↑"), m.zoneMark("workspace-down", "↓"), m.zoneMark("workspace-open", "Open"), m.zoneMark("workspace-details", "Details"), m.zoneMark("workspace-menu-more", "More")}
+		parts := []string{m.zoneMark("workspace-back", "Back"), m.zoneMark("workspace-up", "↑"), m.zoneMark("workspace-down", "↓"), m.zoneMark("workspace-footer-open", "Open"), m.zoneMark("workspace-footer-details", "Details"), m.zoneMark("workspace-footer-more", "More")}
 		if m.workspace.chooser != "" {
 			parts = []string{m.zoneMark("workspace-choice-close", "Esc Close"), m.zoneMark("workspace-choice-prev", "←"), m.zoneMark("workspace-choice-next", "→"), m.zoneMark("workspace-choice-apply", "Enter Apply")}
 		}

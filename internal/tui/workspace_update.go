@@ -471,7 +471,7 @@ func (m Model) workspaceMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 			return n, c, true
 		}
 	}
-	for _, a := range []struct{ zone, action string }{{views.ZoneWorkspaceInput, "metric:Input"}, {views.ZoneWorkspaceOutput, "metric:Output"}, {views.ZoneWorkspaceCache, "metric:Cache"}, {views.ZoneWorkspaceCost, "metric:Cost"}, {"workspace-menu-more", "menu:More"}, {"workspace-menu-group", "menu:Group"}, {"workspace-menu-sort", "menu:Sort"}, {"workspace-details", "details"}, {"workspace-back", "back"}, {"workspace-up", "up"}, {"workspace-down", "down"}, {"workspace-filter", "filter"}, {"workspace-open", "open"}, {"workspace-suggestions", "suggestions"}} {
+	for _, a := range []struct{ zone, action string }{{views.ZoneWorkspaceInput, "metric:Input"}, {views.ZoneWorkspaceOutput, "metric:Output"}, {views.ZoneWorkspaceCache, "metric:Cache"}, {views.ZoneWorkspaceCost, "metric:Cost"}, {"workspace-menu-more", "menu:More"}, {"workspace-footer-more", "menu:More"}, {"workspace-menu-group", "menu:Group"}, {"workspace-menu-sort", "menu:Sort"}, {"workspace-details", "details"}, {"workspace-footer-details", "details"}, {"workspace-back", "back"}, {"workspace-up", "up"}, {"workspace-down", "down"}, {"workspace-filter", "filter"}, {"workspace-open", "open"}, {"workspace-footer-open", "open"}, {"workspace-suggestions", "suggestions"}, {"workspace-suggestion-card", "suggestions"}} {
 		if hit(a.zone) {
 			n, c := m.workspaceAction(a.action)
 			return n, c, true

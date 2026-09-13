@@ -447,7 +447,7 @@ func (m Model) workspaceSuggestion(w, h int) string {
 	if len(s) > 0 {
 		text = "Suggestions · local rules\n" + s[0].Title + "\n" + s[0].Evidence + "\nOpen evidence and inspect →"
 	}
-	return m.zoneMark("workspace-suggestions", lipgloss.NewStyle().Width(w).MaxHeight(h).Render(text))
+	return m.zoneMark("workspace-suggestion-card", lipgloss.NewStyle().Width(w).MaxHeight(h).Render(text))
 }
 
 func (m *Model) openWorkspaceText(title, content string) {

@@ -94,6 +94,47 @@ func TestWorkspaceChoiceMouseAndKeyboardParity(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRepeatedActionsHaveDistinctMouseTargets(t *testing.T) {
+	for _, size := range [][2]int{{55, 52}, {120, 40}, {200, 60}} {
+		for _, action := range []struct {
+			zones   []string
+			overlay string
+		}{
+			{[]string{"workspace-menu-more", "workspace-footer-more"}, "More"},
+			{[]string{"workspace-details", "workspace-footer-details"}, "Selected usage"},
+			{[]string{"workspace-open", "workspace-footer-open"}, ""},
+			{[]string{"workspace-suggestions", "workspace-suggestion-card"}, "Suggestions"},
+		} {
+			t.Run(fmt.Sprintf("%dx%d/%s", size[0], size[1], action.zones[0]), func(t *testing.T) {
+				_, m := newWorkspaceModel(t)
+				m = send(m, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+				var locations [][2]int
+				for _, id := range action.zones {
+					if size[0] < 100 && id == "workspace-suggestion-card" {
+						continue // The narrow layout has no side card.
+					}
+					x, y, ok := zoneCenter(m, id)
+					if !ok {
+						t.Fatalf("visible action %s has no mouse target", id)
+					}
+					if slices.Contains(locations, [2]int{x, y}) {
+						t.Fatalf("%s shares another action's location", id)
+					}
+					locations = append(locations, [2]int{x, y})
+					next := mustPress(t, m, id, tea.MouseLeft)
+					if action.overlay == "" {
+						if next.workspaceGroup() != "session" || len(next.crumbs) != 1 {
+							t.Fatalf("%s did not drill into model sessions", id)
+						}
+					} else if next.workspace.overlay != action.overlay {
+						t.Fatalf("%s opened %q, want %q", id, next.workspace.overlay, action.overlay)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestCompactCacheSumDoesNotOverflow(t *testing.T) {
 	if got := humanizeCache(store.Bucket{CacheRead: math.MaxInt64, CacheCreation: math.MaxInt64}); got != "18446744.1T" {
 		t.Fatalf("large cache sum: %s", got)
