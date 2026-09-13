@@ -209,7 +209,7 @@ if [[ -e "$unit_path" ]] || run_user systemctl --user is-active "$label" >/dev/n
 	echo "forced cleanup left the systemd service installed or active" >&2
 	exit 1
 fi
-if [[ ! -f "$db_path" || ! -f "$data_dir/preserve-me" ]]; then
+if ! run_user test -f "$db_path" || ! run_user test -f "$data_dir/preserve-me"; then
 	echo "service removal deleted user data" >&2
 	exit 1
 fi
@@ -267,7 +267,7 @@ for _ in $(seq 1 10); do
 	sleep 1
 done
 
-if [[ ! -f "$db_path" || ! -f "$data_dir/preserve-me" ]]; then
+if ! run_user test -f "$db_path" || ! run_user test -f "$data_dir/preserve-me"; then
 	echo "failure rollback or fallback deleted user data" >&2
 	exit 1
 fi
