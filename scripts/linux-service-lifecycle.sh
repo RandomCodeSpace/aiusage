@@ -91,6 +91,7 @@ if ! run_user test -S "$runtime_dir/bus"; then
 	exit 1
 fi
 run_user systemctl --user show-environment >/dev/null
+run_user systemctl --user set-environment "HOME=$test_home"
 
 extract_dir="$lifecycle_root/extract"
 mkdir -p "$extract_dir"
@@ -168,8 +169,11 @@ restart_pid="$(wait_for_new_pid "$first_pid")"
 sudo systemctl stop "user@$test_uid.service"
 sudo systemctl start "user@$test_uid.service"
 for _ in $(seq 1 30); do
-	if run_user test -S "$runtime_dir/bus" && run_user systemctl --user is-active "$label" 2>/dev/null | grep -Fx active >/dev/null; then
-		break
+	if run_user test -S "$runtime_dir/bus"; then
+		run_user systemctl --user set-environment "HOME=$test_home"
+		if run_user systemctl --user is-active "$label" 2>/dev/null | grep -Fx active >/dev/null; then
+			break
+		fi
 	fi
 	sleep 1
 done
