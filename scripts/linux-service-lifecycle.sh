@@ -129,7 +129,7 @@ if [[ "$once_output" != "adapters=15 sources=0 seen=0 inserted=0 activity=0 snap
 	exit 1
 fi
 
-run_user "$binary" setup >"$lifecycle_root/setup.txt"
+run_user "$binary" --config "$config_dir/config.json" setup >"$lifecycle_root/setup.txt"
 grep -F "persistence: linger confirmed" "$lifecycle_root/setup.txt" >/dev/null
 if [[ "$(find "$unit_dir" -maxdepth 1 -type f -name 'aiusage*.service' | wc -l)" -ne 1 ]]; then
 	echo "setup did not install exactly one aiusage service" >&2
