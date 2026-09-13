@@ -70,6 +70,13 @@ func (m Model) workspaceRequestedGroup() string {
 	return m.workspace.group
 }
 
+func workspaceGroupDims(group string) []string {
+	if group == "session" {
+		return []string{"session", "tool", "project"}
+	}
+	return []string{group}
+}
+
 func workspaceIdentity(b store.Bucket, group string) string {
 	// Lengths prevent ambiguous separators in recorded session/project names.
 	var s strings.Builder
@@ -92,10 +99,7 @@ func (m *Model) loadWorkspace(cacheOnly bool) {
 		return
 	}
 	group := m.workspaceRequestedGroup()
-	dims := []string{group}
-	if group == "session" {
-		dims = []string{"session", "tool", "project"}
-	}
+	dims := workspaceGroupDims(group)
 	f := m.data.filterFor(m.qctx(), m.qnow(), m.span(), m.crumbs, dims)
 	var s *store.Summary
 	if cacheOnly {
