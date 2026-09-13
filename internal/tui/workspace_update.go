@@ -233,8 +233,7 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 			m.openWorkspaceText("Suggestions", "Local suggestions · "+c.ScopeLabel+"\n\nEvidence from "+m.workspace.appliedRange+"\n\nNo supported suggestion for this selection. No AI service was called.")
 			return m, nil
 		}
-		m.workspace.overlay = "Suggestions"
-		m.workspace.content = ""
+		m.openWorkspaceText("Suggestions", "")
 		m.workspace.menu = workspaceSuggestionActions(s)
 		m.workspace.menuCursor = 0
 		m.workspace.suggestions = s
@@ -334,10 +333,6 @@ func (m Model) workspaceKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 				return n, c, true
 			}
 		} else {
-			if k == "enter" && len(m.workspace.suggestions) > 0 {
-				n, c := m.workspaceAction("inspect")
-				return n, c, true
-			}
 			m.workspace.viewport, _ = m.workspace.viewport.Update(msg)
 		}
 		return m, nil, true

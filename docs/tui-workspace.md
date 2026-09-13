@@ -136,6 +136,12 @@ Empty usage also produces none. Stale evidence stays labeled and asks the user t
 refresh before drawing conclusions. Sources without the relevant counters get
 no inferred recommendation.
 
+Suggestions presents selectable entries using the existing menu controls. Enter
+or a click opens that entry's evidence and named Cost or Cache inspector, using
+its captured values, scope, period, and stale status. Back returns to the same
+suggestion row; another Back returns to the workspace. These transitions do not
+query the database or change the selected model.
+
 ## Accounting and code-change limits
 
 All count denominators describe usage events, not requests. Cache means recorded
@@ -233,3 +239,10 @@ SQLite ledger and covered desktop rendering, narrow resizing, metric inspection,
 scrolling, and model-to-session navigation. They do not substitute for a physical
 Termius check. Timing probes against an existing ledger are recorded on the
 issue; uncached large ranges still require database aggregation.
+
+On 2026-09-13, the actual workspace loader at `394f9ae` was also checked against
+independent raw-ledger SQL on a consistent read-only backup of an existing
+database. The fixed UTC seven-day window matched every numeric headline field,
+all model rows, and the ordered timeline, including pricing provenance. The
+temporary helper and private snapshot were removed after the check. This proves
+that captured dataset's reconciliation, not every possible source history.

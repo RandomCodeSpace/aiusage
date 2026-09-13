@@ -262,6 +262,36 @@ func TestWorkspaceSuggestionInspectKeepsCapturedContextAndReturns(t *testing.T) 
 	}
 }
 
+func TestWorkspaceSuggestionCaptureSurvivesLaterData(t *testing.T) {
+	f, m := newWorkspaceModel(t)
+	m.workspace.rows[m.workspace.cursor].CacheCreation = 123
+	m, _ = workspaceUI(t, f, m, keyMsg("o"))
+	m, _ = workspaceUI(t, f, m, keyMsg("u"))
+	if m.workspace.chooser != "" {
+		t.Fatal("suggestion menu retained an inline chooser")
+	}
+	captured := m.workspace.suggestionContext
+	// A pending refresh can apply while the user is reading the suggestion list.
+	m.workspace.rows = slices.Clone(m.workspace.rows)
+	m.workspace.rows[m.workspace.cursor].CacheCreation = 999
+	m.workspace.appliedRange = "a later period"
+	m.workspace.appliedScope = []Crumb{{Dim: "provider", Value: "another provider"}}
+	m, cmd := workspaceUI(t, f, m, keyMsg("enter"))
+	if cmd != nil || !strings.Contains(m.workspace.content, "Cache write: 123 tokens") ||
+		!strings.Contains(m.workspace.content, "Selected range: "+captured.RangeLabel) ||
+		!strings.Contains(m.workspace.content, "Selected scope: "+captured.ScopeLabel) {
+		t.Fatalf("inspector lost captured evidence: %s", m.workspace.content)
+	}
+	m, _ = workspaceUI(t, f, m, keyMsg("esc"))
+	if m.workspace.overlay != "Suggestions" || len(m.workspace.menu) == 0 {
+		t.Fatal("Back did not restore the suggestion list")
+	}
+	m, _ = workspaceUI(t, f, m, keyMsg("esc"))
+	if m.workspace.overlay != "" || m.workspace.chooser != "" {
+		t.Fatal("Back did not restore the workspace")
+	}
+}
+
 func TestWorkspaceCacheMissRetainsAtomicSnapshotAndRecovers(t *testing.T) {
 	f, m := newWorkspaceModel(t)
 	oldOverview, oldRows := m.overview, slices.Clone(m.workspace.rows)
