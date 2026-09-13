@@ -296,7 +296,7 @@ func (m *Manager) activateLaunchd(ctx context.Context, path string, loaded, runn
 		r.addf("%s already running", CollectLabel)
 		return attempt, nil
 	}
-	if _, err := m.launchctl(ctx, "kickstart", "-k", m.launchTarget()); err != nil {
+	if _, err := m.launchctl(ctx, "kickstart", m.launchTarget()); err != nil {
 		return attempt, fmt.Errorf("start %s: %w", CollectLabel, err)
 	}
 	_, active, known := m.launchdState(ctx)
@@ -348,7 +348,7 @@ func (m *Manager) restoreLaunchdJob(ctx context.Context, path string, running bo
 		return err
 	}
 	if running {
-		_, err := m.launchctl(ctx, "kickstart", "-k", m.launchTarget())
+		_, err := m.launchctl(ctx, "kickstart", m.launchTarget())
 		return err
 	}
 	return nil
@@ -423,7 +423,7 @@ func (m *Manager) startLaunchdCollection(ctx context.Context) error {
 			return fmt.Errorf("load %s: %w", CollectLabel, err)
 		}
 	}
-	if _, err := m.launchctl(ctx, "kickstart", "-k", m.launchTarget()); err != nil {
+	if _, err := m.launchctl(ctx, "kickstart", m.launchTarget()); err != nil {
 		return fmt.Errorf("start %s: %w", CollectLabel, err)
 	}
 	_, running, known = m.launchdState(ctx)
