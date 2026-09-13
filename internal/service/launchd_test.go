@@ -346,7 +346,7 @@ func TestLaunchdStopStartRestartAndRemovalPreserveData(t *testing.T) {
 	if err := m.StartCollection(t.Context()); err != nil || !f.loaded || !f.running {
 		t.Fatalf("StartCollection = %v, loaded=%t running=%t", err, f.loaded, f.running)
 	}
-	if !f.ran("launchctl kickstart " + m.launchTarget()) || f.ran("launchctl kickstart -k") {
+	if !f.ran("launchctl kickstart "+m.launchTarget()) || f.ran("launchctl kickstart -k") {
 		t.Fatalf("StartCollection used the wrong start semantics: %v", f.calls)
 	}
 	f.calls = nil
