@@ -111,7 +111,7 @@ state_dir="$test_home/.local/state/aiusage"
 discovery_dir="$test_home/empty-discovery"
 unit_dir="$test_home/.config/systemd/user"
 unit_path="$unit_dir/$label"
-db_path="$data_dir/usage.db"
+db_path="$data_dir/lifecycle.db"
 pid_path="$state_dir/aiusage.pid"
 version_path="$state_dir/daemon.version"
 log_path="$state_dir/aiusage.log"
@@ -126,6 +126,10 @@ sudo -u "$test_user" touch "$data_dir/preserve-me"
 once_output="$(run_user "$binary" once)"
 if [[ "$once_output" != "adapters=15 sources=0 seen=0 inserted=0 activity=0 snapshots=0 errors=0" ]]; then
 	echo "lifecycle seed collection differs: $once_output" >&2
+	exit 1
+fi
+if ! run_user test -f "$db_path"; then
+	echo "seed collection did not create the configured database" >&2
 	exit 1
 fi
 
