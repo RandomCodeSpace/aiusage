@@ -83,8 +83,9 @@ func TestWorkspaceClassicSummariesLoadOnDemand(t *testing.T) {
 		t.Fatalf("classic-only summary reads = %d, want 3", got)
 	}
 	before = f.queries()
+	pivot := m.heroPivot
 	m, cmd = workspaceUI(t, f, m, keyMsg("p"))
-	if cmd != nil || f.queries() != before {
-		t.Fatal("classic plot toggle reread its already-applied data")
+	if cmd != nil || f.queries() != before || m.heroPivot == pivot {
+		t.Fatal("classic plot toggle failed to change the plot using already-applied data")
 	}
 }
