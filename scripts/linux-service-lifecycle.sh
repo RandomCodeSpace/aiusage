@@ -85,6 +85,9 @@ for _ in $(seq 1 20); do
 done
 if [[ ! -S "$runtime_dir/bus" ]]; then
 	echo "disposable systemd user manager did not create its bus" >&2
+	dpkg-query -W dbus-user-session >&2 || true
+	sudo systemctl status "user@$test_uid.service" "user-runtime-dir@$test_uid.service" --no-pager >&2 || true
+	sudo journalctl -u "user@$test_uid.service" -u "user-runtime-dir@$test_uid.service" --no-pager -n 100 >&2 || true
 	exit 1
 fi
 run_user systemctl --user show-environment >/dev/null
