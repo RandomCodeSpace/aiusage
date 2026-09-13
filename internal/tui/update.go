@@ -46,14 +46,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSpinnerTick(msg)
 
 	case tea.MouseMsg:
-		if n, c, handled := m.workspaceMouse(msg); handled {
-			return n, c
+		if m.workspaceMouseEligible(msg) {
+			if n, c, handled := m.workspaceMouse(msg); handled {
+				return n, c
+			}
 		}
 		return scheduleDetail(m.updateMouse(msg))
 
 	case tea.KeyPressMsg:
-		if n, c, handled := m.workspaceKey(msg); handled {
-			return n, c
+		if m.filtering && m.workspace.overlay == "" {
+			return m.updateFiltering(msg)
+		}
+		if c, handled := m.workspaceKey(msg); handled {
+			return m, c
 		}
 		if m.filtering {
 			return m.updateFiltering(msg)

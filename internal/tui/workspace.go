@@ -56,14 +56,14 @@ func newUsageWorkspace() usageWorkspace {
 	return usageWorkspace{group: "model", chart: UsageMetricCost, trendMemo: &workspaceTrendMemo{}, viewport: viewport.New()}
 }
 
-func (m Model) workspaceGroup() string {
+func (m *Model) workspaceGroup() string {
 	if m.workspace.appliedGroup != "" {
 		return m.workspace.appliedGroup
 	}
 	return m.workspaceRequestedGroup()
 }
 
-func (m Model) workspaceRequestedGroup() string {
+func (m *Model) workspaceRequestedGroup() string {
 	if m.workspace.group == "" {
 		return "model"
 	}
@@ -87,7 +87,7 @@ func workspaceIdentity(b store.Bucket, group string) string {
 	return s.String()
 }
 
-func (m Model) workspaceSelected() (store.Bucket, bool) {
+func (m *Model) workspaceSelected() (store.Bucket, bool) {
 	if m.workspace.cursor < 0 || m.workspace.cursor >= len(m.workspace.rows) {
 		return store.Bucket{}, false
 	}

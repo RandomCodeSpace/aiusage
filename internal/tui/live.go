@@ -163,7 +163,7 @@ func (m Model) loadCmd() tea.Cmd {
 	return m.loadCmdAfter(0)
 }
 
-func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
+func (m *Model) loadCmdAfter(delay time.Duration) tea.Cmd {
 	loadCtx := m.data.loadContext(m.flight.next())
 	m.detail.stop() // a navigation moots the detail query under the old selection
 	if m.view == ViewOverview && !m.classicOverview {
@@ -181,7 +181,7 @@ func (m Model) loadCmdAfter(delay time.Duration) tea.Cmd {
 
 	// Legacy views still use reload on an isolated model copy because their
 	// query sets depend on more view state than the workspace's two summaries.
-	mc := m
+	mc := *m
 	dbPath := m.dbPath
 	gen := m.loadGen
 	mc.loadCtx = loadCtx

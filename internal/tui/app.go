@@ -295,7 +295,7 @@ func NewModel(src DataSource, opt Options) Model {
 
 // span is the window every query keys off: the active range plus its step
 // offset (0 = the live window).
-func (m Model) span() Span { return Span{R: m.rng, Step: m.step} }
+func (m *Model) span() Span { return Span{R: m.rng, Step: m.step} }
 
 // spanLabel names the window currently shown (see Span.Label). It is what the
 // header pill and the panel titles carry, so a stepped view says which window
@@ -596,7 +596,15 @@ func (m Model) helpRows() int {
 	}
 	hr := helpReserve
 	if m.view == ViewOverview && !m.classicOverview {
-		hr = lipgloss.Height(m.renderHelpOverlay())
+		// Workspace help is one bounded column. Count enabled rows instead of
+		// rendering the complete styled card during every layout calculation.
+		hr = len(workspaceHelpLabels) + m.th.Idle().GetVerticalFrameSize()
+		if m.keys.StepBack.Enabled() {
+			hr++
+		}
+		if m.keys.StepFwd.Enabled() {
+			hr++
+		}
 	}
 	if max := m.lay.BodyH - 1; hr > max {
 		hr = max

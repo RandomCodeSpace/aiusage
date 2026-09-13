@@ -64,16 +64,18 @@ func (m Model) workspaceBack() (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) workspaceOpen() (Model, tea.Cmd) {
+func (m *Model) workspaceOpen() tea.Cmd {
 	if m.fresh == FreshCutIn {
-		return m, nil
+		return nil
 	}
 	b, ok := m.workspaceSelected()
 	if !ok {
-		return m, nil
+		return nil
 	}
 	if m.workspaceGroup() == "session" {
-		return m.workspaceDetails()
+		next, cmd := m.workspaceDetails()
+		*m = next
+		return cmd
 	}
 	m.workspaceSave()
 	m.crumbs = workspaceScope(m.workspace.appliedScope, b, m.workspaceGroup())
@@ -88,7 +90,7 @@ func (m Model) workspaceOpen() (Model, tea.Cmd) {
 	m.filter = ""
 	m.workspace.cursor = 0
 	m.workspace.top = 0
-	return m, m.startLoad()
+	return m.startLoad()
 }
 
 func (m *Model) workspaceMenu(kind string) {
@@ -218,7 +220,8 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 	}
 	switch action {
 	case "open":
-		return m.workspaceOpen()
+		cmd := m.workspaceOpen()
+		return m, cmd
 	case "details":
 		return m.workspaceDetails()
 	case "back":
@@ -312,15 +315,16 @@ func (m Model) workspaceSuggestionInspector(i int) (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) workspaceKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
+func (m *Model) workspaceKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	k := msg.String()
 	if m.workspace.overlay != "" {
 		if k == "ctrl+c" || k == "q" {
-			return m, tea.Sequence(tea.ClearScreen, tea.Quit), true
+			return tea.Sequence(tea.ClearScreen, tea.Quit), true
 		}
 		if k == "esc" || k == "backspace" {
 			n, c := m.workspaceBack()
-			return n, c, true
+			*m = n
+			return c, true
 		}
 		if m.workspace.menu != nil {
 			switch k {
@@ -330,30 +334,33 @@ func (m Model) workspaceKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 				m.workspace.menuCursor = min(len(m.workspace.menu)-1, m.workspace.menuCursor+1)
 			case "enter":
 				n, c := m.workspaceAction(m.workspace.menu[m.workspace.menuCursor].action)
-				return n, c, true
+				*m = n
+				return c, true
 			}
 		} else {
 			m.workspace.viewport, _ = m.workspace.viewport.Update(msg)
 		}
-		return m, nil, true
+		return nil, true
 	}
 	if m.view != ViewOverview || m.classicOverview || m.filtering {
-		return m, nil, false
+		return nil, false
 	}
 	if m.workspace.chooser != "" {
 		switch k {
 		case "left", "up", "h", "k":
 			m.workspace.menuCursor = max(0, m.workspace.menuCursor-1)
-			return m, nil, true
+			return nil, true
 		case "right", "down", "l", "j":
 			m.workspace.menuCursor = min(len(m.workspace.menu)-1, m.workspace.menuCursor+1)
-			return m, nil, true
+			return nil, true
 		case "enter":
 			n, c := m.workspaceAction(m.workspace.menu[m.workspace.menuCursor].action)
-			return n, c, true
+			*m = n
+			return c, true
 		case "esc", "backspace":
 			n, c := m.workspaceBack()
-			return n, c, true
+			*m = n
+			return c, true
 		}
 	}
 	switch k {
@@ -370,11 +377,11 @@ func (m Model) workspaceKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	case "pgup":
 		m.workspaceMove(-5)
 	case "enter", "right":
-		n, c := m.workspaceOpen()
-		return n, c, true
+		return m.workspaceOpen(), true
 	case "esc", "backspace", "left":
 		n, c := m.workspaceBack()
-		return n, c, true
+		*m = n
+		return c, true
 	case "o":
 		m.workspaceMenu("Group")
 	case "s":
@@ -385,21 +392,45 @@ func (m Model) workspaceKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		m.workspaceMenu("More")
 	case "d":
 		n, c := m.workspaceDetails()
-		return n, c, true
+		*m = n
+		return c, true
 	case "i":
 		n, c := m.workspaceAction("metric:Cost")
-		return n, c, true
+		*m = n
+		return c, true
 	case "u":
 		n, c := m.workspaceAction("suggestions")
-		return n, c, true
+		*m = n
+		return c, true
 	case "f6", "f7", "f8", "f9":
 		i := map[string]int{"f6": 0, "f7": 1, "f8": 2, "f9": 3}[k]
 		n, c := m.workspaceSetRange([]Range{RangeToday, Range7d, Range30d, RangeAll}[i])
-		return n, c, true
+		*m = n
+		return c, true
 	default:
-		return m, nil, false
+		return nil, false
 	}
-	return m, nil, true
+	return nil, true
+}
+
+// Header and tab clicks belong to the shared chrome. Avoid scanning all
+// workspace rows/actions before handing those clicks to the existing router.
+// Breadcrumbs remain workspace-owned so ancestor jumps restore list history.
+func (m *Model) workspaceMouseEligible(msg tea.MouseMsg) bool {
+	if m.workspace.overlay != "" {
+		return true
+	}
+	if m.view != ViewOverview || m.classicOverview {
+		return false
+	}
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		belowTabs := views.AppFrame + 1
+		if m.lay.ShowHeader && m.height >= 18 {
+			belowTabs++
+		}
+		return click.Y >= belowTabs
+	}
+	return true
 }
 
 func (m Model) workspaceMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
@@ -515,8 +546,8 @@ func (m Model) workspaceMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 	for i := range m.workspace.rows {
 		if hit(fmt.Sprintf("workspace-row-%d", i)) {
 			if i == m.workspace.cursor && m.rowChosen {
-				n, c := m.workspaceOpen()
-				return n, c, true
+				c := m.workspaceOpen()
+				return m, c, true
 			}
 			m.workspace.cursor = i
 			m.rowChosen = true

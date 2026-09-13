@@ -417,19 +417,22 @@ func (m Model) renderFooter() string {
 	return lipgloss.NewStyle().MaxWidth(m.frameW()).Render(bar)
 }
 
+var workspaceHelpLabels = [...][2]string{{"↑/↓", "select row"}, {"Enter/Esc", "open/back"}, {"o/s/c", "group/sort/chart"}, {"d/i/u", "details/cost/tips"}, {"F6–F9", "Today/7d/30d/All"}, {"a/p", "more/pivot"}, {"?/q", "help/quit"}}
+
 // renderHelpOverlay renders the expanded help as a painted card (no border —
 // the app frame is the only box).
 func (m Model) renderHelpOverlay() string {
 	m.help.ShowAll = true
-	content := m.help.View(m.keys)
+	var content string
 	if m.view == ViewOverview && !m.classicOverview {
-		labels := [][2]string{{"↑/↓", "select row"}, {"Enter/Esc", "open/back"}, {"o/s/c", "group/sort/chart"}, {"d/i/u", "details/cost/tips"}, {"F6–F9", "Today/7d/30d/All"}, {"a/p", "more/pivot"}, {"?/q", "help/quit"}}
-		bindings := make([]key.Binding, 0, len(labels))
-		for _, label := range labels {
+		bindings := make([]key.Binding, 0, len(workspaceHelpLabels)+2)
+		for _, label := range workspaceHelpLabels {
 			bindings = append(bindings, key.NewBinding(key.WithKeys(label[0]), key.WithHelp(label[0], label[1])))
 		}
 		bindings = append(bindings, m.keys.StepBack, m.keys.StepFwd)
 		content = m.help.FullHelpView([][]key.Binding{bindings})
+	} else {
+		content = m.help.View(m.keys)
 	}
 	w := m.frameW()
 	if w < 3 {
