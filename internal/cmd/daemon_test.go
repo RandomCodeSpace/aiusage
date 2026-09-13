@@ -472,7 +472,8 @@ func indexOf(args []string, want string) int {
 // TestPersistentPreRunSkipsDaemon verifies the root's PersistentPreRunE makes
 // the right spawn decision per target command: it never spawns for skip-listed
 // commands (run/once/doctor/completion/help/version) nor when --no-daemon is
-// set, and DOES spawn for data-facing commands (root default, today, summary).
+// set, and DOES spawn for data-facing subcommands (today, summary). The root
+// TUI reads existing data without starting collection.
 //
 // It invokes PersistentPreRunE directly for the resolved target command rather
 // than running the command body, so commands like `run` (which would block in
@@ -485,9 +486,9 @@ func TestPersistentPreRunSkipsDaemon(t *testing.T) {
 		tty       bool
 		wantSpawn bool
 	}{
-		// Bare `aiusage` only spawns when interactive (RunE launches the TUI). A
-		// non-TTY bare invocation prints help instead, so it must not spawn.
-		{name: "root default (TTY) spawns", target: "", tty: true, wantSpawn: true},
+		// Bare `aiusage` never spawns. Its TTY path is a read-only TUI, while its
+		// non-TTY path prints help.
+		{name: "root default (TTY) skips", target: "", tty: true, wantSpawn: false},
 		{name: "root default (non-TTY) skips", target: "", tty: false, wantSpawn: false},
 		// Explicit data-facing subcommands spawn regardless of TTY.
 		{name: "today spawns", target: "today", wantSpawn: true},

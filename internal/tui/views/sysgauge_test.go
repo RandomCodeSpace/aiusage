@@ -23,10 +23,11 @@ func sysTestCtx() Ctx {
 }
 
 func sysTestGauges() []SysGauge {
+	history := []float64{0.12, 0.28, 0.19, 0.44, 0.38}
 	return []SysGauge{
-		{Label: "cpu", Frac: 0.38, Text: "0.8/2 cpu", Known: true},
-		{Label: "mem", Frac: 0.72, Text: "2.9G/4.0G", Known: true},
-		{Label: "disk", Frac: 0.93, Text: "28G/30G", Known: true},
+		{Label: "cpu", Frac: 0.38, Text: "0.8/2 cpu", Known: true, History: history},
+		{Label: "mem", Frac: 0.72, Text: "2.9G/4.0G", Known: true, History: history},
+		{Label: "disk", Frac: 0.93, Text: "28G/30G", Known: true, History: history},
 	}
 }
 
@@ -35,11 +36,25 @@ func sysTestGauges() []SysGauge {
 // layout off-screen.
 func TestSysStripNeverOverflows(t *testing.T) {
 	c := sysTestCtx()
-	for w := 12; w <= 240; w++ {
+	for w := 8; w <= 240; w++ {
 		out := SysStrip(c, sysTestGauges(), w)
 		if got := lipgloss.Width(ansiSys.ReplaceAllString(out, "")); got > w {
 			t.Fatalf("w=%d: strip width %d exceeds budget", w, got)
 		}
+	}
+}
+
+func TestSysStripResponsiveComposition(t *testing.T) {
+	c := sysTestCtx()
+	narrow := ansiSys.ReplaceAllString(SysStrip(c, sysTestGauges(), 42), "")
+	if got := lipgloss.Height(narrow); got != 3 {
+		t.Fatalf("narrow strip height = %d, want one row per gauge", got)
+	}
+	if got := strings.Count(narrow, "▕"); got != 3 {
+		t.Fatalf("narrow strip rendered %d utilization bars, want one per gauge: %q", got, narrow)
+	}
+	if got := lipgloss.Height(SysStrip(c, sysTestGauges(), 120)); got != 2 {
+		t.Fatalf("wide strip height = %d, want reading plus utilization bar", got)
 	}
 }
 
@@ -61,10 +76,41 @@ func TestSysStripUnknownPlaceholder(t *testing.T) {
 func TestSysStripShowsPercent(t *testing.T) {
 	c := sysTestCtx()
 	out := ansiSys.ReplaceAllString(SysStrip(c, sysTestGauges(), 200), "")
-	for _, want := range []string{"38%", "72%", "93%", "cpu", "mem", "disk"} {
+	for _, want := range []string{"38%", "72%", "93%", "cpu", "mem", "disk", "0.8/2 cpu", "2.9G/4.0G", "28G/30G"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("strip missing %q in %q", want, out)
 		}
+	}
+}
+
+func TestMachineGaugeBarShowsLiveFillAndBoundary(t *testing.T) {
+	rendered := machineGaugeBar(sysTestCtx(), sysTestGauges()[0], 20)
+	if strings.Contains(rendered, "\x1b[48") {
+		t.Fatalf("utilization bar painted a background: %q", rendered)
+	}
+	out := ansiSys.ReplaceAllString(rendered, "")
+	if !strings.HasPrefix(out, "▕") || !strings.HasSuffix(out, "▏") {
+		t.Fatalf("utilization bar boundaries missing: %q", out)
+	}
+	if !strings.Contains(out, "█") || !strings.Contains(out, "░") {
+		t.Fatalf("utilization bar does not distinguish fill from remainder: %q", out)
+	}
+	if got := strings.Count(out, "█"); got != 7 {
+		t.Fatalf("38%% utilization filled %d of 18 cells, want 7: %q", got, out)
+	}
+}
+
+func TestGaugeReadingUsesBoldSemanticStyle(t *testing.T) {
+	c := sysTestCtx()
+	style := gaugeStyle(c, 0.38)
+	if !style.GetBold() {
+		t.Fatal("known gauge label and value are not bold")
+	}
+	if got := style.GetForeground(); got != c.GoodColor {
+		t.Fatalf("healthy gauge foreground = %v, want %v", got, c.GoodColor)
+	}
+	if !gaugeNoteStyle(c).GetItalic() {
+		t.Fatal("gauge readout is not italic")
 	}
 }
 

@@ -71,7 +71,7 @@ func TestOverviewComparisonCapsExistingTimelineQuery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m := newPinnedModel(t, st, now)
+	m := classicOverview(newPinnedModel(t, st, now))
 	if m.err != nil || m.overview.Totals.Total != 100 || m.overview.Prev.Total != 100 {
 		t.Fatalf("snapshot comparison = %d / %d, err %v", m.overview.Totals.Total, m.overview.Prev.Total, m.err)
 	}
@@ -261,7 +261,7 @@ func TestAllOverviewUsesLedgerWhenRollupIsMissingOrStale(t *testing.T) {
 }
 
 func TestOverviewCostDeltaUsesWiredCurrencyFormatter(t *testing.T) {
-	m := newTestModelW(t, &fakeData{}, 260)
+	m := classicOverview(newTestModelW(t, &fakeData{}, 260))
 	m.overview.Totals.CostMicroUSD = 1_324_620_000
 	m.overview.Prev.CostMicroUSD = 2_000_000
 	if out := plainFrame(m); !strings.Contains(out, "▲ $1322.62") {

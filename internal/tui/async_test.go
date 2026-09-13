@@ -197,7 +197,7 @@ func TestSupersededFlightRunsNoQueries(t *testing.T) {
 			now := tc.oldNow.Add(-time.Minute)
 			insert("initial", now.Add(-time.Minute), 100)
 			f := &countingSource{src: st}
-			m := newPinnedModel(t, f, now)
+			m := classicOverview(newPinnedModel(t, f, now))
 			m.dbPath = path
 			m.data.now = func() time.Time { return now }
 			now = tc.oldNow

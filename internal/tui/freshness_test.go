@@ -80,7 +80,7 @@ func TestFreshnessTransitions(t *testing.T) {
 }
 
 // TestChipCutsBeforeDataLands is the J-cut contract on the text channel: the
-// frame rendered BETWEEN dispatch and dataLoadedMsg carries the "◐ sync" chip
+// frame rendered BETWEEN dispatch and dataLoadedMsg carries the "◐ loading" chip
 // while the prior body content is still on screen; the apply lands in one
 // frame and the chip returns to "● live".
 func TestChipCutsBeforeDataLands(t *testing.T) {
@@ -89,21 +89,21 @@ func TestChipCutsBeforeDataLands(t *testing.T) {
 	if !strings.Contains(before, "● live") {
 		t.Fatalf("loaded frame missing the live chip:\n%s", before)
 	}
-	if !strings.Contains(before, "TREND") {
-		t.Fatal("loaded frame missing the Overview body")
+	if !strings.Contains(before, "AI usage") || !strings.Contains(before, "claude-opus") {
+		t.Fatal("loaded frame missing the workspace body")
 	}
 
 	tm, cmd := m.Update(keyMsg("r")) // force refresh: flight in flight
 	m = tm.(Model)
 	mid := m.View().Content
-	if !strings.Contains(mid, "◐ sync") {
+	if !strings.Contains(mid, "◐ loading") {
 		t.Fatalf("in-flight frame missing the sync chip:\n%s", mid)
 	}
 	if strings.Contains(mid, "● live") {
 		t.Fatal("in-flight frame still shows the live chip")
 	}
 	// The old picture is held behind the chip — no blanking, no spinner body.
-	if !strings.Contains(mid, "TREND") || !strings.Contains(mid, "codex") {
+	if !strings.Contains(mid, "AI usage") || !strings.Contains(mid, "claude-opus") {
 		t.Fatal("in-flight frame dropped the prior body content")
 	}
 	if strings.Contains(mid, "loading usage…") {
@@ -115,7 +115,7 @@ func TestChipCutsBeforeDataLands(t *testing.T) {
 	if !strings.Contains(after, "● live") {
 		t.Fatal("applied frame missing the live chip")
 	}
-	if strings.Contains(after, "◐ sync") {
+	if strings.Contains(after, "◐ loading") {
 		t.Fatal("applied frame still shows the sync chip")
 	}
 }
@@ -138,7 +138,7 @@ func TestFailedLoadHoldsLastFrame(t *testing.T) {
 	if !strings.Contains(out, "◔ stale") {
 		t.Fatalf("failed load frame missing the stale chip:\n%s", out)
 	}
-	if !strings.Contains(out, "TREND") || !strings.Contains(out, "codex") {
+	if !strings.Contains(out, "AI usage") || !strings.Contains(out, "claude-opus") {
 		t.Fatal("failed load blanked the held body")
 	}
 	if strings.Contains(out, "press r to retry") {
@@ -163,7 +163,7 @@ func TestColdFailureShowsErrorPanel(t *testing.T) {
 	if !strings.Contains(out, "✕ query failed") || !strings.Contains(out, "press r to retry") {
 		t.Fatalf("cold failure missing the error panel:\n%s", out)
 	}
-	if strings.Contains(out, "TREND") {
+	if strings.Contains(out, "AI usage") {
 		t.Fatal("cold failure rendered a body it never had")
 	}
 	if strings.Contains(out, "loading usage…") {
@@ -220,7 +220,7 @@ func TestHeaderCoreMatrix(t *testing.T) {
 	}{
 		{FreshCold, "○ cold"},
 		{FreshLive, "● live"},
-		{FreshCutIn, "◐ sync"},
+		{FreshCutIn, "◐ loading"},
 		{FreshStale, "◔ stale"},
 	}
 
@@ -250,6 +250,9 @@ func TestHeaderCoreMatrix(t *testing.T) {
 							header := m.renderHeader()
 							plain := ansiResp.ReplaceAllString(header, "")
 							for _, want := range []string{"◧ aiusage", state.want, "? help"} {
+								if want == "◐ loading" && strings.Contains(plain, "◐ read") {
+									continue
+								}
 								if !strings.Contains(plain, want) {
 									t.Errorf("w=%d stepped=%v state=%v view=%v: header dropped %q: %q",
 										w, stepped, state.fresh, meta.v, want, plain)

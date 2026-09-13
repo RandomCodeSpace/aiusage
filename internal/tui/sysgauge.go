@@ -22,6 +22,15 @@ import (
 // gauge feels live, long enough to be negligible overhead.
 const sysInterval = 2 * time.Second
 
+// sysHistoryLimit retains two minutes at the normal sampling cadence. History
+// is session-local and independent of the selected usage range.
+const sysHistoryLimit = 60
+
+// sysHistory holds CPU, memory, and disk fractions in the same fixed order as
+// sysGauges. A missing reading clears only that series so the renderer cannot
+// draw a line across an unknown interval.
+type sysHistory [3][]float64
+
 // sysTickMsg delivers one background resource sample every sysInterval.
 type sysTickMsg struct{ snap sysmon.Snapshot }
 
@@ -42,8 +51,32 @@ func sysTickCmd(mon *sysmon.Monitor) tea.Cmd {
 func (m Model) handleSysTick(msg sysTickMsg) (tea.Model, tea.Cmd) {
 	if m.mon != nil {
 		m.sys = msg.snap
+		m.sysHistory = appendSysHistory(m.sysHistory, msg.snap)
 	}
 	return m, sysTickCmd(m.mon)
+}
+
+// appendSysHistory returns a fresh history value. Model is copied by Bubble
+// Tea, so cloning each short series avoids mutating an older model through a
+// shared slice backing array.
+func appendSysHistory(history sysHistory, snap sysmon.Snapshot) sysHistory {
+	gauges := [3]sysmon.Gauge{snap.CPU, snap.Mem, snap.Disk}
+	for i, gauge := range gauges {
+		if !gauge.Known {
+			history[i] = nil
+			continue
+		}
+
+		start := 0
+		if len(history[i]) >= sysHistoryLimit {
+			start = len(history[i]) - sysHistoryLimit + 1
+		}
+		next := make([]float64, 0, min(sysHistoryLimit, len(history[i])-start+1))
+		next = append(next, history[i][start:]...)
+		next = append(next, gauge.Frac)
+		history[i] = next
+	}
+	return history
 }
 
 // sysGauges maps the latest sysmon snapshot into the view-layer gauge list the
@@ -53,8 +86,8 @@ func (m Model) handleSysTick(msg sysTickMsg) (tea.Model, tea.Cmd) {
 func (m Model) sysGauges() []views.SysGauge {
 	s := m.sys
 	return []views.SysGauge{
-		{Label: "cpu", Frac: s.CPU.Frac, Text: s.CPU.Text, Known: s.CPU.Known},
-		{Label: "mem", Frac: s.Mem.Frac, Text: s.Mem.Text, Known: s.Mem.Known},
-		{Label: "disk", Frac: s.Disk.Frac, Text: s.Disk.Text, Known: s.Disk.Known},
+		{Label: "cpu", Frac: s.CPU.Frac, Text: s.CPU.Text, Known: s.CPU.Known, History: m.sysHistory[0]},
+		{Label: "mem", Frac: s.Mem.Frac, Text: s.Mem.Text, Known: s.Mem.Known, History: m.sysHistory[1]},
+		{Label: "disk", Frac: s.Disk.Frac, Text: s.Disk.Text, Known: s.Disk.Known, History: m.sysHistory[2]},
 	}
 }

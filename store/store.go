@@ -170,10 +170,11 @@ type Filter struct {
 	Since time.Time // inclusive lower bound on event_time (zero = open)
 	Until time.Time // exclusive upper bound on event_time (zero = open)
 
-	Tools    []string // restrict to these tools (empty = all)
-	Models   []string // restrict to these models (empty = all)
-	Projects []string // restrict to these projects (empty = all)
-	Sessions []string // restrict to these sessions (empty = all)
+	Tools     []string // restrict to these tools (empty = all)
+	Models    []string // restrict to these models (empty = all)
+	Providers []string // restrict to recorded providers (empty = all; [""] = unknown)
+	Projects  []string // restrict to these projects (empty = all)
+	Sessions  []string // restrict to these sessions (empty = all)
 
 	// GroupBy lists grouping dimensions, applied in order. Valid values:
 	// "hour","day","week","month","tool","model","provider","project",

@@ -46,7 +46,7 @@ import (
 // The deliberate trade: a burst no longer LOADS the windows it merely passes
 // through, so coming back to one costs a flight instead of hitting a cache the
 // wasted work had incidentally warmed. That is the right way round — a revisit
-// is one background load behind the "◐ sync" chip with the previous picture
+// is one background load behind the "◐ loading" chip with the previous picture
 // still up, while the speculative warming cost every intermediate window a full
 // aggregation whether or not the reader ever stopped on it. Windows actually
 // LOADED stay memoized across toggles exactly as before: the summary cache
@@ -224,7 +224,7 @@ func fileMTime(path string) time.Time {
 // startLoad opens a new load generation and returns its load cmd: it bumps the
 // generation (superseding any in-flight load, whose apply will now be dropped),
 // resolves the generation clock, cuts the freshness chip and dispatches. The
-// chip cut is synchronous — the very next frame carries "◐ sync" with the old
+// chip cut is synchronous — the very next frame carries "◐ loading" with the old
 // picture still behind it (the J-cut). Cold stays cold: with no picture to
 // hold, the branded loading screen owns the frame instead. Kept as the single
 // dispatch path so generation, clock and freshness never drift apart.
@@ -327,6 +327,12 @@ func (m Model) handleDataLoaded(msg dataLoadedMsg) (Model, tea.Cmd) {
 		// contract as a failed flight: hold the picture unless there is none.
 		if prior != FreshCold {
 			m.fresh = FreshStale
+		}
+		return m, nil
+	}
+	if m.detailWanted && m.view == ViewOverview {
+		if prior != FreshCold {
+			m.fresh = FreshCutIn
 		}
 		return m, nil
 	}

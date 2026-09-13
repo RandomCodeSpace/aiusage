@@ -49,7 +49,7 @@ func containsAny(s string, alts ...string) bool {
 // scale are text, so they survive the strip. The hero's lanes are self-scaled,
 // so the peak each one names is the only thing that makes them comparable.
 func TestMonoPaneLabelsAndScaleReadouts(t *testing.T) {
-	m := newTestModelWH(t, &fakeData{}, 160, 44)
+	m := classicOverview(newTestModelWH(t, &fakeData{}, 160, 44))
 	out := monoFrame(m)
 
 	for _, want := range []string{"TREND", "BY TOOL", "SPLIT", "max "} {
@@ -72,6 +72,9 @@ func TestMonoFocusIndication(t *testing.T) {
 	} {
 		m := newTestModelWH(t, &fakeData{}, 160, 44)
 		m = step(t, m, keyMsg(tc.key))
+		if tc.key == "1" {
+			m = classicOverview(m)
+		}
 		out := monoFrame(m)
 		if !strings.Contains(out, views.FocusBar+" "+tc.title) {
 			t.Errorf("tab %s: focused pane %q carries no focus bar %q in mono:\n%s",
@@ -85,7 +88,7 @@ func TestMonoFocusIndication(t *testing.T) {
 // unfocused slot is exactly as wide, so nothing reflows when focus moves.
 func TestMonoFocusBarIsWidthInvariant(t *testing.T) {
 	for _, w := range []int{100, 140, 200} {
-		m := newTestModelWH(t, &fakeData{}, w, 44)
+		m := classicOverview(newTestModelWH(t, &fakeData{}, w, 44))
 		out := monoFrame(m)
 		if !strings.Contains(out, views.FocusBar+" TREND") {
 			t.Errorf("w=%d: the focused pane's marker is not a single bar + space:\n%s", w, out)
@@ -144,7 +147,7 @@ func TestMonoStateAndRangeChips(t *testing.T) {
 	m := newTestModelWH(t, &fakeData{}, 160, 44)
 	out := monoFrame(m)
 
-	if !containsAny(out, "live", "sync", "stale", "cold") {
+	if !containsAny(out, "live", "loading", "stale", "cold") {
 		t.Errorf("no freshness state word in the mono frame:\n%s", out)
 	}
 	if !strings.Contains(out, "‹ "+m.spanLabel()+" ›") {
@@ -155,7 +158,7 @@ func TestMonoStateAndRangeChips(t *testing.T) {
 	}
 	// The sort chip is a press target (issue #23), so what it will do has to be
 	// readable before pressing it — with colour gone, the word is all there is.
-	if !strings.Contains(out, "sort "+m.sort.Label()) {
+	if !strings.Contains(out, "Sort: "+m.sort.Label()) {
 		t.Errorf("the sort action chip did not survive the strip:\n%s", out)
 	}
 }
@@ -231,7 +234,7 @@ func TestMonoDrillChevron(t *testing.T) {
 
 // TestMonoDeltaDirection: a KPI's direction is a glyph, never a color.
 func TestMonoDeltaDirection(t *testing.T) {
-	out := monoFrame(newTestModelWH(t, &fakeData{}, 160, 44))
+	out := monoFrame(classicOverview(newTestModelWH(t, &fakeData{}, 160, 44)))
 	if !containsAny(out, "▲ ", "▼ ", "· —", "= 0") {
 		t.Errorf("no delta direction glyph in the mono frame:\n%s", out)
 	}
@@ -242,7 +245,7 @@ func TestMonoDeltaDirection(t *testing.T) {
 func TestMonoEmptyStates(t *testing.T) {
 	m := newTestModelWH(t, emptySource{}, 160, 44)
 	out := monoFrame(m)
-	if !strings.Contains(out, "no rows in range") {
+	if !strings.Contains(out, "No matching usage") {
 		t.Errorf("empty range lost its treatment in mono:\n%s", out)
 	}
 }
@@ -271,7 +274,7 @@ func TestBordersRetreatToTheAppFrame(t *testing.T) {
 // TestMonoTitledRules: panel titles are titled rules, so the pane's extent is
 // readable without a box. The rule must run from the title to the pane edge.
 func TestMonoTitledRules(t *testing.T) {
-	out := monoFrame(newTestModelWH(t, &fakeData{}, 160, 44))
+	out := monoFrame(classicOverview(newTestModelWH(t, &fakeData{}, 160, 44)))
 	found := false
 	for _, ln := range strings.Split(out, "\n") {
 		if i := strings.Index(ln, "TREND"); i >= 0 && strings.Contains(ln[i:], "──") {

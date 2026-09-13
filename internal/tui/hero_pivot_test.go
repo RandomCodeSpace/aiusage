@@ -15,7 +15,7 @@ var ansiPivot = regexp.MustCompile("\x1b\\[[0-9;]*m")
 // reducer returns no cmd and the applied dataset is untouched.
 func TestPivotKeyTogglesHero(t *testing.T) {
 	f := &fakeData{}
-	m := newTestModel(t, f)
+	m := classicOverview(newTestModel(t, f))
 	if m.heroMode() != views.HeroTrend {
 		t.Fatal("hero does not start on the trend")
 	}
@@ -32,6 +32,9 @@ func TestPivotKeyTogglesHero(t *testing.T) {
 	if !m.heroPivot {
 		t.Fatal("p did not engage the pivot")
 	}
+	if !m.classicOverview {
+		t.Fatal("p did not enter the classic Overview that owns leverage")
+	}
 
 	// "range NNx" only comes from the pivot's magnitude footer, so it proves the
 	// body pivoted, not just the panel title.
@@ -46,12 +49,39 @@ func TestPivotKeyTogglesHero(t *testing.T) {
 	if m.heroPivot {
 		t.Fatal("p did not toggle back to the trend")
 	}
+	if !m.classicOverview {
+		t.Fatal("returning to the classic trend left the classic Overview")
+	}
 
 	// Only Overview owns a hero: the key must be inert elsewhere.
 	m = step(t, m, keyMsg("4")) // Sessions/Browse
 	m = send(m, keyMsg("p"))
 	if m.heroPivot {
 		t.Fatal("p flipped the hero from a view that has none")
+	}
+}
+
+func TestClassicOverviewMenuEntryLoadsInBackground(t *testing.T) {
+	f := &fakeData{}
+	m := newTestModel(t, f)
+	m.workspaceMenu("More")
+	action := ""
+	for _, item := range m.workspace.menu {
+		if item.action == "classic" {
+			action = item.action
+			break
+		}
+	}
+	if action == "" {
+		t.Fatal("More menu does not expose the classic usage trend")
+	}
+	before := f.queries()
+	m, cmd := m.workspaceAction(action)
+	if cmd == nil || f.queries() != before {
+		t.Fatal("classic trend entry must load its summaries off the UI thread")
+	}
+	if !m.classicOverview || m.heroPivot {
+		t.Fatalf("classic entry state = classic %v, leverage %v", m.classicOverview, m.heroPivot)
 	}
 }
 

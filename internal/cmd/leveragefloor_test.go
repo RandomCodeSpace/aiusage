@@ -21,6 +21,7 @@ func TestRootHandsConfiguredLeverageFloorToTheTUI(t *testing.T) {
 	}
 
 	db := filepath.Join(t.TempDir(), "usage.db")
+	seedTUIStore(t, db)
 	home := t.TempDir()
 
 	prevTTY, prevRun, prevFlags := isTTY, runTUI, flags

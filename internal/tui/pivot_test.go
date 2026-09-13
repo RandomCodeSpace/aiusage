@@ -277,7 +277,7 @@ func TestPivotBindingIsAdvertisedOnActivity(t *testing.T) {
 // presentation and dispatches nothing.
 func TestOverviewHeroPivotStillTogglesLocally(t *testing.T) {
 	src := &fakeData{}
-	m := newTestModelWH(t, src, 160, 44)
+	m := classicOverview(newTestModelWH(t, src, 160, 44))
 	if m.heroPivot {
 		t.Fatal("the hero starts on the trend reading")
 	}

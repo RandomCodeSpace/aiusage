@@ -32,7 +32,7 @@ func (m *Model) reloadWith(cacheOnlyDetail bool) {
 	m.err = nil
 	switch m.view {
 	case ViewOverview:
-		m.loadOverview() // its scrub reprice (syncScrub) is cache-only already
+		m.loadOverviewSnapshot(cacheOnlyDetail)
 	case ViewByTool:
 		m.loadByToolBase()
 		if m.err == nil {

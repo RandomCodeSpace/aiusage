@@ -226,6 +226,7 @@ func TestRightClickBacksOut(t *testing.T) {
 
 	// On Overview the pin is what a back pops first.
 	m = step(t, m, keyMsg("1"))
+	m = classicOverview(m)
 	m = send(m, keyMsg("right")) // pin the scrub
 	if !m.scrubPinned {
 		t.Fatal("setup: scrub not pinned")
@@ -275,7 +276,7 @@ func TestWheelRoutesToPaneUnderPointer(t *testing.T) {
 
 // TestWheelOverHeroScrubs: over a chart a notch is a scrub step.
 func TestWheelOverHeroScrubs(t *testing.T) {
-	m := newTestModelWH(t, &fakeData{}, 160, 44)
+	m := classicOverview(newTestModelWH(t, &fakeData{}, 160, 44))
 	if n := len(m.tlData.Buckets); n < 2 {
 		t.Fatalf("overview timeline has %d buckets, need >= 2 to scrub", n)
 	}
@@ -327,7 +328,7 @@ func TestWheelNeverSwitchesTabsOrViews(t *testing.T) {
 // continuously. Cell-motion reporting only emits motion while a button is down,
 // so this is the terminal-side twin of the wheel path mobile clients take.
 func TestDragAcrossHeroScrubs(t *testing.T) {
-	m := newTestModelWH(t, &fakeData{}, 160, 44)
+	m := classicOverview(newTestModelWH(t, &fakeData{}, 160, 44))
 	x, y, ok := zoneCenter(m, views.ZoneHero)
 	if !ok {
 		t.Fatal("hero zone is not on screen")
@@ -371,7 +372,11 @@ func TestDragAcrossHeroScrubs(t *testing.T) {
 func TestClickSortChipCyclesSort(t *testing.T) {
 	m := newTestModelWH(t, &fakeData{}, 160, 44)
 	before := m.sort
-	m = mustPress(t, m, views.ZoneSort, tea.MouseLeft)
+	m = mustPress(t, m, "workspace-menu-sort", tea.MouseLeft)
+	if m.sort != before || m.workspace.chooser != "Sort" || m.workspace.overlay != "" {
+		t.Fatal("sort chooser must open without silently reordering")
+	}
+	m = mustPress(t, m, "workspace-choice-1", tea.MouseLeft)
 	if m.sort == before {
 		t.Fatalf("sort chip press left the sort at %v", before)
 	}
@@ -502,13 +507,19 @@ func TestInteractiveZonesResolve(t *testing.T) {
 	for _, sz := range sizes {
 		chrome := []string{
 			views.ZoneRangePill, views.ZoneHelp, views.ZoneFreshness,
-			views.ZoneSort, views.CrumbZone(0),
+			views.CrumbZone(0),
 		}
 		for i := 0; i < int(viewCount); i++ {
 			chrome = append(chrome, views.RailZone(i))
 		}
 		perTab := map[string][]string{
-			"1": {views.ZoneHero},
+			"1": {
+				views.ZoneWorkspaceInput, views.ZoneWorkspaceOutput,
+				views.ZoneWorkspaceCache, views.ZoneWorkspaceCost,
+				"workspace-menu-more", "workspace-menu-group", "workspace-menu-sort",
+				"workspace-row-0", "workspace-details", "workspace-open",
+				"workspace-chart-Cost",
+			},
 			"2": {views.ZoneBars, views.ZonePreview, views.BarZone("claude-code"), views.BarZone("codex")},
 			"3": {views.ZoneBars, views.ZonePreview, views.BarZone("claude-opus")},
 			"4": {views.ZoneTable, views.ZonePreview, views.RowZone(0), views.RowZone(1)},
@@ -516,7 +527,11 @@ func TestInteractiveZonesResolve(t *testing.T) {
 		for tab, want := range perTab {
 			m := newTestModelWH(t, &fakeData{}, sz.w, sz.h)
 			m = step(t, m, keyMsg(tab))
-			for _, id := range append(append([]string{}, chrome...), want...) {
+			zones := append(append([]string{}, chrome...), want...)
+			if tab != "1" {
+				zones = append(zones, views.ZoneSort)
+			}
+			for _, id := range zones {
 				if _, _, ok := zoneCenter(m, id); !ok {
 					t.Errorf("%dx%d tab %s: zone %q does not resolve — the surface is unreachable by mouse",
 						sz.w, sz.h, tab, id)

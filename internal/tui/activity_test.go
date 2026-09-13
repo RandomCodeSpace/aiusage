@@ -178,6 +178,7 @@ func cycleUntilOrder(t *testing.T, m Model, src *orderSource, want store.Activit
 // unknown — the ordering is the store's, and the tab must not re-sort it.
 func TestActivityRankOrderFollowsTheStore(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
+	m.sort = SortTotal
 	m = step(t, m, keyMsg("5"))
 	m = step(t, m, keyMsg("s")) // total -> events == calls
 	if m.sort != SortEvents {
@@ -198,6 +199,7 @@ func TestActivityRankOrderFollowsTheStore(t *testing.T) {
 // different one (there is no name ranking in SQL).
 func TestActivityNameSortOrdersThePage(t *testing.T) {
 	m := newTestModel(t, &fakeData{})
+	m.sort = SortTotal
 	m = step(t, m, keyMsg("5"))
 	m = step(t, m, keyMsg("s")) // events
 	m = step(t, m, keyMsg("s")) // name

@@ -511,6 +511,7 @@ func buildTurnContextWhere(dim model.TurnDimension, f ActivityFilter) (string, [
 	addIn("c.project", f.Projects)
 	addIn("c.session_id", f.Sessions)
 	addIn("c.model", f.Models)
+	addIn("u.provider", f.Providers)
 
 	return " WHERE " + strings.Join(conds, " AND "), args
 }

@@ -15,6 +15,8 @@ import (
 // Update is the MVU reducer.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case workspaceCodeMsg:
+		return m.handleWorkspaceCode(msg)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		// Resize is pure relayout: the view-model is size-independent and
@@ -22,6 +24,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// w/h), so no data reload — and therefore no store access — belongs
 		// here on any path, warm or cold.
 		m.layout()
+		m.workspaceRelayout()
 		return m, nil
 
 	case dataLoadedMsg:
@@ -43,9 +46,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSpinnerTick(msg)
 
 	case tea.MouseMsg:
+		if n, c, handled := m.workspaceMouse(msg); handled {
+			return n, c
+		}
 		return scheduleDetail(m.updateMouse(msg))
 
 	case tea.KeyPressMsg:
+		if n, c, handled := m.workspaceKey(msg); handled {
+			return n, c
+		}
 		if m.filtering {
 			return m.updateFiltering(msg)
 		}
@@ -140,7 +149,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Refresh):
 		// Force a reload: drop the cache and re-warm off the UI thread. The last
-		// frame stays on screen behind the "◐ sync" chip until the load lands —
+		// frame stays on screen behind the "◐ loading" chip until the load lands —
 		// the chip is the refresh signal, so no spinner tick is re-armed here.
 		m.data.Invalidate()
 		cmd := m.startLoad()
@@ -269,7 +278,12 @@ func (m *Model) scrubBy(dir int) {
 func (m Model) cyclePivot() (tea.Model, tea.Cmd) {
 	switch m.view {
 	case ViewOverview:
+		wasClassic := m.classicOverview
+		m.classicOverview = true
 		m.heroPivot = !m.heroPivot
+		if !wasClassic {
+			return m, m.startLoad()
+		}
 		return m, nil
 	case ViewActivity:
 		m.pivot = m.pivot.Next()
@@ -287,9 +301,15 @@ func (m Model) cyclePivot() (tea.Model, tea.Cmd) {
 // window steps back to the present: a "7d" step offset means nothing once the
 // span changes width.
 func (m Model) cycleRange() (Model, tea.Cmd) {
+	if m.view == ViewOverview && !m.classicOverview {
+		m.scrubIndex = 0
+		return m.workspaceSetRange(m.rng.Next())
+	}
 	m.rng = m.rng.Next()
 	m.step = 0
-	m.crumbs = nil
+	if m.view != ViewOverview {
+		m.crumbs = nil
+	}
 	m.scrubIndex = 0
 	m.scrubPinned = false
 	m.syncStepKeys()

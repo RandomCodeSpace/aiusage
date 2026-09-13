@@ -79,6 +79,7 @@ func TestRootHandsDiscoveredSourcesToTheTUI(t *testing.T) {
 	t.Setenv("OPENCODE_DATA_DIR", "")
 
 	db := filepath.Join(t.TempDir(), "usage.db")
+	seedTUIStore(t, db)
 	cfgPath := offlineConfig(t)
 
 	prevTTY, prevRun, prevFlags := isTTY, runTUI, flags

@@ -12,13 +12,14 @@ import (
 // multi-value drill dimensions.
 func keyFilter() store.Filter {
 	return store.Filter{
-		Since:    time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC),
-		Until:    time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC),
-		GroupBy:  []string{"day", "tool"},
-		Tools:    []string{"claude-code", "codex"},
-		Models:   []string{"claude-opus"},
-		Projects: []string{"/work/a"},
-		Sessions: []string{"sess-1", "sess-2"},
+		Since:     time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC),
+		Until:     time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC),
+		GroupBy:   []string{"day", "tool"},
+		Tools:     []string{"claude-code", "codex"},
+		Models:    []string{"claude-opus"},
+		Projects:  []string{"/work/a"},
+		Sessions:  []string{"sess-1", "sess-2"},
+		Providers: []string{"anthropic", "openai"},
 	}
 }
 
@@ -32,14 +33,23 @@ func joinedKey(f store.Filter) string {
 	if len(f.Models) > 0 {
 		models = "=" + models
 	}
+	projects := strings.Join(f.Projects, ",")
+	if len(f.Projects) == 1 && f.Projects[0] == "" {
+		projects = "=" + projects
+	}
+	providers := strings.Join(f.Providers, ",")
+	if len(f.Providers) > 0 {
+		providers = "=" + providers
+	}
 	return strings.Join([]string{
 		f.Since.Format(time.RFC3339),
 		f.Until.Format(time.RFC3339),
 		strings.Join(f.GroupBy, ","),
 		strings.Join(f.Tools, ","),
 		models,
-		strings.Join(f.Projects, ","),
+		projects,
 		strings.Join(f.Sessions, ","),
+		providers,
 	}, "|")
 }
 
@@ -49,7 +59,9 @@ func TestCacheKeyIsByteStable(t *testing.T) {
 		{Since: time.Date(2026, 8, 3, 0, 0, 0, 0, time.FixedZone("IST", 5*3600+1800))},
 		{GroupBy: []string{"hour"}},
 		keyFilter(),
-		{Models: []string{""}}, // an explicit unknown model is still a filter
+		{Models: []string{""}},    // an explicit unknown model is still a filter
+		{Projects: []string{""}},  // an explicit unknown project is still a filter
+		{Providers: []string{""}}, // an explicit unknown provider is still a filter
 	} {
 		if got, want := cacheKey(f), joinedKey(f); got != want {
 			t.Errorf("cacheKey = %q, want %q", got, want)
