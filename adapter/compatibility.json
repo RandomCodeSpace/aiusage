@@ -472,29 +472,60 @@
     {
       "tool": "crush",
       "harness": "Crush",
-      "version": "",
-      "captured_at": "",
-      "goos": "unrecorded",
-      "goarch": "unrecorded",
-      "status": "pending",
-      "recipe": [],
-      "sanitization": "The live zero-cost capture retains assigned counters and the zero vendor cost; content-bearing database columns are replaced by planted placeholders.",
+      "version": "0.85.0 (718edba704583245d1be5cde47785f458e430f35)",
+      "captured_at": "2026-09-13T08:11:27Z",
+      "goos": "linux",
+      "goarch": "amd64",
+      "status": "ready",
+      "recipe": [
+        "Use the isolated Crush configuration and two bounded prompts recorded in adapter/crush/testdata/live-0.85.0-ollama-cloud/capture.json with an existing OLLAMA_API_KEY.",
+        "Run Crush 0.85.0 against Ollama Cloud gpt-oss:20b with the official per-million-token rates from https://ollama.com/pricing: input 0.07, output 0.30, cached input 0.035 USD. The caller authorized this Cloud capture.",
+        "Capture the project SQLite database after the first prompt and after one short --continue prompt using read-only SQLite Connection.backup. Each command exits successfully; tools and external context loading are disabled.",
+        "Retain the harness-recorded session cost and assigned counters exactly. Replace content fields only and export messages before sessions so insert triggers cannot rewrite captured timestamps.",
+        "Replay with TestLiveOllamaCloudCostReplay: initial import, repeated read, actual second-snapshot growth, repeated second read, and fresh-total reconciliation."
+      ],
+      "sanitization": "Exact capture metadata, provider rates, configuration, and source/fixture hashes are in capture.json. Session/message IDs, joins, numeric values, provider/model and timestamps are retained; titles, todos and message parts are replaced with planted placeholders. No credentials, private context or reasoning text are included. Cost is Crush-calculated at published rates, not an account invoice.",
       "surfaces": [
         {
-          "name": "project SQLite database",
+          "name": "Ollama Cloud project SQLite first snapshot",
           "origin": "live",
-          "fixture": "adapter/crush/testdata/live.sql",
+          "fixture": "adapter/crush/testdata/live-0.85.0-ollama-cloud/first.sql",
           "package": "./adapter/crush",
-          "oracle": "TestLiveCaptureWithZeroCostEmitsNothing",
-          "discriminator": "sessions and messages tables written by Crush",
+          "oracle": "TestLiveOllamaCloudCostReplay",
+          "discriminator": "Crush 0.85.0 sessions/messages tables with a positive native session cost and actual before/after growth",
           "required_anchors": [
             "sessions.id",
+            "sessions.cost",
             "messages.session_id",
-            "messages.cost"
+            "messages.provider",
+            "messages.model"
           ],
           "evidence": {
             "nonzero_usage": false,
-            "nonzero_vendor_cost": false,
+            "nonzero_vendor_cost": true,
+            "joined_activity": false,
+            "unattributed_activity": false,
+            "turn_context": false,
+            "reasoning": false
+          }
+        },
+        {
+          "name": "Ollama Cloud project SQLite second snapshot",
+          "origin": "live",
+          "fixture": "adapter/crush/testdata/live-0.85.0-ollama-cloud/second.sql",
+          "package": "./adapter/crush",
+          "oracle": "TestLiveOllamaCloudCostReplay",
+          "discriminator": "Crush 0.85.0 sessions/messages tables with a positive native session cost and actual before/after growth",
+          "required_anchors": [
+            "sessions.id",
+            "sessions.cost",
+            "messages.session_id",
+            "messages.provider",
+            "messages.model"
+          ],
+          "evidence": {
+            "nonzero_usage": false,
+            "nonzero_vendor_cost": true,
             "joined_activity": false,
             "unattributed_activity": false,
             "turn_context": false,
@@ -518,14 +549,6 @@
           "package": "./adapter/crush",
           "test": "TestAssignedTokenColumnsNeverBecomeUsage"
         }
-      ],
-      "gaps": [
-        "the only live capture has zero vendor cost and correctly emits no usage",
-        "a real nonzero vendor-cost event has not been captured",
-        "exact harness version and capture metadata are missing",
-        "the bounded capture recipe was not recorded",
-        "Installed Crush 0.85.0 inspection on 2026-09-12 confirms native Ollama discovery supplies no prices; its 11 configured custom models have no positive rates. Positive native-cost capture requires legitimate provider pricing or reported monetary cost; no rates were invented.",
-        "Positive-cost capture is excluded from this implementation task by the user; the missing evidence remains a release-gate gap."
       ]
     },
     {

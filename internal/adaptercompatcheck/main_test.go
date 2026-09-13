@@ -13,7 +13,7 @@ import (
 )
 
 // Repository evidence is validated at its checked-in September capture snapshot.
-const repositoryEvidenceNow = "2026-09-12T18:00:00Z"
+const repositoryEvidenceNow = "2026-09-13T08:15:00Z"
 
 func TestMainWritesMachineReadableCIResult(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -56,28 +56,25 @@ func TestMainWritesMachineReadableCIResult(t *testing.T) {
 	}
 }
 
-func TestRepositoryManifestCoversRegistryWithoutPretendingPendingEvidenceIsReady(t *testing.T) {
+func TestRepositoryManifestCoversRegistryWithCompleteEvidence(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	m, raw, err := readManifest(filepath.Join(root, "adapter", "compatibility.json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
 
-	got := validate(root, m, raw, "ci", mustTime(t, repositoryEvidenceNow))
-	if len(got.Errors) != 0 {
-		t.Fatalf("CI validation errors: %v", got.Errors)
-	}
-	if got.Registered != 15 || len(m.Entries) != got.Registered {
-		t.Fatalf("registered/manifest entries = %d/%d, want 15/15", got.Registered, len(m.Entries))
-	}
-	if got.Ready != 14 || len(got.Pending) != 1 || got.Complete {
-		t.Fatalf("ready/pending/complete = %d/%d/%v, want 14/1/false",
-			got.Ready, len(got.Pending), got.Complete)
-	}
-
-	crush := pendingFor(t, got, "crush")
-	if !contains(crush.Gaps, "no nonzero live vendor-cost evidence") {
-		t.Fatalf("zero-cost Crush fixture was accepted as priced evidence: %v", crush.Gaps)
+	for _, mode := range []string{"ci", "release"} {
+		got := validate(root, m, raw, mode, mustTime(t, repositoryEvidenceNow))
+		if len(got.Errors) != 0 {
+			t.Fatalf("%s validation errors: %v", mode, got.Errors)
+		}
+		if got.Registered != 15 || len(m.Entries) != got.Registered {
+			t.Fatalf("registered/manifest entries = %d/%d, want 15/15", got.Registered, len(m.Entries))
+		}
+		if got.Ready != 15 || len(got.Pending) != 0 || !got.Complete {
+			t.Fatalf("%s ready/pending/complete = %d/%d/%v, want 15/0/true",
+				mode, got.Ready, len(got.Pending), got.Complete)
+		}
 	}
 }
 
@@ -86,6 +83,27 @@ func TestReleaseModeFailsClosedOnEveryPendingGap(t *testing.T) {
 	m, raw, err := readManifest(filepath.Join(root, "adapter", "compatibility.json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
+	}
+
+	// Withhold the live positive-cost evidence explicitly. The real repository
+	// now has a complete capture, so it must not serve as the negative fixture.
+	for i := range m.Entries {
+		e := &m.Entries[i]
+		if e.Tool != model.ToolCrush {
+			continue
+		}
+		e.Status = "pending"
+		e.Gaps = []string{"no nonzero live vendor-cost evidence"}
+		for j := range e.Surfaces {
+			e.Surfaces[j].Evidence.NonzeroVendorCost = false
+		}
+	}
+	ci := validate(root, m, raw, "ci", mustTime(t, repositoryEvidenceNow))
+	if len(ci.Errors) != 0 || ci.Ready != 14 || len(ci.Pending) != 1 || ci.Complete {
+		t.Fatalf("CI must retain the explicit pending gap: %+v", ci)
+	}
+	if crush := pendingFor(t, ci, model.ToolCrush); !contains(crush.Gaps, "no nonzero live vendor-cost evidence") {
+		t.Fatalf("zero-cost Crush evidence was accepted: %v", crush.Gaps)
 	}
 
 	got := validate(root, m, raw, "release", mustTime(t, repositoryEvidenceNow))
