@@ -399,7 +399,9 @@ jobs:
       - name: Download and verify draft release
         id: draft
         run: |
-          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")"
+          release_json="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,tagName,targetCommitish \
+            --jq '{id: .databaseId, draft: .isDraft, tag_name: .tagName, target_commitish: .targetCommitish}')"
           release_id="$(jq -r .id <<<"$release_json")"
           if [ "$(jq -r .draft <<<"$release_json")" != true ]; then
             echo "::error::release $VERSION is not a draft"
@@ -544,9 +546,13 @@ jobs:
         env:
           EXPECTED_RELEASE_ID: ${{ needs.draft.outputs.release_id }}
         run: |
-          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")"
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/$EXPECTED_RELEASE_ID")"
           if [ "$(jq -r .id <<<"$release_json")" != "$EXPECTED_RELEASE_ID" ]; then
             echo "::error::draft release identity changed after native verification"
+            exit 1
+          fi
+          if [ "$(jq -r .tag_name <<<"$release_json")" != "$VERSION" ]; then
+            echo "::error::verified release tag differs from $VERSION"
             exit 1
           fi
           if [ "$(jq -r .draft <<<"$release_json")" != true ]; then

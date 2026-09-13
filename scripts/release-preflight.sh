@@ -57,25 +57,21 @@ remote_tag_lines=()
 if [[ -n "$remote_tag_output" ]]; then
 	mapfile -t remote_tag_lines <<<"$remote_tag_output"
 fi
-release_json=""
-release_error="$(mktemp "${RUNNER_TEMP:-/tmp}/aiusage-release-error.XXXXXX")"
-set +e
-release_json="$(gh api "repos/${repository}/releases/tags/${version}" 2>"$release_error")"
-release_status=$?
-set -e
+# The tag endpoint excludes drafts. List releases so an existing draft is
+# checked too; API and JSON errors must fail instead of looking like absence.
+release_json="$(gh api --paginate --slurp "repos/${repository}/releases?per_page=100" |
+	jq -c --arg version "$version" '
+		[.[][] | select(.tag_name == $version)] |
+		if length > 1 then error("multiple releases match version") else .[0] // null end')"
 
 if (( run_attempt == 1 )); then
 	if (( ${#remote_tag_lines[@]} != 0 )); then
 		echo "tag ${version} already exists" >&2
 		exit 1
 	fi
-	if (( release_status == 0 )); then
+	if [[ "$release_json" != null ]]; then
 		echo "release ${version} already exists" >&2
 		exit 1
-	fi
-	if ! grep -q 'HTTP 404' "$release_error"; then
-		cat "$release_error" >&2
-		exit "$release_status"
 	fi
 else
 	if (( ${#remote_tag_lines[@]} != 0 )); then
@@ -85,7 +81,7 @@ else
 			exit 1
 		fi
 	fi
-	if (( release_status == 0 )); then
+	if [[ "$release_json" != null ]]; then
 		if [[ "$(jq -r .draft <<<"$release_json")" != "true" ]]; then
 			echo "retry refuses the published release ${version}" >&2
 			exit 1
@@ -99,12 +95,7 @@ else
 			exit 1
 		fi
 	fi
-	if (( release_status != 0 )) && ! grep -q 'HTTP 404' "$release_error"; then
-		cat "$release_error" >&2
-		exit "$release_status"
-	fi
 fi
-rm -f -- "$release_error"
 
 runs_json="$(gh api \
 	"repos/${repository}/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100")"
