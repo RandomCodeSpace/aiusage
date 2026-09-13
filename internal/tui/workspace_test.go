@@ -219,24 +219,46 @@ func TestWorkspacePendingGroupingKeepsAppliedMeaning(t *testing.T) {
 	}
 }
 
-func TestWorkspaceSuggestionInspectKeepsCapturedSpanAndSelection(t *testing.T) {
+func TestWorkspaceSuggestionInspectKeepsCapturedContextAndReturns(t *testing.T) {
 	f, m := newWorkspaceModel(t)
+	m, _ = workspaceUI(t, f, m, keyMsg("down"))
+	selected := &m.workspace.rows[m.workspace.cursor]
+	selected.UnpricedEvents = 1
+	selected.CostMicroUSD = 7
+	selected.CacheCreation = 20
+	identity := selectedWorkspaceIdentity(t, m)
+	m.fresh = FreshStale
+	captured := m.workspaceContext(true)
+	before := f.queries()
 	m, _ = workspaceUI(t, f, m, keyMsg("u"))
-	if len(m.workspace.suggestions) == 0 {
-		t.Fatal("fixture should have cache evidence")
+	if len(m.workspace.suggestions) != 2 || len(m.workspace.menu) != 2 || m.workspace.overlay != "Suggestions" {
+		t.Fatalf("suggestion menu = overlay %q suggestions %#v menu %#v", m.workspace.overlay, m.workspace.suggestions, m.workspace.menu)
 	}
-	capturedScope := slices.Clone(m.workspace.suggestions[0].Scope)
-	capturedSpan := m.workspace.suggestionSpan
-	// A later requested period and selection must not retarget existing evidence.
-	m.rng, m.step = Range30d, -2
-	m.workspaceMove(1)
+	m, _ = workspaceUI(t, f, m, keyMsg("down"))
 	m, cmd := workspaceUI(t, f, m, keyMsg("enter"))
-	if m.span() != capturedSpan || !reflect.DeepEqual(m.crumbs, capturedScope) || m.workspaceRequestedGroup() != "session" {
-		t.Fatalf("Inspect retargeted evidence: span=%+v scope=%+v", m.span(), m.crumbs)
+	if cmd != nil || m.workspace.overlay != "Cache inspector" {
+		t.Fatalf("second suggestion opened overlay %q cmd=%v", m.workspace.overlay, cmd)
 	}
-	m = workspaceApply(t, f, m, cmd)
-	if m.workspace.appliedSpan != capturedSpan || !reflect.DeepEqual(m.workspace.appliedScope, capturedScope) {
-		t.Fatal("evidence flight applied another scope or period")
+	for _, want := range []string{"Inspect cache writes and reuse", "Cache details", "Selected range: " + captured.RangeLabel, "Selected scope: " + captured.ScopeLabel, "Stale snapshot"} {
+		if !strings.Contains(m.workspace.content, want) {
+			t.Errorf("Cache inspector missing %q:\n%s", want, m.workspace.content)
+		}
+	}
+	if f.queries() != before || selectedWorkspaceIdentity(t, m) != identity {
+		t.Fatal("suggestion inspect queried the source or changed selection")
+	}
+
+	m, cmd = workspaceUI(t, f, m, keyMsg("esc"))
+	if cmd != nil || m.workspace.overlay != "Suggestions" || len(m.workspace.menu) != 2 || m.workspace.menuCursor != 1 || selectedWorkspaceIdentity(t, m) != identity {
+		t.Fatalf("Back lost suggestion list or origin: overlay=%q menu=%v cursor=%d identity=%q", m.workspace.overlay, m.workspace.menu, m.workspace.menuCursor, selectedWorkspaceIdentity(t, m))
+	}
+	before = f.queries()
+	m = mustPress(t, m, "workspace-action-0", tea.MouseLeft)
+	if m.workspace.overlay != "Cost inspector" || !strings.Contains(m.workspace.content, "Inspect missing price coverage") {
+		t.Fatalf("mouse opened %q:\n%s", m.workspace.overlay, m.workspace.content)
+	}
+	if f.queries() != before || selectedWorkspaceIdentity(t, m) != identity {
+		t.Fatal("mouse suggestion inspect queried the source or changed selection")
 	}
 }
 

@@ -32,6 +32,14 @@ func (m Model) workspaceBack() (Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.workspace.overlay != "" {
+		if m.workspace.suggestionReturn {
+			m.workspace.overlay = "Suggestions"
+			m.workspace.content = ""
+			m.workspace.menu = workspaceSuggestionActions(m.workspace.suggestions)
+			m.workspace.menuCursor = m.workspace.suggestionCursor
+			m.workspace.suggestionReturn = false
+			return m, nil
+		}
 		m.workspace.overlay = ""
 		m.workspace.menu = nil
 		m.workspace.suggestions = nil
@@ -204,6 +212,9 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 		metric := UsageMetric(strings.TrimPrefix(action, "metric:"))
 		m.openWorkspaceText(string(metric)+" inspector", UsageMetricInspector(metric, m.workspaceContext(false)))
 		return m, nil
+	case strings.HasPrefix(action, "suggestion:"):
+		i, _ := strconv.Atoi(strings.TrimPrefix(action, "suggestion:"))
+		return m.workspaceSuggestionInspector(i)
 	}
 	switch action {
 	case "open":
@@ -216,30 +227,20 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 		if _, ok := m.workspaceSelected(); !ok {
 			return m, nil
 		}
-		s := BuildUsageSuggestions(m.workspaceContext(true))
-		parts := []string{"Local suggestions · " + m.workspaceContext(true).ScopeLabel, "Evidence from " + m.workspace.appliedRange}
-		for _, a := range s {
-			parts = append(parts, a.Title, a.Evidence, a.Action, a.Limits, "")
-		}
+		c := m.workspaceContext(true)
+		s := BuildUsageSuggestions(c)
 		if len(s) == 0 {
-			parts = append(parts, "No supported suggestion for this selection. No AI service was called.")
+			m.openWorkspaceText("Suggestions", "Local suggestions · "+c.ScopeLabel+"\n\nEvidence from "+m.workspace.appliedRange+"\n\nNo supported suggestion for this selection. No AI service was called.")
+			return m, nil
 		}
-		m.openWorkspaceText("Suggestions", strings.Join(parts, "\n\n"))
+		m.workspace.overlay = "Suggestions"
+		m.workspace.content = ""
+		m.workspace.menu = workspaceSuggestionActions(s)
+		m.workspace.menuCursor = 0
 		m.workspace.suggestions = s
-		m.workspace.suggestionSpan = m.workspace.appliedSpan
+		m.workspace.suggestionContext = c
+		m.workspace.suggestionReturn = false
 		return m, nil
-	case "inspect":
-		if len(m.workspace.suggestions) > 0 {
-			m.workspaceSave()
-			m.crumbs = slices.Clone(m.workspace.suggestions[0].Scope)
-			m.rng = m.workspace.suggestionSpan.R
-			m.step = m.workspace.suggestionSpan.Step
-			m.syncStepKeys()
-			m.workspace.group = "session"
-			m.filter = ""
-			m.workspace.suggestions = nil
-			return m, m.startLoad()
-		}
 	case "activity":
 		m.workspaceSave()
 		m.workspace.returnFromActivity = true
@@ -272,6 +273,43 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 		m.data.Invalidate()
 		return m, m.startLoad()
 	}
+	return m, nil
+}
+
+func workspaceSuggestionActions(suggestions []UsageSuggestion) []workspaceAction {
+	actions := make([]workspaceAction, 0, len(suggestions))
+	for i, suggestion := range suggestions {
+		actions = append(actions, workspaceAction{
+			label:  suggestion.Title + " · " + string(suggestion.Metric),
+			action: "suggestion:" + strconv.Itoa(i),
+		})
+	}
+	return actions
+}
+
+func (m Model) workspaceSuggestionInspector(i int) (Model, tea.Cmd) {
+	if i < 0 || i >= len(m.workspace.suggestions) {
+		return m, nil
+	}
+	suggestion := m.workspace.suggestions[i]
+	context := m.workspace.suggestionContext
+	context.Scope = slices.Clone(suggestion.Scope)
+	content := strings.Join([]string{
+		suggestion.Title,
+		"",
+		suggestion.Evidence,
+		"",
+		suggestion.Action,
+		"",
+		suggestion.Limits,
+		"",
+		UsageMetricInspector(suggestion.Metric, context),
+	}, "\n")
+	suggestions := slices.Clone(m.workspace.suggestions)
+	m.openWorkspaceText(string(suggestion.Metric)+" inspector", content)
+	m.workspace.suggestions = suggestions
+	m.workspace.suggestionCursor = i
+	m.workspace.suggestionReturn = true
 	return m, nil
 }
 
@@ -428,10 +466,6 @@ func (m Model) workspaceMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 	if m.workspace.overlay != "" {
 		if hit("workspace-close") {
 			n, c := m.workspaceBack()
-			return n, c, true
-		}
-		if hit("workspace-inspect") {
-			n, c := m.workspaceAction("inspect")
 			return n, c, true
 		}
 		if hit("workspace-scroll-up") {

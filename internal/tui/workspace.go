@@ -21,7 +21,6 @@ type usageWorkspace struct {
 	returnFromActivity bool
 	appliedGroup       string
 	appliedSpan        Span
-	suggestionSpan     Span
 	codeSeq            uint64
 	group              string
 	restoreSelected    string
@@ -39,6 +38,9 @@ type usageWorkspace struct {
 	menu               []workspaceAction
 	menuCursor         int
 	suggestions        []UsageSuggestion
+	suggestionContext  UsageInsightContext
+	suggestionCursor   int
+	suggestionReturn   bool
 }
 
 type workspacePlace struct {
@@ -498,9 +500,6 @@ func (m Model) renderWorkspaceOverlay() string {
 	v := m.workspace.viewport
 
 	foot := m.zoneMark("workspace-scroll-up", "↑ Up") + "  " + m.zoneMark("workspace-scroll-down", "↓ Down")
-	if len(m.workspace.suggestions) > 0 {
-		foot += "  " + m.zoneMark("workspace-inspect", "Inspect scope →")
-	}
 	body := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(m.th.Border).Width(w - 2).Height(h - 4).Render(v.View())
 	return m.scan(m.appFrame(m.clampFrame(head + "\n" + body + "\n" + foot)))
 }

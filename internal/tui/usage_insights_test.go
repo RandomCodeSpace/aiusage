@@ -106,8 +106,14 @@ func TestBuildUsageSuggestionsScopeAndEvidence(t *testing.T) {
 	if !strings.Contains(got[0].Evidence, "1 of 4 usage events are unpriced") || !strings.Contains(got[0].Evidence, "$0.000007") {
 		t.Errorf("wrong pricing evidence: %s", got[0].Evidence)
 	}
+	if got[0].Metric != UsageMetricCost {
+		t.Errorf("pricing target = %q, want Cost", got[0].Metric)
+	}
 	if !strings.Contains(got[1].Evidence, "20 cache write tokens and 5 cache read tokens") || !strings.Contains(got[1].Limits, "no savings or hit rate") {
 		t.Errorf("wrong cache evidence: %#v", got[1])
+	}
+	if got[1].Metric != UsageMetricCache {
+		t.Errorf("cache target = %q, want Cache", got[1].Metric)
 	}
 	c.Scope[0].Value = "changed"
 	if got[0].Scope[0].Value != "codex" {

@@ -35,6 +35,7 @@ type UsageInsightContext struct {
 type UsageSuggestion struct {
 	Title, Evidence, Action, Limits string
 	Scope                           []Crumb
+	Metric                          UsageMetric
 }
 
 // UsageMetricInspector renders full precision values for a scrollable detail
@@ -102,26 +103,26 @@ func BuildUsageSuggestions(c UsageInsightContext) []UsageSuggestion {
 		return nil
 	}
 	var out []UsageSuggestion
-	add := func(title, evidence, action, limits string) {
+	add := func(metric UsageMetric, title, evidence, action, limits string) {
 		if c.Stale {
 			limits += " Evidence is from a stale snapshot; refresh before drawing conclusions."
 		}
-		out = append(out, UsageSuggestion{Title: title, Evidence: evidence, Action: action, Limits: limits, Scope: append([]Crumb(nil), c.Scope...)})
+		out = append(out, UsageSuggestion{Title: title, Evidence: evidence, Action: action, Limits: limits, Scope: append([]Crumb(nil), c.Scope...), Metric: metric})
 	}
 	t := c.Totals
 	if t.UnpricedEvents > 0 {
-		add("Inspect missing price coverage",
+		add(UsageMetricCost, "Inspect missing price coverage",
 			fmt.Sprintf("%s; %s: %d of %d usage events are unpriced. %s", c.ScopeLabel, c.RangeLabel, t.UnpricedEvents, t.Events, usageMetricValue(UsageMetricCost, t)),
 			"Inspect Cost in this captured scope to locate unpriced contributors and check model/provider pricing configuration.",
 			"Coverage counts usage events, not requests. Completing price coverage can raise the known cost; this is not a savings estimate.")
 	}
 	if t.CacheCreation > 0 {
-		add("Inspect cache writes and reuse",
+		add(UsageMetricCache, "Inspect cache writes and reuse",
 			fmt.Sprintf("%s; %s: %d cache write tokens and %d cache read tokens recorded.", c.ScopeLabel, c.RangeLabel, t.CacheCreation, t.CacheRead),
 			"Inspect Cache in this captured scope and compare timeline and contributors. Check whether stable prefixes can be reused before changing cache behavior.",
 			"Write and read tokens are aggregate counters, not matched cache operations. This is a hypothesis to inspect; no savings or hit rate is established.")
 	} else if t.CacheRead > 0 {
-		add("Inspect cache read coverage",
+		add(UsageMetricCache, "Inspect cache read coverage",
 			fmt.Sprintf("%s; %s: %d cache read tokens and zero recorded cache write tokens.", c.ScopeLabel, c.RangeLabel, t.CacheRead),
 			"Inspect Cache in this captured scope to see which timeline buckets and contributors report reads.",
 			"Writes may precede the selected range or be omitted upstream. Aggregate counters establish neither cache effectiveness nor savings.")
