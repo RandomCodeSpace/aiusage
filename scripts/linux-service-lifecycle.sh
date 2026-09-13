@@ -78,12 +78,12 @@ sudo loginctl enable-linger "$test_user"
 sudo systemctl start "user@$test_uid.service"
 
 for _ in $(seq 1 20); do
-	if [[ -S "$runtime_dir/bus" ]]; then
+	if run_user test -S "$runtime_dir/bus"; then
 		break
 	fi
 	sleep 1
 done
-if [[ ! -S "$runtime_dir/bus" ]]; then
+if ! run_user test -S "$runtime_dir/bus"; then
 	echo "disposable systemd user manager did not create its bus" >&2
 	dpkg-query -W dbus-user-session >&2 || true
 	sudo systemctl status "user@$test_uid.service" "user-runtime-dir@$test_uid.service" --no-pager >&2 || true
@@ -168,7 +168,7 @@ restart_pid="$(wait_for_new_pid "$first_pid")"
 sudo systemctl stop "user@$test_uid.service"
 sudo systemctl start "user@$test_uid.service"
 for _ in $(seq 1 30); do
-	if [[ -S "$runtime_dir/bus" ]] && run_user systemctl --user is-active "$label" 2>/dev/null | grep -Fx active >/dev/null; then
+	if run_user test -S "$runtime_dir/bus" && run_user systemctl --user is-active "$label" 2>/dev/null | grep -Fx active >/dev/null; then
 		break
 	fi
 	sleep 1
