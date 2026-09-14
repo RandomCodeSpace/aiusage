@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
@@ -299,8 +300,7 @@ func (m *Manager) activateLaunchd(ctx context.Context, path string, loaded, runn
 	if _, err := m.launchctl(ctx, "kickstart", m.launchTarget()); err != nil {
 		return attempt, fmt.Errorf("start %s: %w", CollectLabel, err)
 	}
-	_, active, known := m.launchdState(ctx)
-	if !known || !active {
+	if !m.awaitLaunchdRunning(ctx) {
 		return attempt, fmt.Errorf("start %s: launchd did not confirm a running job", CollectLabel)
 	}
 	r.change("started %s", CollectLabel)
@@ -386,8 +386,7 @@ func (m *Manager) restartLaunchd(ctx context.Context) (Result, error) {
 	if _, err := m.launchctl(ctx, "kickstart", m.launchTarget()); err != nil {
 		return r, fmt.Errorf("restart %s: %w", CollectLabel, err)
 	}
-	_, running, known = m.launchdState(ctx)
-	if !known || !running {
+	if !m.awaitLaunchdRunning(ctx) {
 		return r, fmt.Errorf("restart %s: launchd did not confirm a running job", CollectLabel)
 	}
 	r.change("restarted %s", CollectLabel)
@@ -433,11 +432,42 @@ func (m *Manager) startLaunchdCollection(ctx context.Context) error {
 	if _, err := m.launchctl(ctx, "kickstart", m.launchTarget()); err != nil {
 		return fmt.Errorf("start %s: %w", CollectLabel, err)
 	}
-	_, running, known = m.launchdState(ctx)
-	if !known || !running {
+	if !m.awaitLaunchdRunning(ctx) {
 		return fmt.Errorf("start %s: launchd did not confirm a running job", CollectLabel)
 	}
 	return nil
+}
+
+// launchdStartGrace bounds how long a job is given after kickstart to be
+// reported as running. kickstart returns once launchd has accepted the
+// request, and `launchctl print` read in the same instant can still show the
+// job in its previous state — observed on a macOS 15 runner, where a single
+// immediate read failed a release that the same code had passed the day
+// before. Polling closes the gap; the bound keeps a job that never comes up
+// from stalling the caller past its own deadline.
+const launchdStartGrace = 3 * time.Second
+
+// awaitLaunchdRunning polls the job state after a kickstart until launchd
+// reports it running, the grace elapses or ctx ends. It returns true only on
+// a confirmed running job; an unusable answer at the end is false.
+func (m *Manager) awaitLaunchdRunning(ctx context.Context) bool {
+	deadline := time.Now().Add(launchdStartGrace)
+	for {
+		_, running, known := m.launchdState(ctx)
+		if known && running {
+			return true
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return false
+		}
+		t := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return false
+		}
+	}
 }
 
 func (m *Manager) removeLaunchd(ctx context.Context, force bool) (Result, error) {
