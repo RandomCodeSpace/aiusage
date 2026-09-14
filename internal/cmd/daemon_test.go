@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -196,29 +198,53 @@ func TestEnsureDaemonDuringOnceCycle(t *testing.T) {
 
 // TestRestartOnMismatchDecision is the identity-mismatch decision table:
 // release↔release mismatches restart, anything involving a dev identity does
-// not (a `go run` temp binary is a new identity every invocation — restarting
-// would flap the daemon), and an unrecorded version restarts once.
+// only when the collector runs the CLI's own executable file (a `go run` temp
+// binary is a new identity every invocation and never that file — restarting
+// on it would flap the daemon), and an unrecorded version restarts once.
 func TestRestartOnMismatchDecision(t *testing.T) {
 	tests := []struct {
 		name           string
 		recorded, self string
+		sameExe        bool
 		want           bool
 	}{
-		{"release vs release", "v1.0.0", "v1.1.0", true},
-		{"unrecorded vs release", "", "v1.1.0", true},
-		{"unrecorded vs dev stamp", "", "dev-100-200", true},
-		{"dev stamp vs release", "dev-100-200", "v1.1.0", false},
-		{"release vs dev stamp", "v1.0.0", "dev-100-200", false},
-		{"dev stamp vs dev stamp", "dev-100-200", "dev-300-400", false},
-		{"bare dev vs release", "dev", "v1.1.0", false},
+		{"release vs release", "v1.0.0", "v1.1.0", false, true},
+		{"unrecorded vs release", "", "v1.1.0", false, true},
+		{"unrecorded vs dev stamp", "", "dev-100-200", false, true},
+		{"dev stamp vs release", "dev-100-200", "v1.1.0", false, false},
+		{"release vs dev stamp", "v1.0.0", "dev-100-200", false, false},
+		{"dev stamp vs dev stamp", "dev-100-200", "dev-300-400", false, false},
+		{"bare dev vs release", "dev", "v1.1.0", false, false},
+		{"dev stamp vs release, same executable", "dev-100-200", "v1.1.0", true, true},
+		{"release vs dev stamp, same executable", "v1.0.0", "dev-100-200", true, true},
+		{"dev stamp vs dev stamp, same executable", "dev-100-200", "dev-300-400", true, true},
+		{"bare dev vs bare dev, same executable", "dev", "dev", true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := restartOnMismatch(tc.recorded, tc.self); got != tc.want {
-				t.Fatalf("restartOnMismatch(%q, %q) = %v, want %v", tc.recorded, tc.self, got, tc.want)
+			if got := restartOnMismatch(tc.recorded, tc.self, tc.sameExe); got != tc.want {
+				t.Fatalf("restartOnMismatch(%q, %q, %v) = %v, want %v", tc.recorded, tc.self, tc.sameExe, got, tc.want)
 			}
 		})
 	}
+}
+
+// stubCollectorExecutable pins what the collector's /proc exe link resolves to
+// for the test's duration.
+func stubCollectorExecutable(t *testing.T, path string) {
+	t.Helper()
+	prev := collectorExecutable
+	collectorExecutable = func(int) string { return path }
+	t.Cleanup(func() { collectorExecutable = prev })
+}
+
+// stubMonotonicNow pins the present on systemd's monotonic clock for the
+// test's duration.
+func stubMonotonicNow(t *testing.T, now time.Duration, ok bool) {
+	t.Helper()
+	prev := monotonicNow
+	monotonicNow = func() (time.Duration, bool) { return now, ok }
+	t.Cleanup(func() { monotonicNow = prev })
 }
 
 // setVersion pins buildinfo.Version for the test's duration so
@@ -232,14 +258,20 @@ func setVersion(t *testing.T, v string) {
 
 // TestEnsureDaemonIdentityMismatch drives ensureDaemon through the mismatch
 // policy against a live (lock-held) fake daemon: release mismatches stop and
-// respawn; dev-stamp mismatches leave the daemon alone and only write a notice.
+// respawn; dev-stamp mismatches leave the daemon alone and only write a notice,
+// unless the collector runs this CLI's own executable, in which case it is a
+// local rebuild and restarts like a release.
 func TestEnsureDaemonIdentityMismatch(t *testing.T) {
-	stubSupervisor(t)
+	// The supervisor declines, so the replacement is the detached spawn this
+	// test counts; the supervised replacement has its own test.
+	f, _ := stubSupervisor(t)
+	f.fail["show-environment"] = errors.New("no user manager")
 	stubCollectorEvidence(t, "", true)
 	tests := []struct {
 		name      string
 		recorded  string // "" = no daemon.version file (pre-stamping daemon)
 		version   string // pinned buildinfo.Version; "dev" = executable stamp
+		sameExe   bool   // the collector runs this CLI's executable file
 		wantStop  int
 		wantSpawn int
 		wantWarn  bool
@@ -248,11 +280,18 @@ func TestEnsureDaemonIdentityMismatch(t *testing.T) {
 		{name: "unrecorded version restarts once", recorded: "", version: "v1.1.0", wantStop: 1, wantSpawn: 1},
 		{name: "dev daemon vs release CLI only warns", recorded: "dev-100-200", version: "v1.1.0", wantWarn: true},
 		{name: "release daemon vs dev CLI only warns", recorded: "v1.0.0", version: "dev", wantWarn: true},
+		{name: "dev daemon on this executable restarts", recorded: "dev-100-200", version: "dev", sameExe: true, wantStop: 1, wantSpawn: 1},
+		{name: "release daemon on this executable vs dev CLI restarts", recorded: "v1.0.0", version: "dev", sameExe: true, wantStop: 1, wantSpawn: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			setVersion(t, tc.version)
+			exe := "/elsewhere/aiusage"
+			if tc.sameExe {
+				exe = selfPath()
+			}
+			stubCollectorExecutable(t, exe)
 			if tc.version == "dev" && !isDevIdentity(buildinfo.Identity()) {
 				// Identity() may pick up a module version in some build modes;
 				// the dev-CLI case is only meaningful with a dev identity.
@@ -486,10 +525,11 @@ func TestPersistentPreRunSkipsDaemon(t *testing.T) {
 		tty       bool
 		wantSpawn bool
 	}{
-		// Bare `aiusage` never spawns. Its TTY path is a read-only TUI, while its
-		// non-TTY path prints help.
-		{name: "root default (TTY) skips", target: "", tty: true, wantSpawn: false},
+		// Bare `aiusage` on a terminal opens the dashboard and ensures a
+		// collector is behind it; the non-TTY path prints help and spawns nothing.
+		{name: "root default (TTY) spawns", target: "", tty: true, wantSpawn: true},
 		{name: "root default (non-TTY) skips", target: "", tty: false, wantSpawn: false},
+		{name: "root default (TTY) no-daemon flag skips", target: "", tty: true, noDaemon: true, wantSpawn: false},
 		// Explicit data-facing subcommands spawn regardless of TTY.
 		{name: "today spawns", target: "today", wantSpawn: true},
 		{name: "summary spawns", target: "summary", wantSpawn: true},

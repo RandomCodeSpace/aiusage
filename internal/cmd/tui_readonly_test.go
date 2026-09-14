@@ -44,7 +44,7 @@ func TestRootTUILaunchUsesExistingReadOnlyStoreWithoutCollection(t *testing.T) {
 		return nil
 	}
 
-	if out, err := runCmd(t, "--db", db, "--home", home, "--config", cfgPath); err != nil {
+	if out, err := runCmd(t, "--no-daemon", "--db", db, "--home", home, "--config", cfgPath); err != nil {
 		t.Fatalf("root TUI failed: %v\noutput:\n%s", err, out)
 	}
 	if !launched {
@@ -87,7 +87,7 @@ func TestRootTUIRefusesToInitializeDatabase(t *testing.T) {
 				return nil
 			}
 
-			out, err := runCmd(t, "--db", db, "--home", t.TempDir(), "--config", offlineConfig(t))
+			out, err := runCmd(t, "--no-daemon", "--db", db, "--home", t.TempDir(), "--config", offlineConfig(t))
 			if err == nil {
 				t.Fatalf("root TUI initialized a %s database", tc.name)
 			}

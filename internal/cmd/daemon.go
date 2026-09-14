@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/buildinfo"
 	"github.com/RandomCodeSpace/aiusage/internal/config"
@@ -205,17 +206,20 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 	// single invocation. A capability suffix an older binary stamped is NOT
 	// normalised away - that daemon is a different build.
 	if buildinfo.SameIdentity(recorded, self) {
-		return nil
+		if legacy {
+			return nil
+		}
+		return adoptCollector(ctx, cfg, pid, warn)
 	}
-	if !restartOnMismatch(recorded, self) {
+	if !restartOnMismatch(recorded, self, collectorExecutable(pid) == selfPath()) {
 		// The old daemon holds the flock, so a bare `aiusage run` cannot
 		// replace it — the kill step is part of the advice. pid 0 means the
 		// pidfile was unreadable; `kill 0` signals the caller's own process
 		// group, so never advise it.
 		if pid > 0 {
-			fmt.Fprintf(warn, "notice: daemon build %s differs from CLI build %s; dev builds are not auto-restarted (kill %d, then run `aiusage run` to replace it)\n", recorded, self, pid)
+			fmt.Fprintf(warn, "notice: daemon build %s differs from CLI build %s; a dev build is not auto-restarted unless the collector runs this same executable (kill %d, then run `aiusage run` to replace it)\n", recorded, self, pid)
 		} else {
-			fmt.Fprintf(warn, "notice: daemon build %s differs from CLI build %s; dev builds are not auto-restarted (stop the process holding %s.lock, then run `aiusage run` to replace it)\n", recorded, self, cfg.PIDPath)
+			fmt.Fprintf(warn, "notice: daemon build %s differs from CLI build %s; a dev build is not auto-restarted unless the collector runs this same executable (stop the process holding %s.lock, then run `aiusage run` to replace it)\n", recorded, self, cfg.PIDPath)
 		}
 		return nil
 	}
@@ -252,27 +256,118 @@ func ensureDaemon(ctx context.Context, cfg config.Config, warn io.Writer) error 
 	if err := stopDaemon(cfg, pid); err != nil {
 		return fmt.Errorf("stop detached collector pid %d: %w", pid, err)
 	}
+	// The replacement goes to the supervisor first, exactly as a cold start
+	// does: a detached collector is the fallback, not the steady state, and a
+	// restart is the moment to stop being in it.
+	if superviseStart(ctx, requested, flags, warn) {
+		return nil
+	}
 	return spawnDaemon(requested)
+}
+
+// adoptCollector hands a detached collector back to the native supervisor when
+// the collection unit is sitting in failed state beside it.
+//
+// The state this repairs is one the fallback itself produces: the CLI spawned
+// a detached collector while the user manager was unreachable (over ssh, say),
+// and the unit, started later by a login or a restart, lost the ledger lock to
+// it enough times to trip its start rate limit. From then on doctor shows a
+// failed unit beside a working detached daemon, and nothing moves — the
+// identities match, so version sync never fires, and the lock is held, so the
+// cold-start path never runs. Collection continues, unsupervised, until a
+// version bump.
+//
+// The guard is AGE: the failure must be older than adoptionBackoff. A unit can
+// also be failed for its own reasons — a stale ReadWritePaths after the
+// database moved, a binary that is not where ExecStart says — and adopting
+// that one stops a working collector, watches the unit fail again and spawns
+// a fresh collector. Without the guard the next command would find the same
+// shape and do it all again; with it, the failure that attempt produced is
+// fresh, and the shape is left alone until the window has passed. So a broken
+// unit costs one bounce and one notice per window, which is also how it gets
+// noticed, and a failure that is merely recent waits the same window. The two
+// timestamps are the same clock, CLOCK_MONOTONIC: systemd's for when the unit
+// entered failed state, and monotonicNow for the present, so a suspend moves
+// neither against the other. The order of events was considered and is not
+// usable — the holder that CAUSED the failure is routinely gone by the time
+// anyone looks, replaced by a later fallback that postdates it.
+//
+// Every decline is silent and costs one systemctl show. The path-override and
+// environment rules that suppress the automatic install suppress this too, for
+// the same reason: a unit the CLI must not install is a unit it must not hand
+// a collector to.
+func adoptCollector(ctx context.Context, cfg config.Config, pid int, warn io.Writer) error {
+	if !autoInstall(flags) {
+		return nil
+	}
+	m := newSupervisor()
+	failedAt, failed, known := m.CollectorFailure(ctx)
+	if !known || !failed {
+		return nil
+	}
+	now, ok := monotonicNow()
+	if !ok || now-failedAt < adoptionBackoff {
+		return nil
+	}
+	native, err := collectorOwner(ctx, m, pid)
+	if err != nil || native {
+		return err
+	}
+	if err := stopDaemon(cfg, pid); err != nil {
+		return fmt.Errorf("stop detached collector pid %d: %w", pid, err)
+	}
+	if superviseStart(ctx, cfg, flags, warn) {
+		return nil
+	}
+	return spawnDaemon(cfg)
+}
+
+// adoptionBackoff is how old a unit's failure must be before adoptCollector
+// acts on it, and therefore the most often a unit that cannot run costs a
+// working detached collector a restart.
+const adoptionBackoff = 10 * time.Minute
+
+// collectorExecutable resolves the executable file a collector process is
+// running, for the dev-build half of the restart policy. A replaced binary
+// keeps its path with a " (deleted)" suffix, which is stripped: the point is
+// whether it is the file this CLI was started from, not whether that file
+// still has the same bytes. Empty on any failure and on platforms without
+// procfs, which restartOnMismatch reads as "not the same executable".
+var collectorExecutable = func(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	exe, err := os.Readlink(filepath.Join(collectorProcRoot, strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(exe, " (deleted)")
 }
 
 // restartOnMismatch decides whether an identity mismatch between the recorded
 // daemon build and this CLI warrants an automatic stop+respawn.
 //
 // Release identities restart: an upgraded install must not leave an old
-// collector running. Dev identities ("dev", or the dev-<size>-<mtime>
-// executable stamp) never auto-restart: `go run` produces a fresh temp binary
-// every time, so acting on those mismatches flaps the daemon on each
-// invocation — a synchronous stop of up to 3s inside PersistentPreRunE plus an
-// immediate full collection cycle per respawn. A dev CLI meeting a release
-// daemon is left alone for the same reason (and a go-run temp executable is a
-// poor thing to respawn from: the path vanishes when the parent exits). An
-// unrecorded version ("") predates version stamping and restarts once so the
-// replacement daemon records one.
-func restartOnMismatch(recorded, self string) bool {
+// collector running. A mismatch involving a dev identity ("dev", or the
+// dev-<size>-<mtime> executable stamp) restarts only when the collector runs
+// the SAME executable file this CLI does — a local build copied over the
+// installed binary, which is the dev workflow that wants sync. It is refused
+// otherwise, because `go run` produces a fresh temp binary every time: acting
+// on those mismatches would flap the daemon on each invocation — a synchronous
+// stop of up to 3s inside PersistentPreRunE plus an immediate full collection
+// cycle per respawn — and a go-run temp executable is a poor thing to respawn
+// from besides, since the path vanishes when the parent exits. A temp binary
+// is never the collector's file, so the executable test excludes it by
+// construction. An unrecorded version ("") predates version stamping and
+// restarts once so the replacement daemon records one.
+func restartOnMismatch(recorded, self string, sameExecutable bool) bool {
 	if recorded == "" {
 		return true
 	}
-	return !isDevIdentity(recorded) && !isDevIdentity(self)
+	if !isDevIdentity(recorded) && !isDevIdentity(self) {
+		return true
+	}
+	return sameExecutable
 }
 
 // isDevIdentity reports whether id is an unstamped build identity: the literal

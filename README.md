@@ -161,11 +161,11 @@ The footer always shows the controls available in the current view.
 
 ## Keep collection running
 
-The dashboard reads the existing database and does not start collection.
-A running collector continues independently, with a default interval of five
-minutes. Use `aiusage setup` to keep it running through your service manager.
-Report commands such as `aiusage summary` also ensure a collector is running
-unless `--no-daemon` is set.
+Opening the dashboard or a report such as `aiusage summary` ensures a
+collector is running, unless `--no-daemon` is set. The collector is detached,
+so quitting the dashboard leaves it running at its default five-minute
+interval. The dashboard itself reads the database read-only. Use
+`aiusage setup` to keep the collector running through your service manager.
 
 On Linux with systemd, `aiusage setup` installs a user service without
 `sudo`. On macOS, it installs a LaunchAgent that starts when you sign in and
@@ -180,7 +180,8 @@ For manual control:
 ~~~console
 aiusage run             # foreground collector
 aiusage once            # collect once
-aiusage                # read the dashboard; collection stays independent
+aiusage                 # dashboard; starts a collector if none is running
+aiusage --no-daemon     # dashboard only; starts nothing
 aiusage --no-daemon summary  # report without starting a collector
 ~~~
 

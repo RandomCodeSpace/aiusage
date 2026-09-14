@@ -680,14 +680,44 @@ either one the user stopped deliberately or one sitting beside a daemon that was
 started some other way, and a second collector against a single-holder lock is
 worse than a stale one. `Manager.Restart` reports whether the collection unit
 was in fact what it restarted, so a caller that gets false knows supervision did
-not handle the mismatch and it still owns the stop-and-respawn.
+not handle the mismatch and it still owns the stop-and-respawn — and that
+respawn goes through `superviseStart` before falling back to a detached
+process, since a restart is the moment to stop being in the fallback.
 
-**Enable and start are two calls, and the second can fail.** An enable that this
-install performed is rolled back when the start then fails: a unit left enabled
-but not started comes up at the next login against the collection lock the
-fallback daemon is by then holding. `is-enabled` is matched exactly, so
-`enabled-runtime` (enabled until the next reboot, and no longer) is not enabled
-and gets a persistent enable.
+**A dev-build mismatch syncs only across the SAME executable file.** Release
+identities always restart. A mismatch involving a dev identity restarts only
+when `/proc/<pid>/exe` of the collector is the file this CLI is running
+(`cmd.collectorExecutable`, " (deleted)" stripped): that is a local build
+copied over the installed binary, which wants sync. A `go run` temp binary is
+never the collector's file, so the flap the old blanket refusal guarded
+against — a fresh identity per invocation, each one a 3s stop plus a full
+collection cycle — is excluded by construction rather than by policy.
+
+**A failed unit beside a detached collector is ADOPTED, after a backoff.** The
+fallback produces this state itself: the CLI spawns a detached collector while
+the user manager is unreachable (ssh), the unit later starts at login or on a
+restart, loses the ledger lock to it a few times and trips its start rate
+limit into `failed`. Identities match, so version sync never fires; the lock
+is held, so the cold-start path never runs; doctor shows a failed unit beside
+a working daemon forever. `cmd.adoptCollector` repairs it once the failure
+(`InactiveEnterTimestampMonotonic`) is older than `adoptionBackoff` (10 min),
+measured on the same CLOCK_MONOTONIC via `monotonicNow`: stop the holder,
+`superviseStart`, detached spawn as the fallback. The backoff is the loop
+bound: a unit that cannot run for its own reasons (stale ReadWritePaths after
+the database moved, a binary that is not where ExecStart says) fails again the
+moment it is adopted, and that failure is fresh, so the next command leaves
+the respawned holder alone until the window has passed — one bounce and one
+notice per window, which is also how a broken unit gets noticed. Order of
+events was tried first and does not work: the holder that CAUSED the failure
+is routinely gone by the time anyone looks (measured on this machine: unit
+failed at 617,173s since boot, holder started at 629,989s). `Manager.activate`
+and `StartCollection` run `reset-failed` before `start` when the unit reports
+`failed`, since a plain start from that state is refused as repeated too
+quickly — and a start that FOLLOWED a reset is confirmed after
+`Manager.Settle` (`DefaultSettle` 500ms) with `ActiveState=active` and
+`NRestarts=0`, because the reset turns a refusal into an accepted start that
+can die 9ms later, and without the check Install would report collection with
+nothing behind it and the caller would never fall back.
 
 The unit carries `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
 `ProtectKernelTunables`, `ProtectControlGroups`, `RestrictSUIDSGID` and explicit

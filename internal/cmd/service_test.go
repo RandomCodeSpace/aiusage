@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,7 +51,11 @@ type fakeUnits struct {
 	calls   []string
 	enabled map[string]bool
 	active  map[string]bool
-	fail    map[string]error
+	// failed holds units is-active answers "failed" for; failedAt is the
+	// microseconds-since-boot systemd reports for entering that state.
+	failed   map[string]bool
+	failedAt int64
+	fail     map[string]error
 	// delay makes every call take this long, or until the context expires,
 	// whichever comes first: a service manager that answers, just slowly.
 	delay time.Duration
@@ -120,7 +125,7 @@ func (f *fakeLaunchd) run(_ context.Context, name string, args ...string) ([]byt
 }
 
 func newFakeUnits() *fakeUnits {
-	return &fakeUnits{enabled: map[string]bool{}, active: map[string]bool{}, fail: map[string]error{}}
+	return &fakeUnits{enabled: map[string]bool{}, active: map[string]bool{}, failed: map[string]bool{}, fail: map[string]error{}}
 }
 
 func (f *fakeUnits) run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -155,7 +160,44 @@ func (f *fakeUnits) run(ctx context.Context, name string, args ...string) ([]byt
 
 	switch verb {
 	case "show":
-		return []byte(strconv.Itoa(f.pid)), nil
+		// Key=Value lines in REVERSE of the requested order (systemd answers
+		// in its own order, not the caller's); bare values under --value.
+		var props []string
+		bare := false
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "--property="); ok {
+				props = strings.Split(v, ",")
+			}
+			if a == "--value" {
+				bare = true
+			}
+		}
+		var b strings.Builder
+		for i := len(props) - 1; i >= 0; i-- {
+			p := props[i]
+			if !bare {
+				b.WriteString(p + "=")
+			}
+			switch p {
+			case "MainPID":
+				b.WriteString(strconv.Itoa(f.pid))
+			case "ActiveState":
+				switch {
+				case f.active[unit]:
+					b.WriteString("active")
+				case f.failed[unit]:
+					b.WriteString("failed")
+				default:
+					b.WriteString("inactive")
+				}
+			case "InactiveEnterTimestampMonotonic":
+				b.WriteString(strconv.FormatInt(f.failedAt, 10))
+			case "NRestarts":
+				b.WriteString("0")
+			}
+			b.WriteString("\n")
+		}
+		return []byte(b.String()), nil
 	case "show-environment", "daemon-reload", "enable-linger":
 		return nil, nil
 	case "show-user":
@@ -169,7 +211,13 @@ func (f *fakeUnits) run(ctx context.Context, name string, args ...string) ([]byt
 		if f.active[unit] {
 			return []byte("active\n"), nil
 		}
+		if f.failed[unit] {
+			return []byte("failed\n"), errors.New("exit status 3")
+		}
 		return []byte("inactive\n"), errors.New("exit status 1")
+	case "reset-failed":
+		delete(f.failed, unit)
+		return nil, nil
 	case "enable":
 		f.enabled[unit] = true
 		return nil, nil
@@ -178,6 +226,7 @@ func (f *fakeUnits) run(ctx context.Context, name string, args ...string) ([]byt
 		return nil, nil
 	case "start", "restart":
 		f.active[unit] = true
+		delete(f.failed, unit)
 		return nil, nil
 	case "stop":
 		delete(f.active, unit)
@@ -205,7 +254,7 @@ func stubSupervisor(t *testing.T) (*fakeUnits, string) {
 	dir := filepath.Join(t.TempDir(), "systemd", "user")
 	prev := newSupervisor
 	newSupervisor = func() *service.Manager {
-		return &service.Manager{UnitDir: dir, Run: f.run}
+		return &service.Manager{UnitDir: dir, Run: f.run, Settle: time.Millisecond}
 	}
 	t.Cleanup(func() { newSupervisor = prev })
 	return f, dir
@@ -217,7 +266,7 @@ func stubLaunchdSupervisor(t *testing.T) (*fakeLaunchd, string) {
 	dir := filepath.Join(t.TempDir(), "Library", "LaunchAgents")
 	prev := newSupervisor
 	newSupervisor = func() *service.Manager {
-		return &service.Manager{GOOS: "darwin", UnitDir: dir, Run: f.run}
+		return &service.Manager{GOOS: "darwin", UnitDir: dir, Run: f.run, Settle: time.Millisecond}
 	}
 	t.Cleanup(func() { newSupervisor = prev })
 	return f, dir
@@ -1416,5 +1465,163 @@ func TestSetupRemoveRefusalIsNotSuccess(t *testing.T) {
 func TestSetupIsNotADaemonSpawner(t *testing.T) {
 	if !daemonSkip["setup"] {
 		t.Error(`"setup" is not in daemonSkip`)
+	}
+}
+
+// TestEnsureDaemonAdoptsDetachedCollectorIntoFailedUnit: identities match, the
+// unit is in failed state, and has been for longer than the backoff. The
+// detached holder is stopped, the unit is reset and started, and nothing is
+// respawned detached.
+func TestEnsureDaemonAdoptsDetachedCollectorIntoFailedUnit(t *testing.T) {
+	setVersion(t, "v9.9.9")
+	f, dir := stubSupervisor(t)
+	setFlags(t, globalFlags{})
+	clearPathEnv(t)
+	stubCollectorEvidence(t, "", true)
+
+	dirState := t.TempDir()
+	pidPath := seedLock(t, dirState)
+	if err := os.WriteFile(pidPath, []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	release := holdLock(t, pidPath)
+	defer release()
+	cfg := config.Config{PIDPath: pidPath, DBPath: filepath.Join(t.TempDir(), "usage.db")}
+	daemon.WriteVersion(cfg, "v9.9.9")
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir units: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, service.CollectUnit), []byte("[Service]\n"), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", service.CollectUnit, err)
+	}
+	f.enabled[service.CollectUnit] = true
+	f.failed[service.CollectUnit] = true
+	f.failedAt = int64(90 * time.Second / time.Microsecond)
+	f.pid = 0 // a failed unit owns no process, so 12345 is the detached holder
+	stubMonotonicNow(t, 90*time.Second+adoptionBackoff+time.Second, true)
+
+	calls, restore := stubSpawn(t)
+	defer restore()
+	stopped := 0
+	prevStop := stopDaemon
+	stopDaemon = func(config.Config, int) error { stopped++; return nil }
+	defer func() { stopDaemon = prevStop }()
+
+	var warn bytes.Buffer
+	if err := ensureDaemon(t.Context(), cfg, &warn); err != nil {
+		t.Fatalf("ensureDaemon: %v", err)
+	}
+	if stopped != 1 {
+		t.Errorf("stopDaemon calls = %d, want 1", stopped)
+	}
+	if !f.ran("reset-failed "+service.CollectUnit) || !f.ran("start "+service.CollectUnit) || !f.active[service.CollectUnit] {
+		t.Errorf("failed unit was not reset and started: %v", f.calls)
+	}
+	if *calls != 0 {
+		t.Errorf("spawned detached %d times after handing the collector to the unit", *calls)
+	}
+	if !strings.Contains(warn.String(), "reset "+service.CollectUnit) {
+		t.Errorf("the reset was not reported: %q", warn.String())
+	}
+}
+
+// TestEnsureDaemonLeavesARecentlyFailedUnitAlone: same shape, but the unit
+// failed inside the backoff window. A unit that cannot run at all fails again
+// the moment it is adopted, and acting on a fresh failure would repeat that
+// stop-fail-respawn once per command; so a fresh failure waits out the window,
+// whichever kind it is. The same holds when the unit is not failed at all,
+// when the clock is unknown, and when a path override suppresses the
+// automatic install.
+func TestEnsureDaemonLeavesARecentlyFailedUnitAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failed  bool
+		clockOK bool
+		now     time.Duration
+		flags   globalFlags
+	}{
+		{name: "failure inside the window", failed: true, clockOK: true, now: 90*time.Second + adoptionBackoff - time.Second},
+		{name: "unit not failed", failed: false, clockOK: true, now: 90*time.Second + adoptionBackoff + time.Hour},
+		{name: "clock unknown", failed: true, clockOK: false},
+		{name: "path override", failed: true, clockOK: true, now: 90*time.Second + adoptionBackoff + time.Hour, flags: globalFlags{db: "/tmp/x.db"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setVersion(t, "v9.9.9")
+			f, dir := stubSupervisor(t)
+			setFlags(t, tc.flags)
+			clearPathEnv(t)
+			stubCollectorEvidence(t, "", true)
+
+			pidPath := seedLock(t, t.TempDir())
+			if err := os.WriteFile(pidPath, []byte("12345"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			release := holdLock(t, pidPath)
+			defer release()
+			cfg := config.Config{PIDPath: pidPath, DBPath: filepath.Join(t.TempDir(), "usage.db")}
+			daemon.WriteVersion(cfg, "v9.9.9")
+
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, service.CollectUnit), []byte("[Service]\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f.enabled[service.CollectUnit] = true
+			f.failed[service.CollectUnit] = tc.failed
+			f.failedAt = int64(90 * time.Second / time.Microsecond)
+			stubMonotonicNow(t, tc.now, tc.clockOK)
+
+			calls, restore := stubSpawn(t)
+			defer restore()
+			stopped := 0
+			prevStop := stopDaemon
+			stopDaemon = func(config.Config, int) error { stopped++; return nil }
+			defer func() { stopDaemon = prevStop }()
+
+			var warn bytes.Buffer
+			if err := ensureDaemon(t.Context(), cfg, &warn); err != nil {
+				t.Fatalf("ensureDaemon: %v", err)
+			}
+			if stopped != 0 || *calls != 0 || f.ran("start") || f.ran("reset-failed") || warn.Len() != 0 {
+				t.Fatalf("holder was touched: stops=%d spawns=%d calls=%v warn=%q", stopped, *calls, f.calls, warn.String())
+			}
+		})
+	}
+}
+
+// TestEnsureDaemonSupervisesTheReplacementAfterAMismatch: a release mismatch
+// against a DETACHED holder stops it and then hands the replacement to the
+// supervisor, the way a cold start does, instead of respawning detached.
+func TestEnsureDaemonSupervisesTheReplacementAfterAMismatch(t *testing.T) {
+	setVersion(t, "v9.9.9")
+	f, dir := stubSupervisor(t)
+	setFlags(t, globalFlags{})
+	clearPathEnv(t)
+	stubCollectorEvidence(t, "", true)
+
+	pidPath := seedLock(t, t.TempDir())
+	if err := os.WriteFile(pidPath, []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	release := holdLock(t, pidPath)
+	defer release()
+	cfg := config.Config{PIDPath: pidPath, DBPath: filepath.Join(t.TempDir(), "usage.db")}
+	daemon.WriteVersion(cfg, "v1.0.0")
+
+	calls, restore := stubSpawn(t)
+	defer restore()
+	stopped := 0
+	prevStop := stopDaemon
+	stopDaemon = func(config.Config, int) error { stopped++; return nil }
+	defer func() { stopDaemon = prevStop }()
+
+	if err := ensureDaemon(t.Context(), cfg, io.Discard); err != nil {
+		t.Fatalf("ensureDaemon: %v", err)
+	}
+	if stopped != 1 || *calls != 0 || !f.active[service.CollectUnit] || !unitExists(dir, service.CollectUnit) {
+		t.Fatalf("stops=%d spawns=%d active=%v unit=%v calls=%v",
+			stopped, *calls, f.active[service.CollectUnit], unitExists(dir, service.CollectUnit), f.calls)
 	}
 }

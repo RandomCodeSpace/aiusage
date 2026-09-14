@@ -63,8 +63,10 @@ var flags globalFlags
 // effect. Database maintenance also skips auto-start so verification does not
 // mutate process state and backup does not unexpectedly start collection.
 // Everything else (today/last/summary/sources/export) is data-facing and
-// triggers ensureDaemon. The root TUI is read-only and skips daemon supervision
-// directly in PersistentPreRunE.
+// triggers ensureDaemon, and so does the bare root command when stdout is a
+// terminal: the dashboard reads its database read-only, but the collector it
+// reads behind must exist. The non-TTY root path prints help and stays
+// side-effect free, checked directly in PersistentPreRunE.
 //
 // setup is skipped for the plain reason that it is the command that does the
 // installing.
@@ -109,11 +111,13 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		// PersistentPreRunE runs before every command's RunE. It auto-starts the
 		// per-user daemon for data-facing subcommands (skipping run/once/doctor/etc.)
-		// unless --no-daemon is set. The root TUI only reads existing data and
-		// never enters daemon supervision. A spawn failure here is non-fatal:
-		// report it and continue so a reporting command still works.
+		// and for the root TUI on a terminal, unless --no-daemon is set. The
+		// daemon is detached (its own session under a spawn, a unit under a
+		// service manager), so quitting the TUI leaves it collecting. The
+		// non-TTY root path prints help and starts nothing. A spawn failure
+		// here is non-fatal: report it and continue so the command still works.
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
-			if flags.noDaemon || skipsDaemon(c) || !c.HasParent() {
+			if flags.noDaemon || skipsDaemon(c) || (!c.HasParent() && !isTTY()) {
 				return nil
 			}
 			cfg, err := loadConfig()
