@@ -33,7 +33,10 @@ func TestPricingRevisionTracksAvailableRates(t *testing.T) {
 		t.Fatal("same embedded rates need a stable nonempty revision")
 	}
 	refresh := func() error {
-		old := time.Now().Add(-48 * time.Hour)
+		// Aged against the pinned clock, not the wall clock: freshness is
+		// judged by nowFn, and a wall-clock age crosses it once the real date
+		// passes the pinned one.
+		old := now.Add(-48 * time.Hour)
 		path := filepath.Join(dir, cacheFile)
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Chtimes(path, old, old); err != nil {
