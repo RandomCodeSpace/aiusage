@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/aiusage/internal/daemon"
 )
@@ -18,6 +19,10 @@ type fakeLaunchd struct {
 	running         bool
 	disabled        bool
 	failOnce        map[string]int
+	// kickstartLag is how many print reads after a kickstart still report
+	// the previous state, which is what a real launchd was observed doing.
+	kickstartLag int
+	lagging      int
 }
 
 func newFakeLaunchd() *fakeLaunchd {
@@ -56,8 +61,11 @@ func (f *fakeLaunchd) run(_ context.Context, name string, args ...string) ([]byt
 			return []byte("Could not find service"), errors.New("exit status 113")
 		}
 		state := "waiting"
-		if f.running {
+		if f.running && f.lagging == 0 {
 			state = "running"
+		}
+		if f.lagging > 0 {
+			f.lagging--
 		}
 		return []byte("state = " + state + "\n"), nil
 	case "print-disabled":
@@ -79,6 +87,7 @@ func (f *fakeLaunchd) run(_ context.Context, name string, args ...string) ([]byt
 	case "kickstart":
 		f.loaded = true
 		f.running = true
+		f.lagging = f.kickstartLag
 		return nil, nil
 	case "bootout":
 		f.loaded = false
@@ -609,4 +618,43 @@ func TestLaunchdHelpersReportBoundaries(t *testing.T) {
 			t.Fatal("atomic restore unexpectedly created its missing parent")
 		}
 	})
+}
+
+// TestLaunchdStartWaitsForTheJobToReportRunning: launchctl print read in the
+// same instant as the kickstart returned can still show the previous state.
+// Every kickstart site polls through that, and gives up on a job that never
+// reports running once the caller's context ends.
+func TestLaunchdStartWaitsForTheJobToReportRunning(t *testing.T) {
+	m, f := testLaunchdManager(t)
+	f.kickstartLag = 3
+	r, err := m.Install(t.Context(), testLaunchdOptions(t))
+	if err != nil || !r.Collecting {
+		t.Fatalf("Install = %+v, %v; want a confirmed start through a lagging print", r, err)
+	}
+
+	m, f = testLaunchdManager(t)
+	writeTestLaunchAgent(t, m)
+	f.loaded, f.running = true, true
+	f.kickstartLag = 3
+	if r, err := m.Restart(t.Context()); err != nil || !r.Collecting {
+		t.Fatalf("Restart = %+v, %v; want a confirmed restart through a lagging print", r, err)
+	}
+
+	m, f = testLaunchdManager(t)
+	writeTestLaunchAgent(t, m)
+	f.loaded = true
+	f.kickstartLag = 3
+	if err := m.StartCollection(t.Context()); err != nil {
+		t.Fatalf("StartCollection: %v; want a confirmed start through a lagging print", err)
+	}
+
+	m, f = testLaunchdManager(t)
+	writeTestLaunchAgent(t, m)
+	f.loaded = true
+	f.kickstartLag = 1 << 30
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	if err := m.StartCollection(ctx); err == nil || !strings.Contains(err.Error(), "did not confirm a running job") {
+		t.Fatalf("StartCollection on a job that never runs = %v", err)
+	}
 }
