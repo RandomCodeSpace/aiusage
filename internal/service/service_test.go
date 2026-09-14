@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,15 @@ type fakeSystemd struct {
 	// for with "enabled-runtime": enabled until the next reboot and no longer.
 	runtime map[string]bool
 	active  map[string]bool
-	linger  bool
+	// failed holds the units is-active answers "failed" for, which reset-failed
+	// or a start clears. failedAt is what show reports for
+	// InactiveEnterTimestampMonotonic. dying makes every started unit die
+	// again at once: start leaves it inactive with one restart on record.
+	failed   map[string]bool
+	failedAt int64
+	dying    bool
+	restarts int
+	linger   bool
 	// fail maps a verb (start, enable, show-environment, enable-linger, ...) to
 	// the error it answers with. A key of "verb unit" refuses that verb for one
 	// unit only, which is how a single stubborn unit is told apart from a
@@ -40,6 +49,7 @@ func newFake() *fakeSystemd {
 		enabled: map[string]bool{},
 		runtime: map[string]bool{},
 		active:  map[string]bool{},
+		failed:  map[string]bool{},
 		fail:    map[string]error{},
 	}
 }
@@ -68,6 +78,8 @@ func (f *fakeSystemd) run(_ context.Context, name string, args ...string) ([]byt
 	}
 
 	switch verb {
+	case "show":
+		return f.show(unit, args), nil
 	case "show-environment", "daemon-reload":
 		return nil, nil
 	case "is-enabled":
@@ -82,7 +94,13 @@ func (f *fakeSystemd) run(_ context.Context, name string, args ...string) ([]byt
 		if f.active[unit] {
 			return []byte("active\n"), nil
 		}
+		if f.failed[unit] {
+			return []byte("failed\n"), errExitOne
+		}
 		return []byte("inactive\n"), errExitOne
+	case "reset-failed":
+		delete(f.failed, unit)
+		return nil, nil
 	case "enable":
 		f.enabled[unit] = true
 		delete(f.runtime, unit)
@@ -92,6 +110,12 @@ func (f *fakeSystemd) run(_ context.Context, name string, args ...string) ([]byt
 		delete(f.runtime, unit)
 		return nil, nil
 	case "start", "restart":
+		delete(f.failed, unit)
+		if f.dying {
+			delete(f.active, unit)
+			f.restarts++
+			return nil, nil
+		}
 		f.active[unit] = true
 		return nil, nil
 	case "stop":
@@ -103,6 +127,41 @@ func (f *fakeSystemd) run(_ context.Context, name string, args ...string) ([]byt
 
 // refusal returns the scripted error for one call: the unit-specific key first,
 // then the verb-wide one.
+// show answers `systemctl show <unit> --property=A,B` as Key=Value lines. The
+// properties come back in REVERSE of the requested order, because the real
+// systemd answers in its own order rather than the caller's, and a parser
+// that assumed positions read a unit's restart count as its state.
+func (f *fakeSystemd) show(unit string, args []string) []byte {
+	var props []string
+	for _, a := range args {
+		if v, ok := strings.CutPrefix(a, "--property="); ok {
+			props = strings.Split(v, ",")
+		}
+	}
+	var b strings.Builder
+	for i := len(props) - 1; i >= 0; i-- {
+		p := props[i]
+		b.WriteString(p + "=")
+		switch p {
+		case "ActiveState":
+			switch {
+			case f.active[unit]:
+				b.WriteString("active")
+			case f.failed[unit]:
+				b.WriteString("failed")
+			default:
+				b.WriteString("inactive")
+			}
+		case "InactiveEnterTimestampMonotonic":
+			b.WriteString(strconv.FormatInt(f.failedAt, 10))
+		case "NRestarts":
+			b.WriteString(strconv.Itoa(f.restarts))
+		}
+		b.WriteString("\n")
+	}
+	return []byte(b.String())
+}
+
 func (f *fakeSystemd) refusal(verb, unit string) error {
 	if err := f.fail[verb+" "+unit]; err != nil {
 		return err
@@ -148,6 +207,7 @@ func testManager(t *testing.T) (*Manager, *fakeSystemd) {
 	return &Manager{
 		UnitDir: filepath.Join(t.TempDir(), "systemd", "user"),
 		Run:     f.run,
+		Settle:  time.Millisecond,
 	}, f
 }
 
@@ -1061,5 +1121,89 @@ func assertUnitFile(t *testing.T, m *Manager, name string, want bool) {
 	_, err := os.Stat(filepath.Join(m.unitDir(), name))
 	if got := err == nil; got != want {
 		t.Errorf("unit %s present = %v, want %v", name, got, want)
+	}
+}
+
+// TestActivateResetsAFailedUnitBeforeStarting: a unit parked in failed state
+// (start rate limit tripped after losing the ledger lock a few times) gets
+// reset-failed before start, and the reset is recorded as a change.
+func TestActivateResetsAFailedUnitBeforeStarting(t *testing.T) {
+	m, fake := testManager(t)
+	fake.failed[CollectUnit] = true
+
+	r, err := m.Install(context.Background(), Options{Exec: "/usr/bin/aiusage"})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !fake.ran("reset-failed "+CollectUnit) || !fake.active[CollectUnit] {
+		t.Fatalf("failed unit was not reset and started: %v", fake.calls)
+	}
+	if !r.Changed || !r.Collecting {
+		t.Fatalf("Result = %+v, want Changed and Collecting", r)
+	}
+
+	// A unit that is merely inactive is started without a reset.
+	m2, fake2 := testManager(t)
+	if _, err := m2.Install(context.Background(), Options{Exec: "/usr/bin/aiusage"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if fake2.ran("reset-failed") {
+		t.Fatalf("inactive unit was reset: %v", fake2.calls)
+	}
+}
+
+// TestCollectorFailureReadsSystemdState pins the two-line show answer the
+// query is built on and the three outcomes: failed with a timestamp, not
+// failed, and no usable answer.
+func TestCollectorFailureReadsSystemdState(t *testing.T) {
+	answer := func(out string, err error) *Manager {
+		return &Manager{Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(out), err
+		}}
+	}
+	// systemd's order, which is not the requested one.
+	at, failed, known := answer("InactiveEnterTimestampMonotonic=1500000\nActiveState=failed\n", nil).CollectorFailure(context.Background())
+	if !known || !failed || at != 1500*time.Millisecond {
+		t.Fatalf("failed unit: at=%v failed=%v known=%v", at, failed, known)
+	}
+	if _, failed, known := answer("InactiveEnterTimestampMonotonic=0\nActiveState=active\n", nil).CollectorFailure(context.Background()); !known || failed {
+		t.Fatalf("active unit: failed=%v known=%v", failed, known)
+	}
+	if _, _, known := answer("", errExitOne).CollectorFailure(context.Background()); known {
+		t.Fatal("a refused show was reported as known")
+	}
+	if _, _, known := answer("ActiveState=failed\n", nil).CollectorFailure(context.Background()); known {
+		t.Fatal("an answer missing a property was reported as known")
+	}
+}
+
+// TestAStartFromFailedStateMustHold: the reset makes a start ACCEPTED where
+// the rate limit refused it, so a unit that then dies again has to be
+// reported as a failure — otherwise Install claims collection that is not
+// happening and the caller never falls back. The rollback stops what the
+// start left and undoes an enable this install performed.
+func TestAStartFromFailedStateMustHold(t *testing.T) {
+	m, fake := testManager(t)
+	fake.failed[CollectUnit] = true
+	fake.dying = true
+
+	if _, err := m.Install(context.Background(), Options{Exec: "/usr/bin/aiusage"}); err == nil {
+		t.Fatal("Install reported success for a unit that died after its reset")
+	} else if !strings.Contains(err.Error(), "did not stay up") {
+		t.Fatalf("Install error = %v, want the settle failure", err)
+	}
+	if fake.enabled[CollectUnit] {
+		t.Fatalf("the enable this install performed was not rolled back: %v", fake.calls)
+	}
+
+	if err := os.MkdirAll(m.UnitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.UnitDir, CollectUnit), []byte(unitStamp+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake.failed[CollectUnit] = true
+	if err := m.StartCollection(context.Background()); err == nil || !strings.Contains(err.Error(), "did not stay up") {
+		t.Fatalf("StartCollection error = %v, want the settle failure", err)
 	}
 }

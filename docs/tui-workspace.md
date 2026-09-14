@@ -16,9 +16,10 @@ The model list stays sized to its contents instead of filling spare rows.
 
 Run `go run .` from the repository root. This launches the production TUI with
 your normal aiusage configuration and opens its existing database read-only.
-Opening or using the TUI does not start, restart, or request a cycle from the
-collector daemon. An independently running daemon continues collecting on its
-own schedule. The TUI observes its database updates through the existing refresh
+Before the TUI opens, the CLI ensures a collector daemon is running, exactly as
+a report command does; `--no-daemon` skips that. Once open, the TUI never
+restarts the daemon or requests a cycle from it. The daemon continues
+collecting on its own schedule after the TUI exits. The TUI observes its database updates through the existing refresh
 poll. A missing or incompatible database requires an explicit collection or
 migration command before opening the dashboard.
 

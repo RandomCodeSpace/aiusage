@@ -48,6 +48,14 @@ import (
 	"time"
 )
 
+// DefaultSettle is how long a unit started out of failed state is given before
+// its state is read back. A unit that lands in failed state did so by dying a
+// few times in a row, and a start from there is accepted by systemd the moment
+// the process is forked; whether it lives is only knowable a little later.
+// RestartSec on the generated unit is 10s, so a process that died is still
+// "activating" when this elapses, and NRestarts catches a shorter one.
+const DefaultSettle = 500 * time.Millisecond
+
 // DefaultTimeout bounds each systemctl or loginctl invocation. Supervision runs
 // in front of a command the user is waiting on, so a service manager that does
 // not answer promptly is treated as absent rather than waited on.
@@ -86,6 +94,9 @@ type Manager struct {
 	Run Runner
 	// Timeout overrides the per-command timeout. Zero means DefaultTimeout.
 	Timeout time.Duration
+	// Settle overrides how long a unit started from failed state is given to
+	// prove it held before the start counts. Zero means DefaultSettle.
+	Settle time.Duration
 	// GOOS overrides runtime.GOOS. It exists so the Darwin backend can be
 	// exercised by focused tests without touching a developer's login services.
 	// Production callers leave it empty.
@@ -369,8 +380,15 @@ func (m *Manager) StartCollection(ctx context.Context) error {
 	if !fileExists(filepath.Join(m.unitDir(), CollectUnit)) {
 		return fmt.Errorf("start %s: unit is not installed", CollectUnit)
 	}
+	reset, err := m.resetFailed(ctx, CollectUnit, nil)
+	if err != nil {
+		return err
+	}
 	if _, err := m.systemctl(ctx, "start", CollectUnit); err != nil {
 		return fmt.Errorf("start %s: %w", CollectUnit, err)
+	}
+	if reset {
+		return m.confirmHeld(ctx, CollectUnit)
 	}
 	return nil
 }
@@ -581,6 +599,10 @@ func (m *Manager) activate(ctx context.Context, u unitPlan, r *Result) error {
 		return nil
 	}
 
+	reset, err := m.resetFailed(ctx, u.name, r)
+	if err != nil {
+		return err
+	}
 	if _, err := m.systemctl(ctx, "start", u.name); err != nil {
 		if enabledHere {
 			if _, derr := m.systemctl(ctx, "disable", u.name); derr == nil {
@@ -588,6 +610,16 @@ func (m *Manager) activate(ctx context.Context, u unitPlan, r *Result) error {
 			}
 		}
 		return fmt.Errorf("start %s: %w", u.name, err)
+	}
+	if reset {
+		if err := m.confirmHeld(ctx, u.name); err != nil {
+			if enabledHere {
+				if _, derr := m.systemctl(ctx, "disable", u.name); derr == nil {
+					r.change("disabled %s again: this install enabled it and it would not stay up", u.name)
+				}
+			}
+			return err
+		}
 	}
 	r.change("started %s", u.name)
 	return nil
@@ -694,6 +726,113 @@ func (m *Manager) queryState(ctx context.Context, verb, name, positive string, n
 		}
 	}
 	return false, false
+}
+
+// resetFailed clears systemd's failed state from a unit about to be started,
+// and reports whether it did.
+//
+// A unit that exited non-zero often enough trips its start rate limit and
+// parks in "failed", where a plain start is refused with "start request
+// repeated too quickly". The collection unit lands there whenever it loses
+// the ledger lock to a detached collector a few times in a row, which is a
+// fallback this package itself produces. reset-failed is what a start from
+// that state needs first; a unit in any other state is not touched. r is
+// optional and, when given, records the reset as a change.
+//
+// The caller owes a confirmHeld after the start that follows. Before the
+// reset, a broken unit refused to start and the caller fell back to a
+// detached collector that worked; after it, the same unit starts, dies, and
+// would be reported as collecting with nothing behind it.
+func (m *Manager) resetFailed(ctx context.Context, name string, r *Result) (bool, error) {
+	out, err := m.systemctl(ctx, "is-active", name)
+	if err == nil || !hasStateLine(out, "failed") {
+		return false, nil
+	}
+	if _, err := m.systemctl(ctx, "reset-failed", name); err != nil {
+		return false, fmt.Errorf("reset-failed %s: %w", name, err)
+	}
+	if r != nil {
+		r.change("reset %s from its failed state", name)
+	}
+	return true, nil
+}
+
+// confirmHeld waits Settle and then requires a unit just started out of
+// failed state to be active and not yet restarted. Anything else is the unit
+// dying again, and is an error so the caller falls back the way it did when
+// the rate limit refused the start.
+func (m *Manager) confirmHeld(ctx context.Context, name string) error {
+	settle := m.Settle
+	if settle <= 0 {
+		settle = DefaultSettle
+	}
+	t := time.NewTimer(settle)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+		return fmt.Errorf("confirm %s after start: %w", name, ctx.Err())
+	}
+	props, err := m.showProperties(ctx, name, "ActiveState", "NRestarts")
+	if err != nil {
+		return fmt.Errorf("confirm %s after start: %w", name, err)
+	}
+	if props["ActiveState"] == "active" && props["NRestarts"] == "0" {
+		return nil
+	}
+	return fmt.Errorf("%s was started from failed state but did not stay up (ActiveState=%s NRestarts=%s)",
+		name, props["ActiveState"], props["NRestarts"])
+}
+
+// CollectorFailure reports whether the collection unit sits in systemd's
+// failed state and, if so, when it got there, as CLOCK_MONOTONIC time since
+// boot (systemd's InactiveEnterTimestampMonotonic). known is false when the
+// manager gave no usable answer, or on macOS, where launchd keeps no such
+// state.
+func (m *Manager) CollectorFailure(ctx context.Context) (failedAt time.Duration, failed, known bool) {
+	if m.goos() == "darwin" {
+		return 0, false, false
+	}
+	props, err := m.showProperties(ctx, CollectUnit, "ActiveState", "InactiveEnterTimestampMonotonic")
+	if err != nil {
+		return 0, false, false
+	}
+	if props["ActiveState"] != "failed" {
+		return 0, false, true
+	}
+	micros, err := strconv.ParseInt(props["InactiveEnterTimestampMonotonic"], 10, 64)
+	if err != nil {
+		return 0, false, false
+	}
+	return time.Duration(micros) * time.Microsecond, true, true
+}
+
+// showProperties reads named unit properties as a map. It deliberately does
+// not use --value: systemd prints properties in ITS order, not the order
+// asked for (measured: `--property=ActiveState,NRestarts --value` answers
+// NRestarts first), so positional parsing reads one property as another.
+// Every requested key is present in the result; a missing one is an error.
+func (m *Manager) showProperties(ctx context.Context, name string, keys ...string) (map[string]string, error) {
+	out, err := m.systemctl(ctx, "show", name, "--property="+strings.Join(keys, ","))
+	if err != nil {
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	props := make(map[string]string, len(keys))
+	for _, ln := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(ln, "=")
+		if ok {
+			props[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	for _, k := range keys {
+		if _, ok := props[k]; !ok {
+			return nil, fmt.Errorf("show %s: no %s in %q", name, k, strings.TrimSpace(out))
+		}
+	}
+	return props, nil
 }
 
 // CollectorPID asks the running native manager which process it owns. Zero with

@@ -9,10 +9,10 @@
 // When Version is left at its "dev" default, Identity() first consults the module
 // version embedded by the Go toolchain (set for `go install <module>@vX.Y.Z`), and
 // otherwise falls back to a stamp derived from the running executable's size +
-// modtime, so every rebuild/reinstall gets a distinct identity. Dev stamps are
-// informational only: cmd.ensureDaemon deliberately does not auto-restart on
-// dev-stamp mismatches (`go run` is a fresh temp binary each time — acting on
-// those would flap the daemon on every invocation).
+// modtime, so every rebuild/reinstall gets a distinct identity. cmd.ensureDaemon
+// acts on a dev-stamp mismatch only when the collector runs the same executable
+// file as the CLI (`go run` is a fresh temp binary each time — acting on those
+// would flap the daemon on every invocation).
 //
 // This build declares no capabilities, so an identity is a version and nothing
 // else. The capability SUFFIX ("<version>+<capability>") is still understood on
