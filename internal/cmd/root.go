@@ -179,6 +179,7 @@ func newRootCmd() *cobra.Command {
 		newTodayCmd(),
 		newLastCmd(),
 		newSourcesCmd(),
+		newServeCmd(),
 		newDoctorCmd(),
 		newExportCmd(),
 		newDBCmd(),

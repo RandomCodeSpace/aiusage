@@ -120,6 +120,7 @@ are marked. No source text or patches are stored for this feature.
 | Command | What it gives you |
 |---|---|
 | `aiusage` | Interactive terminal dashboard |
+| `aiusage serve` | Local web dashboard with live updates, at http://127.0.0.1:8930 |
 | `aiusage today` | Today's totals |
 | `aiusage last 2d` | A rolling time window |
 | `aiusage summary` | Filtered and grouped reports |

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aiusage</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <h1>aiusage</h1>
+    <nav>
+      <a href="#now" data-view="now">Now</a>
+      <a href="#history" data-view="history">History</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="status" id="status"><i class="dot"></i><span id="status-text">connecting</span></span>
+  </header>
+
+  <main id="view-now" class="view">
+    <section class="hero">
+      <div>
+        <div class="label">Burn rate, last hour</div>
+        <div class="figure" id="burn">-</div>
+        <div class="sub" id="burn-sub"></div>
+      </div>
+      <div class="hero-chart">
+        <div class="cap"><span>Cost per hour, last 24 hours</span><span id="today"></span></div>
+        <div class="canvas"><canvas id="hours"></canvas></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Harnesses</h2>
+      <table class="lanes">
+        <thead><tr><th>Harness</th><th>Last event</th><th class="n">Sessions</th><th class="n">Tokens, 1h</th><th class="n">Cost, 1h</th><th>24 hours</th><th>Cost from</th></tr></thead>
+        <tbody id="lanes"></tbody>
+      </table>
+      <p class="muted" id="idle"></p>
+    </section>
+
+    <section class="two">
+      <div>
+        <div class="cap"><h2>Where the last 24 hours went</h2><span>by model, USD</span></div>
+        <div class="canvas short"><canvas id="mix"></canvas></div>
+      </div>
+      <div>
+        <h2>Needs a look</h2>
+        <ul class="notes" id="notes"></ul>
+      </div>
+    </section>
+  </main>
+
+  <main id="view-history" class="view" hidden>
+    <div class="controls">
+      <div class="seg" id="range" role="group" aria-label="Window"></div>
+      <div class="seg" id="dim" role="group" aria-label="Split by"></div>
+    </div>
+    <section class="hist">
+      <div class="hdr"><h2 id="hist-title"></h2><span class="sub" id="hist-sub"></span></div>
+      <div class="rank" id="rank"></div>
+      <div class="cap"><span>Cost per day, top five, USD</span><span class="legend" id="legend"></span></div>
+      <div class="canvas"><canvas id="days"></canvas></div>
+      <p class="muted">Each split accounts for the whole window on its own. Rows from two splits never add up to anything, so the page shows one at a time.</p>
+    </section>
+  </main>
+
+  <footer class="foot">A plain <b>$</b> is what the vendor charged. <b>~$</b> is an estimate from the public rate card. <b>≥</b> means a row in the window had no price, so the figure is a floor. <b>-</b> is no price at all.</footer>
+</div>
+</body>
+</html>

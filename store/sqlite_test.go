@@ -518,3 +518,40 @@ func TestOpenSetsSynchronousNormal(t *testing.T) {
 		t.Fatalf("synchronous = %d, want 1 (NORMAL)", v)
 	}
 }
+
+// TestLastEventTimesMatchesSourceStats pins the loose-index-scan query to the
+// full aggregate it replaces on read paths that only need freshness.
+func TestLastEventTimesMatchesSourceStats(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	events := []model.UsageEvent{
+		ev("a1", model.ToolCodex, base, 1),
+		ev("a2", model.ToolCodex, base.Add(3*time.Hour), 1),
+		ev("b1", model.ToolClaudeCode, base.Add(time.Hour), 1),
+		ev("c1", "zeta", base.Add(-48*time.Hour), 1),
+	}
+	if _, err := st.InsertEvents(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.LastEventTimes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := st.SourceStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(stats) {
+		t.Fatalf("LastEventTimes has %d tools, SourceStats %d", len(got), len(stats))
+	}
+	for _, s := range stats {
+		if !got[s.Tool].Equal(s.LastEvent) {
+			t.Errorf("%s: LastEventTimes %v, SourceStats %v", s.Tool, got[s.Tool], s.LastEvent)
+		}
+	}
+	empty := openTemp(t)
+	if got, err := empty.LastEventTimes(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("empty ledger: %v, %v; want no tools and no error", got, err)
+	}
+}

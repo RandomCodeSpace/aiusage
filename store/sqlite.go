@@ -937,6 +937,44 @@ func (s *Reader) IngestWatermark(ctx context.Context) (time.Time, error) {
 }
 
 // SourceStats returns per-tool stored stats for the `sources` command.
+// LastEventTimes reports the newest event_time per tool over the whole
+// ledger. It is the freshness question ("when did codex last write?") answered
+// without SourceStats' full-table aggregate, which on a 370k-row ledger costs
+// seconds. The recursive CTE is SQLite's loose index scan: each step seeks the
+// next distinct tool through idx_events_tool_time, and each MAX is one seek to
+// the end of that tool's range in the same index, so the cost is a handful of
+// B-tree probes however many rows the ledger holds.
+func (s *Reader) LastEventTimes(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		WITH RECURSIVE tools(tool) AS (
+			SELECT MIN(tool) FROM usage_events
+			UNION ALL
+			SELECT (SELECT MIN(tool) FROM usage_events WHERE tool > tools.tool)
+			FROM tools WHERE tools.tool IS NOT NULL
+		)
+		SELECT tool, (SELECT MAX(event_time_unix) FROM usage_events WHERE tool = tools.tool)
+		FROM tools WHERE tool IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("store: last event times: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var tool string
+		var last sql.NullInt64
+		if err := rows.Scan(&tool, &last); err != nil {
+			return nil, fmt.Errorf("store: scan last event time: %w", err)
+		}
+		if last.Valid {
+			out[tool] = time.Unix(last.Int64, 0).UTC()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: last event time rows: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Reader) SourceStats(ctx context.Context) ([]SourceStat, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tool,
