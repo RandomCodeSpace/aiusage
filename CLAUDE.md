@@ -536,7 +536,7 @@ model < adapter, store < collect, report, tui < cmd
 
 Five of those are PUBLIC packages at the module root — `model`, `adapter`,
 `store`, `pricing`, `collect` — and everything else stays under `internal/`
-(cmd, daemon, tui, report, service, sysmon, config, buildinfo). The promotion
+(cmd, daemon, tui, report, service, sysmon, config, buildinfo, web). The promotion
 moved import paths and nothing else; the arrows below are what they always were.
 `main.go` stays at the module root, so `go install
 github.com/RandomCodeSpace/aiusage@latest` keeps resolving.
@@ -576,6 +576,23 @@ calling that method and injecting the map via `tui.Options`. `cmd` lays
 `model.RetiredCapabilities()` down FIRST and lets the registry's map overwrite
 it: a ledger is append-only, so it still holds rows for tools nothing collects
 any more, and a tool that comes back to life must be described by its adapter.
+
+`internal/web` is the embedded web dashboard behind `aiusage serve`: a
+read-only JSON API (`/api/now`, `/api/history?dim=&range=`), a Server-Sent
+Events stream (`/events`) and a static page under `go:embed`. It is plain HTML,
+CSS and JavaScript with Chart.js and one typeface loaded from a CDN — no
+framework, no build step. It reads through `store.OpenReadOnly`, never takes
+the collection lock, and its Source interface has no write method. Three rules
+it keeps: the Host allow-list (421 for anything but loopback names and
+`--allowed-hosts`) is what stops a DNS-rebinding page reading the ledger, since
+a loopback bind alone does not; history windows read `usage_rollup` only after
+`RollupStale` says it is current and fall back to the ledger otherwise; and the
+live stream pushes only when the ingest watermark moves, one indexed read every
+`DefaultPoll`, so the browser refetches on the collector's cadence and never
+faster. Per-tool freshness is `store.LastEventTimes` (a loose index scan over
+`idx_events_tool_time`), not `SourceStats`, whose full aggregate costs seconds
+on a real ledger. `history` shows ONE partition per response, the same rule the
+Activity pivot follows.
 
 `internal/service` sits off to the side: it may import stdlib and nothing else —
 never collect/store/report/tui. It knows how a machine supervises processes, not

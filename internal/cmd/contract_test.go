@@ -67,6 +67,7 @@ command aiusage help use=help [command]
 command aiusage last use=last <duration>
 command aiusage once use=once
 command aiusage run use=run
+command aiusage serve use=serve
 command aiusage setup use=setup
 command aiusage sources use=sources
 command aiusage summary use=summary
@@ -91,6 +92,8 @@ flag aiusage export --out type=string default=
 flag aiusage export --since type=string default=
 flag aiusage export --until type=string default=
 flag aiusage last --json type=bool default=false
+flag aiusage serve --addr type=string default=127.0.0.1:8930
+flag aiusage serve --allowed-hosts type=stringSlice default=[]
 flag aiusage setup --force type=bool default=false
 flag aiusage setup --remove type=bool default=false
 flag aiusage summary --breakdown type=bool default=false
