@@ -94,6 +94,7 @@ func (m *Model) workspaceOpen() tea.Cmd {
 }
 
 func (m *Model) workspaceMenu(kind string) {
+	m.workspaceBlurFilter()
 	if m.workspace.chooser == kind {
 		m.workspace.chooser = ""
 		m.workspace.menu = nil
@@ -112,18 +113,8 @@ func (m *Model) workspaceMenu(kind string) {
 		if len(a) == 0 {
 			a = append(a, workspaceAction{"No matching usage", "back"})
 		}
-	case "Group":
-		for _, g := range []string{"model", "tool", "provider", "project", "session"} {
-			a = append(a, workspaceAction{workspaceGroupLabel(g), "group:" + g})
-		}
-	case "Sort":
-		for _, s := range []Sort{SortCost, SortTotal, SortEvents, SortName} {
-			a = append(a, workspaceAction{s.Label(), fmt.Sprintf("sort:%d", s)})
-		}
-	case "Chart":
-		for _, metric := range []UsageMetric{UsageMetricCost, UsageMetricInput, UsageMetricOutput, UsageMetricCache, UsageMetricTotal} {
-			a = append(a, workspaceAction{string(metric), "chart:" + string(metric)})
-		}
+	case "Group", "Sort", "Chart":
+		a = workspaceChoiceActions(kind)
 	default:
 		a = []workspaceAction{{"Compare rows", "menu:Comparison"}, {"Open selected row", "open"}, {"Full selected details", "details"}, {"Group by…", "menu:Group"}, {"Sort rows…", "menu:Sort"}, {"Chart metric…", "menu:Chart"}, {"Input details", "metric:Input"}, {"Output details", "metric:Output"}, {"Cache details", "metric:Cache"}, {"Cost details", "metric:Cost"}, {"Total details", "metric:Total"}, {"Suggestions for selection", "suggestions"}, {"Tool calls / skills / MCP / context", "activity"}, {"Filter comparison", "filter"}, {"Classic usage trend", "classic"}, {"Usage leverage chart", "leverage"}, {"Refresh data", "refresh"}, {"Back to parent", "back"}}
 	}
@@ -138,6 +129,25 @@ func (m *Model) workspaceMenu(kind string) {
 			}
 		}
 	}
+}
+
+func workspaceChoiceActions(kind string) []workspaceAction {
+	var actions []workspaceAction
+	switch kind {
+	case "Group":
+		for _, group := range []string{"model", "tool", "provider", "project", "session"} {
+			actions = append(actions, workspaceAction{workspaceGroupLabel(group), "group:" + group})
+		}
+	case "Sort":
+		for i, sort := range []Sort{SortCost, SortTotal, SortEvents, SortName} {
+			actions = append(actions, workspaceAction{[]string{"Cost", "Tokens", "Events", "Name"}[i], fmt.Sprintf("sort:%d", sort)})
+		}
+	case "Chart":
+		for _, metric := range []UsageMetric{UsageMetricCost, UsageMetricInput, UsageMetricOutput, UsageMetricCache, UsageMetricTotal} {
+			actions = append(actions, workspaceAction{string(metric), "chart:" + string(metric)})
+		}
+	}
+	return actions
 }
 
 func (m Model) workspaceDetails() (Model, tea.Cmd) {
@@ -170,6 +180,9 @@ func (m Model) workspaceDetails() (Model, tea.Cmd) {
 }
 
 func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
+	if action != "filter" {
+		m.workspaceBlurFilter()
+	}
 	if strings.HasPrefix(action, "menu:") {
 		m.workspaceMenu(strings.TrimPrefix(action, "menu:"))
 		return m, nil
@@ -184,6 +197,9 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 		m.rowChosen = false
 		return m.workspaceDetails()
 	case strings.HasPrefix(action, "group:"):
+		if strings.TrimPrefix(action, "group:") == m.workspaceRequestedGroup() {
+			return m, nil
+		}
 		m.workspaceSave()
 		m.workspace.group = strings.TrimPrefix(action, "group:")
 		m.workspace.cursor = 0
@@ -263,6 +279,12 @@ func (m Model) workspaceAction(action string) (Model, tea.Cmd) {
 		m.filtering = true
 		m.filterUI.SetValue(m.filter)
 		return m, m.filterUI.Focus()
+	case "clear-filter":
+		m.filter = ""
+		m.filtering = false
+		m.filterUI.SetValue("")
+		m.filterUI.Blur()
+		return m, m.startLoad()
 	case "classic":
 		m.classicOverview = true
 		m.heroPivot = false
@@ -531,16 +553,26 @@ func (m Model) workspaceMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 			return n, c, true
 		}
 	}
-	for _, a := range []struct{ zone, action string }{{views.ZoneWorkspaceInput, "metric:Input"}, {views.ZoneWorkspaceOutput, "metric:Output"}, {views.ZoneWorkspaceCache, "metric:Cache"}, {views.ZoneWorkspaceCost, "metric:Cost"}, {"workspace-menu-more", "menu:More"}, {"workspace-footer-more", "menu:More"}, {"workspace-menu-group", "menu:Group"}, {"workspace-menu-sort", "menu:Sort"}, {"workspace-details", "details"}, {"workspace-footer-details", "details"}, {"workspace-back", "back"}, {"workspace-up", "up"}, {"workspace-down", "down"}, {"workspace-filter", "filter"}, {"workspace-open", "open"}, {"workspace-footer-open", "open"}, {"workspace-suggestions", "suggestions"}, {"workspace-suggestion-card", "suggestions"}} {
+	for _, kind := range []string{"Group", "Sort", "Chart"} {
+		for _, action := range workspaceChoiceActions(kind) {
+			if hit(workspaceChoiceZone(action.action)) {
+				n, c := m.workspaceAction(action.action)
+				return n, c, true
+			}
+		}
+	}
+	if hit("workspace-compare") {
+		m.workspaceMenu("Comparison")
+		return m, nil, true
+	}
+	if hit("workspace-filter-clear") {
+		n, c := m.workspaceAction("clear-filter")
+		return n, c, true
+	}
+	for _, a := range []struct{ zone, action string }{{views.ZoneWorkspaceInput, "metric:Input"}, {views.ZoneWorkspaceOutput, "metric:Output"}, {views.ZoneWorkspaceCache, "metric:Cache"}, {views.ZoneWorkspaceCost, "metric:Cost"}, {"workspace-menu-more", "menu:More"}, {"workspace-footer-more", "menu:More"}, {"workspace-menu-group", "menu:Group"}, {"workspace-menu-sort", "menu:Sort"}, {"workspace-menu-chart", "menu:Chart"}, {"workspace-details", "details"}, {"workspace-footer-details", "details"}, {"workspace-back", "back"}, {"workspace-up", "up"}, {"workspace-down", "down"}, {"workspace-filter", "filter"}, {"workspace-open", "open"}, {"workspace-footer-open", "open"}, {"workspace-suggestions", "suggestions"}, {"workspace-suggestion-card", "suggestions"}} {
 		if hit(a.zone) {
 			n, c := m.workspaceAction(a.action)
 			return n, c, true
-		}
-	}
-	for _, metric := range []UsageMetric{UsageMetricInput, UsageMetricOutput, UsageMetricCache, UsageMetricCost, UsageMetricTotal} {
-		if hit("workspace-chart-" + string(metric)) {
-			m.workspace.chart = metric
-			return m, nil, true
 		}
 	}
 	for i := range m.workspace.rows {
@@ -558,6 +590,7 @@ func (m Model) workspaceMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 }
 
 func (m Model) workspaceSetRange(r Range) (Model, tea.Cmd) {
+	m.workspaceBlurFilter()
 	if m.rng == r && m.step == 0 {
 		return m, nil
 	}
@@ -577,6 +610,14 @@ func (m Model) workspaceSetRange(r Range) (Model, tea.Cmd) {
 		return next, nil
 	}
 	return m, cmd
+}
+
+func (m *Model) workspaceBlurFilter() {
+	if m.filtering {
+		m.filtering = false
+		m.filterUI.Blur()
+		m.filterUI.SetValue(m.filter)
+	}
 }
 
 // A late code response cannot overwrite another inspector or a newer dataset.

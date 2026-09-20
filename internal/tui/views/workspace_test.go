@@ -62,10 +62,10 @@ func TestWorkspaceGeometryKeepsNarrowValuesAndDetail(t *testing.T) {
 	if g.Side {
 		t.Fatal("42-column workspace unexpectedly allocated a side column")
 	}
-	if g.SummaryH != 11 || g.MachineH != 4 || g.BodyH != 9 {
+	if g.SummaryH != 11 || g.MachineH != 1 || g.BodyH != 12 {
 		t.Fatalf("top/body allocation = summary %d, machine %d, body %d", g.SummaryH, g.MachineH, g.BodyH)
 	}
-	if g.TableW != 40 || g.DetailW != 40 || g.TableH <= 0 || g.DetailH <= 0 {
+	if g.TableW != 42 || g.DetailW != 42 || g.TableH <= 0 || g.DetailH <= 0 {
 		t.Fatalf("narrow pane geometry = %+v", g)
 	}
 	if g.TableH+workspaceFrame+workspaceGap+g.DetailH+workspaceFrame != g.BodyH {
@@ -91,10 +91,10 @@ func TestWorkspaceGeometryAddsBoundedWideSide(t *testing.T) {
 
 func TestWorkspaceCompactGeometryPreservesOneModelRow(t *testing.T) {
 	g := WorkspaceGeometry(42, 12, 8)
-	if g.SummaryH != 3 || g.MachineH != 4 || g.BodyH != 5 {
+	if g.SummaryH != 3 || g.MachineH != 1 || g.BodyH != 8 {
 		t.Fatalf("compact allocation = summary %d, machine %d, body %d", g.SummaryH, g.MachineH, g.BodyH)
 	}
-	if g.TableW != 40 || g.TableH != 3 || g.DetailH != 0 {
+	if g.TableW != 42 || g.TableH != 8 || g.DetailH != 0 {
 		t.Fatalf("compact table allocation = %+v", g)
 	}
 }
@@ -104,7 +104,7 @@ func TestWorkspaceCompactFrameShowsMetricsMachineAndTable(t *testing.T) {
 	d := WorkspaceData{
 		Totals:   store.Bucket{Input: 12, Output: 3, CacheRead: 4, CostMicroUSD: 50_000, Events: 1},
 		RowCount: 1,
-		Machine:  "CPU 12%\nmemory 44%\ndisk 31%",
+		Machine:  "Machine CPU 12% memory 44% disk 31%",
 		Table:    "Model · Sort: Cost\nModel  Cost\nmodel-a  $0.05",
 	}
 	out := Workspace(c, d, 42, 12)
@@ -138,7 +138,7 @@ func TestWorkspaceRendersExactViewportAtFortyTwoColumns(t *testing.T) {
 		RowCount: 2,
 		Table:    "Model · 1 of 2 · Sort: Cost\nheader\nmodel-a\nmodel-b",
 		Detail:   "Selected model-a\nUsage details",
-		Machine:  "CPU 12% · memory 44% · disk 31%",
+		Machine:  "Machine CPU 12% memory 44% disk 31%",
 	}
 
 	out := Workspace(c, d, 42, 24)

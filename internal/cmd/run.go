@@ -19,12 +19,16 @@ import (
 )
 
 // repairPrivatePerms tightens permissions left behind by older releases, which
-// created the data dir 0755 and the DB/log 0644. store.Open only fixes files it
-// touches and never re-modes an existing dir, so existing installs are repaired
-// here on daemon start. Best-effort: a failure must not stop collection, and
-// doctor surfaces perms that stay loose.
+// created the data dir 0755 and the DB/log 0644. Only the default application
+// directory belongs to aiusage; a custom DB's parent may be a shared directory.
+// Best-effort: a failure must not stop collection, and doctor surfaces perms
+// that stay loose.
 func repairPrivatePerms(cfg config.Config) {
-	if dir := filepath.Dir(cfg.DBPath); dir != "" && dir != "." {
+	defaults := config.Default()
+	if cfg.Home != "" {
+		defaults.SetHome(cfg.Home)
+	}
+	if dir := filepath.Dir(cfg.DBPath); dir == filepath.Dir(defaults.DBPath) {
 		_ = os.Chmod(dir, 0o700)
 	}
 	for _, p := range []string{cfg.DBPath, cfg.DBPath + "-wal", cfg.DBPath + "-shm", cfg.LogPath} {

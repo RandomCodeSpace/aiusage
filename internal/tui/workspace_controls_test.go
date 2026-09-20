@@ -88,9 +88,9 @@ func TestWorkspaceChoiceMouseAndKeyboardParity(t *testing.T) {
 		t.Fatal("close button left chooser open")
 	}
 	m, _ = workspaceUI(t, f, m, keyMsg("s"))
-	m = mustPress(t, m, "workspace-choice-dismiss", tea.MouseLeft)
+	m, _ = workspaceUI(t, f, m, keyMsg("esc"))
 	if m.workspace.chooser != "" {
-		t.Fatal("inline close button left chooser open")
+		t.Fatal("Esc left control row focused")
 	}
 }
 

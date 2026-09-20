@@ -586,7 +586,7 @@ func upsertState(ctx context.Context, db execer, st model.AggregateSnapshot) err
 // dimensions (hour/day/week/month) are bucketed in the local timezone so "today"
 // matches the wall clock; categorical dimensions group by their stored value.
 func (s *Reader) Summarize(ctx context.Context, f Filter) (*Summary, error) {
-	if rollupRangeAligned(f.Since, f.Until) {
+	if rollupRangeAligned(f.Since, time.Time{}) {
 		sum, current, err := s.summarizeCurrentRollup(ctx, f)
 		if err != nil {
 			return nil, err
@@ -599,8 +599,8 @@ func (s *Reader) Summarize(ctx context.Context, f Filter) (*Summary, error) {
 }
 
 // summarizeLedger is Summarize's direct authoritative path. Tests compare it
-// field for field with the accelerated path; arbitrary-second bounds always
-// reach it because a 15-minute row cannot answer them exactly.
+// field for field with the accelerated path. Unaligned starts use this path;
+// aligned starts can combine complete rollup buckets with exact ending events.
 func (s *Reader) summarizeLedger(ctx context.Context, f Filter) (*Summary, error) {
 	where, args := buildWhere(f)
 

@@ -333,9 +333,6 @@ func (m Model) renderBreadcrumb() string {
 	sortLbl := m.zoneMark(views.ZoneSort, m.headerChip("sort "+m.sort.Label(), m.th.Accent))
 	if m.view == ViewOverview && !m.classicOverview {
 		sortLbl = ""
-		if m.filter != "" {
-			sortLbl = m.zoneMark("workspace-filter", m.th.Subtle.Render("Filter: "+m.filter))
-		}
 	}
 	iw := m.frameW() - 2
 	if iw < 1 {
@@ -396,10 +393,13 @@ func (m Model) renderBody(lay views.Layout) string {
 }
 
 func (m Model) renderFooter() string {
-	if m.view == ViewOverview && !m.classicOverview && !m.filtering {
+	if m.view == ViewOverview && !m.classicOverview {
 		parts := []string{m.zoneMark("workspace-back", "Back"), m.zoneMark("workspace-up", "↑"), m.zoneMark("workspace-down", "↓"), m.zoneMark("workspace-footer-open", "Open"), m.zoneMark("workspace-footer-details", "Details"), m.zoneMark("workspace-footer-more", "More")}
 		if m.workspace.chooser != "" {
 			parts = []string{m.zoneMark("workspace-choice-close", "Esc Close"), m.zoneMark("workspace-choice-prev", "←"), m.zoneMark("workspace-choice-next", "→"), m.zoneMark("workspace-choice-apply", "Enter Apply")}
+		}
+		if m.filtering {
+			parts = []string{"Enter Apply", "Esc Cancel"}
 		}
 		return m.th.FooterBar.Render(strings.Join(parts, "  "))
 	}
@@ -417,7 +417,7 @@ func (m Model) renderFooter() string {
 	return lipgloss.NewStyle().MaxWidth(m.frameW()).Render(bar)
 }
 
-var workspaceHelpLabels = [...][2]string{{"↑/↓", "select row"}, {"Enter/Esc", "open/back"}, {"o/s/c", "group/sort/chart"}, {"d/i/u", "details/cost/tips"}, {"F6–F9", "Today/7d/30d/All"}, {"a/p", "more/pivot"}, {"?/q", "help/quit"}}
+var workspaceHelpLabels = [...][2]string{{"↑/↓", "select row"}, {"Enter/Esc", "open/back"}, {"o/s/c", "group/sort/chart"}, {"/", "filter rows"}, {"d/i/u", "details/cost/tips"}, {"F6–F9", "Today/7d/30d/All"}, {"a/p", "more/pivot"}, {"?/q", "help/quit"}}
 
 // renderHelpOverlay renders the expanded help as a painted card (no border —
 // the app frame is the only box).

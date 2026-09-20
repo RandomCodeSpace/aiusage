@@ -274,16 +274,22 @@ func workspaceScope(scope []Crumb, b store.Bucket, group string) []Crumb {
 }
 
 func (m Model) renderWorkspace(w, h int) string {
-	// Direct range controls stay alongside the data at every supported size.
-	toolbar := m.workspaceRangeBar(w)
-	if m.workspace.chooser != "" {
-		toolbar += "\n" + m.workspaceChoices(w)
-	}
+	toolbar := m.workspaceControls(w)
 	bodyH := max(1, h-lipgloss.Height(toolbar))
+	if bodyH < 7 {
+		// The minimum terminal keeps every control operable. Opening this row
+		// gives the complete comparison when a useful table cannot fit.
+		comparison := fmt.Sprintf("Compare %d rows · resize for table", len(m.workspace.rows))
+		body := m.zoneMark("workspace-compare", m.th.CrumbActive.Render(comparison))
+		if bodyH > 1 {
+			body = m.th.Subtle.Render("Scope cost "+workspaceCost(m.overview.Totals)) + "\n" + body
+		}
+		return m.clampBlock(toolbar+"\n"+body, w, h)
+	}
 	g := views.WorkspaceGeometry(w, bodyH, len(m.workspace.rows))
 	d := views.WorkspaceData{Totals: m.overview.Totals, Timeline: m.tlData.Buckets, RowCount: len(m.workspace.rows),
 		Table: m.workspaceTable(g.TableW, g.TableH), Detail: m.workspaceDetail(g.DetailW, g.DetailH),
-		Machine: views.SysStrip(m.vctx, m.sysGauges(), w),
+		Machine: m.workspaceMachineLine(w),
 	}
 	if g.Side {
 		d.Trend = m.renderWorkspaceTrend(g.ChartW, g.ChartH)
@@ -292,37 +298,87 @@ func (m Model) renderWorkspace(w, h int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, toolbar, views.Workspace(m.vctx, d, w, bodyH))
 }
 
-// Value choices expand in place so the data and range remain visible. Brackets
-// mark the applied value; the arrow marks keyboard focus before Enter applies it.
-func (m Model) workspaceChoices(w int) string {
-	line := m.th.Title.Render(m.workspace.chooser + ":")
+func (m Model) workspaceControls(w int) string {
+	return strings.Join([]string{m.workspaceRangeBar(w),
+		m.workspaceChoices("Group", w), m.workspaceChoices("Sort", w),
+		m.workspaceChoices("Chart", w), m.workspaceFilter(w)}, "\n")
+}
+
+// Brackets mark the applied value; the arrow marks keyboard focus. These
+// controls have the same layout before, during and after keyboard selection.
+func (m Model) workspaceChoices(kind string, w int) string {
+	key := map[string]string{"Group": "o", "Sort": "s", "Chart": "c"}[kind]
+	title := kind
+	if w >= 70 {
+		title += " " + key
+	}
+	line := m.zoneMark("workspace-menu-"+strings.ToLower(kind), m.th.Subtle.Render(title))
 	var lines []string
-	for i, a := range m.workspace.menu {
+	for i, a := range workspaceChoiceActions(kind) {
 		label := a.label
+		style := m.th.Crumb
 		if m.workspaceChoiceApplied(a.action) {
 			label = "[" + label + "]"
-		}
-		style := m.th.Crumb
-		if i == m.workspace.menuCursor {
-			label = "›" + label
 			style = m.th.CrumbActive
 		}
-		button := m.zoneMark(fmt.Sprintf("workspace-choice-%d", i), style.Render(label))
-		if lipgloss.Width(line)+1+lipgloss.Width(button) > w {
-			lines = append(lines, line)
-			line = button
+		if m.workspace.chooser == kind && i == m.workspace.menuCursor {
+			label = "›" + label
+			style = m.th.CrumbActive
 		} else {
-			line += " " + button
+			label = " " + label
+		}
+		button := m.zoneMark(workspaceChoiceZone(a.action), style.Render(label))
+		if m.workspace.chooser == kind {
+			button = m.zoneMark(fmt.Sprintf("workspace-choice-%d", i), button)
+		}
+		if lipgloss.Width(line)+lipgloss.Width(button) > w {
+			lines = append(lines, line)
+			line = strings.Repeat(" ", len(title)) + button
+		} else {
+			line += button
 		}
 	}
-	close := m.zoneMark("workspace-choice-dismiss", m.th.Subtle.Render("×"))
-	if lipgloss.Width(line)+2 > w {
-		lines = append(lines, line)
-		line = close
-	} else {
-		line += " " + close
-	}
 	return strings.Join(append(lines, line), "\n")
+}
+
+func workspaceChoiceZone(action string) string {
+	return "workspace-" + strings.ReplaceAll(action, ":", "-")
+}
+
+func (m Model) workspaceFilter(w int) string {
+	value := m.filter
+	if value == "" {
+		value = "all rows"
+	}
+	label := "Filter rows / " + value
+	if m.filtering {
+		input := m.filterUI
+		input.Prompt = ""
+		input.SetWidth(max(1, w-14))
+		label = "Filter rows / " + input.View()
+	}
+	if !m.filtering && m.filter != "" {
+		clear := m.zoneMark("workspace-filter-clear", m.th.CrumbActive.Render("Clear"))
+		return m.zoneMark("workspace-filter", m.clampBlock(label, max(1, w-7), 1)) + "  " + clear
+	}
+	return m.zoneMark("workspace-filter", m.clampBlock(label, w, 1))
+}
+
+func (m Model) workspaceMachineLine(w int) string {
+	parts := []string{"Machine"}
+	for _, gauge := range m.sysGauges() {
+		value := "unknown"
+		if gauge.Known {
+			value = fmt.Sprintf("%.0f%%", gauge.Frac*100)
+		}
+		parts = append(parts, gauge.Label+" "+value)
+	}
+	sep := " · "
+	if w < 70 {
+		sep = " "
+		parts = parts[1:]
+	}
+	return m.clampBlock(m.th.Subtle.Render(strings.Join(parts, sep)), w, 1)
 }
 
 func (m Model) workspaceChoiceApplied(action string) bool {
@@ -350,8 +406,7 @@ func (m Model) workspaceTable(w, h int) string {
 	if w < 1 || h < 1 {
 		return ""
 	}
-	header := m.zoneMark("workspace-menu-group", m.th.CrumbActive.Render(workspaceGroupLabel(m.workspaceGroup())+" ▾")) + "  " +
-		m.zoneMark("workspace-menu-sort", "Sort: "+m.sort.Label()+" ▾")
+	header := m.th.Title.Render("Compare " + workspaceGroupLabel(m.workspaceGroup()))
 	if h == 1 {
 		return m.clampBlock(header, w, h)
 	}
@@ -388,15 +443,18 @@ func (m Model) workspaceTable(w, h int) string {
 	st := table.DefaultStyles()
 	st.Header = lipgloss.NewStyle().Bold(true).Foreground(m.th.Muted).Padding(0, 1)
 	st.Cell = lipgloss.NewStyle().Padding(0, 1)
-	st.Selected = lipgloss.NewStyle().Bold(true).Foreground(m.th.Accent)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(m.th.Accent)
+	st.Selected = lipgloss.NewStyle()
 	// Configure styles before height, so Bubbles budgets the final header once.
 	// Setting each property after construction re-renders every visible row.
 	t := table.New(table.WithColumns(cols), table.WithRows(rows), table.WithStyles(st), table.WithWidth(w), table.WithHeight(rowH+1), table.WithFocused(true))
-	if m.workspace.cursor != top {
-		t.SetCursor(m.workspace.cursor - top)
-	}
 	lines := strings.Split(t.View(), "\n")
 	for i := 1; i < len(lines) && i <= len(rows); i++ {
+		// Selection is already owned by the workspace. Styling its visible row
+		// avoids SetCursor rendering the entire Bubbles viewport a second time.
+		if top+i-1 == m.workspace.cursor {
+			lines[i] = selectedStyle.Render(lines[i])
+		}
 		lines[i] = m.zoneMark(fmt.Sprintf("workspace-row-%d", top+i-1), lines[i])
 	}
 	return m.clampBlock(header+"\n"+strings.Join(lines, "\n"), w, h)

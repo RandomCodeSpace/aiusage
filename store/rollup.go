@@ -14,8 +14,8 @@
 //     while half-hour zones (Asia/Kolkata at +05:30 among them) split an hour
 //     bucket across two local buckets - an hourly key would silently move the
 //     first half hour of every local day into the previous one. Resolution
-//     BELOW the bucket width is still out of reach; those queries go to the
-//     ledger.
+//     BELOW the bucket width requires ledger events. Exact ending buckets
+//     are read separately; unaligned starts use the ledger for the whole query.
 //   - Its deltas are written inside the transaction that appends the events
 //     (insertEventsTx), so a crash cannot land events without the matching
 //     delta. The watermark below catches the one case that discipline cannot:
@@ -465,7 +465,8 @@ func (s *Reader) summarizeCurrentRollup(ctx context.Context, f Filter) (*Summary
 	return s.summarizeRollup(ctx, f, f.Since, f.Until, true)
 }
 
-// summarizeRollup answers from the v8 derived table. requireCurrent embeds the
+// summarizeRollup answers from the v8 derived table, adding ending events for
+// an exact live upper bound. requireCurrent embeds the
 // watermark check into the aggregate so Summarize keeps its existing one-query
 // ungrouped and two-query grouped contract. A grouped query with no rows falls
 // back to the ledger: that is correct for both an empty current result and a
@@ -480,7 +481,12 @@ func (s *Reader) summarizeRollup(ctx context.Context, f Filter, since, until tim
 		groupExprs = append(groupExprs, expr)
 	}
 
+	from := "usage_rollup"
 	where, args := buildRollupWhere(f, since, until)
+	if requireCurrent && !rollupRangeAligned(time.Time{}, until) {
+		from, args = exactEndingRollupSource(f)
+		where = ""
+	}
 	statusExpr := "1"
 	if requireCurrent {
 		statusExpr = rollupCurrentSQL
@@ -505,8 +511,7 @@ func (s *Reader) summarizeRollup(ctx context.Context, f Filter, since, until tim
 		COALESCE(SUM(cost_micro_usd),0), COALESCE(SUM(unpriced_events),0),
 		COALESCE(SUM(CASE WHEN price_class='computed' THEN events ELSE 0 END),0), `)
 	sb.WriteString(statusExpr)
-	sb.WriteString(`
-		FROM usage_rollup`)
+	sb.WriteString(" FROM " + from)
 	sb.WriteString(where)
 	if len(groupExprs) > 0 {
 		sb.WriteString(" GROUP BY ")
@@ -577,7 +582,7 @@ func (s *Reader) summarizeRollup(ctx context.Context, f Filter, since, until tim
 		out.Totals.ComputedCostEvents += b.ComputedCostEvents
 	}
 	if len(out.Buckets) > 0 {
-		n, err := s.distinctRollupSessions(ctx, where, args)
+		n, err := s.distinctRollupSessions(ctx, from, where, args)
 		if err != nil {
 			return nil, false, err
 		}
@@ -586,11 +591,35 @@ func (s *Reader) summarizeRollup(ctx context.Context, f Filter, since, until tim
 	return out, current, nil
 }
 
-func (s *Reader) distinctRollupSessions(ctx context.Context, where string, args []any) (int64, error) {
+// exactEndingRollupSource keeps a live snapshot's upper bound exact. Complete
+// 15-minute buckets use the rollup; only the final partial bucket reads events.
+// Both branches retain session IDs so distinct counts remain correct across
+// their boundary. The caller checks the rollup watermark for the whole query.
+func exactEndingRollupSource(f Filter) (string, []any) {
+	boundary := time.Unix(bucketStartUnix(f.Until.Unix()), 0).UTC()
+	rollupWhere, args := buildRollupWhere(f, f.Since, boundary)
+	tail := f
+	if tail.Since.IsZero() || tail.Since.Before(boundary) {
+		tail.Since = boundary
+	}
+	eventWhere, eventArgs := buildWhere(tail)
+	args = append(args, eventArgs...)
+	const dimensions = "tool, model, project, session_id, provider, service_tier, "
+	const tokens = "input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, reasoning_tokens, total_tokens, "
+	from := "(SELECT bucket_start_unix, " + dimensions + tokens +
+		"events, cost_micro_usd, unpriced_events, price_class FROM usage_rollup" + rollupWhere +
+		" UNION ALL SELECT event_time_unix AS bucket_start_unix, " + dimensions + tokens +
+		"1 AS events, COALESCE(cost_micro_usd,0) AS cost_micro_usd, " +
+		"CASE WHEN cost_micro_usd IS NULL THEN 1 ELSE 0 END AS unpriced_events, " +
+		rollupPriceClassSQL + " AS price_class FROM usage_events" + eventWhere + ")"
+	return from, args
+}
+
+func (s *Reader) distinctRollupSessions(ctx context.Context, from, where string, args []any) (int64, error) {
 	var n int64
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT CASE WHEN session_id <> '' THEN session_id END)
-		FROM usage_rollup`+where, args...).Scan(&n); err != nil {
+		FROM `+from+where, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: distinct rollup sessions: %w", err)
 	}
 	return n, nil

@@ -12,11 +12,12 @@ project_name: aiusage
 
 before:
   hooks:
+    - sh scripts/check-go-version.sh
     # Verify tidiness rather than tidy: hooks run AFTER goreleaser's dirty-tree
     # check, so a plain `go mod tidy` here would silently release from module
     # files that were never committed. -diff exits non-zero when go.mod/go.sum
     # would change; fix and re-tag instead.
-    - go mod tidy -diff
+    - env GOTOOLCHAIN=local go mod tidy -diff
 
 builds:
   - id: aiusage
@@ -24,6 +25,7 @@ builds:
     binary: aiusage
     env:
       - CGO_ENABLED=0
+      - GOTOOLCHAIN=local
     # Linux and macOS only. aiusage is a Unix tool: the daemon uses flock
     # (syscall.Flock) and the resource monitor uses statfs (syscall.Statfs),
     # neither of which exists on Windows — and the monitor reads /sys/fs/cgroup,

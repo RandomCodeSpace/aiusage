@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-19T18:36:00Z",
+  "title": "Design System: aiusage",
+  "extensions": {
+    "breakpoints": [
+      {
+        "name": "workspace-side-panes",
+        "value": "workspace width >= 110 columns; height >= 22 rows; remaining body >= 13 rows"
+      },
+      {
+        "name": "workspace-compact-summary",
+        "value": "workspace height < 22 rows"
+      },
+      {
+        "name": "workspace-four-summary-columns",
+        "value": "workspace width >= 84 columns"
+      },
+      {
+        "name": "workspace-two-summary-columns",
+        "value": "workspace width >= 38 columns and < 84 columns"
+      },
+      {
+        "name": "comparison-token-columns",
+        "value": "table width >= 65 columns"
+      },
+      {
+        "name": "overview-compact-chrome",
+        "value": "outer terminal height < 18 rows"
+      }
+    ]
+  }
+}

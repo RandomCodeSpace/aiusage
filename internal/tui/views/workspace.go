@@ -22,15 +22,14 @@ const (
 
 const (
 	workspaceWideW = 110
-	workspaceWideH = 30
+	workspaceWideH = 22
 	workspaceGap   = 1
-	workspaceFrame = 2 // one border cell on each side
+	workspaceFrame = 0 // pane hierarchy uses headings; the app owns the border
 )
 
 // WorkspaceLayout is the complete allocation for a workspace body. SummaryH,
-// MachineH and BodyH are outer heights. The pane dimensions are the inner size
-// of the complete pre-rendered strings passed to Workspace; the renderer adds
-// the one-cell pane border accounted for by this layout.
+// MachineH and BodyH are allocated heights. Pane dimensions include their
+// headings; only the containing application frame adds a border.
 type WorkspaceLayout struct {
 	SummaryH int
 	MachineH int
@@ -58,7 +57,7 @@ func WorkspaceGeometry(width, height, rowCount int) WorkspaceLayout {
 
 	g := WorkspaceLayout{
 		SummaryH: workspaceSummaryHeight(width, height),
-		MachineH: 1 + workspaceMachineRows(width),
+		MachineH: 1,
 	}
 	if g.SummaryH+g.MachineH > height {
 		g.SummaryH = min(g.SummaryH, height)
@@ -76,16 +75,15 @@ func WorkspaceGeometry(width, height, rowCount int) WorkspaceLayout {
 	g.TableW = max(0, leftOuterW-workspaceFrame)
 	g.DetailW = g.TableW
 
-	// The complete table string carries its group/sort line and table header,
-	// followed by at most rowCount rows. Five outer rows is the useful floor.
+	// Comparison rows take priority. Details appear only when the complete
+	// visible table and at least three useful detail lines fit together.
 	if g.BodyH >= 9 {
-		tableOuterH := rowCount + 4
-		tableOuterH = max(tableOuterH, 5)
+		tableOuterH := max(rowCount+2, 3)
 		tableOuterH = min(tableOuterH, g.BodyH-workspaceGap-3)
 		g.TableH = max(0, tableOuterH-workspaceFrame)
 		detailOuterH := g.BodyH - workspaceGap - tableOuterH
 		g.DetailH = max(0, detailOuterH-workspaceFrame)
-	} else if g.BodyH >= 5 {
+	} else if g.BodyH >= 3 {
 		g.TableH = g.BodyH - workspaceFrame
 	}
 
@@ -103,8 +101,8 @@ func WorkspaceGeometry(width, height, rowCount int) WorkspaceLayout {
 	return g
 }
 
-// WorkspaceData contains already-rendered interactive components. Table and
-// Trend include the root-owned group/sort and chart controls respectively.
+// WorkspaceData contains already-rendered interactive components. The root
+// renders the persistent range, group, sort, chart and filter controls above it.
 type WorkspaceData struct {
 	Totals   store.Bucket
 	Timeline []store.Bucket
@@ -121,18 +119,18 @@ type WorkspaceData struct {
 // selection or widget state. Every output frame is bounded to width and height.
 func Workspace(c Ctx, d WorkspaceData, width, height int) string {
 	g := WorkspaceGeometry(width, height, d.RowCount)
-	parts := []string{
-		workspaceFit(workspaceSummary(c, d.Totals, d.Timeline, width, height < 20), width, g.SummaryH),
-		workspaceFit(workspaceMachine(c, d.Machine, width), width, g.MachineH),
-	}
+	parts := []string{workspaceFit(workspaceSummary(c, d.Totals, d.Timeline, width, g.SummaryH <= 3), width, g.SummaryH)}
 	if g.BodyH > 0 {
 		parts = append(parts, workspaceBody(c, d, g, width))
+	}
+	if g.MachineH > 0 {
+		parts = append(parts, workspaceFit(d.Machine, width, g.MachineH))
 	}
 	return workspaceFit(lipgloss.JoinVertical(lipgloss.Left, parts...), width, height)
 }
 
 func workspaceSummaryHeight(width, height int) int {
-	if height < 20 {
+	if height < 22 {
 		return 3
 	}
 	switch {
@@ -143,15 +141,6 @@ func workspaceSummaryHeight(width, height int) int {
 	default:
 		return 21
 	}
-}
-
-func workspaceMachineRows(width int) int {
-	// SysStrip's fixed CPU/memory/disk layout uses two rows at this width and
-	// stacks the three gauges below it. Keep this threshold with SysStrip.
-	if width >= 70 {
-		return 2
-	}
-	return 3
 }
 
 func workspaceSummary(c Ctx, totals store.Bucket, timeline []store.Bucket, width int, compact bool) string {
@@ -399,13 +388,6 @@ func workspaceEventCount(c Ctx, count int64, provenance string) string {
 	return fmt.Sprintf("%s %s %s", humanizeOr(c, count), provenance, noun)
 }
 
-func workspaceMachine(c Ctx, machine string, width int) string {
-	if machine == "" {
-		machine = c.Subtle.Render("Readings unavailable")
-	}
-	return c.titleRule("Machine", width, false) + "\n" + machine
-}
-
 func workspaceBody(c Ctx, d WorkspaceData, g WorkspaceLayout, width int) string {
 	left := workspacePane(c, workspaceFallback(d.Table, "No models in this scope."), g.TableW, g.TableH)
 	if g.DetailH > 0 {
@@ -428,12 +410,7 @@ func workspacePane(c Ctx, content string, innerW, innerH int) string {
 	if innerW <= 0 || innerH <= 0 {
 		return ""
 	}
-	st := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Width(innerW + workspaceFrame).Height(innerH + workspaceFrame)
-	border := c.Subtle.GetForeground()
-	if _, unset := border.(lipgloss.NoColor); !unset {
-		st = st.BorderForeground(border)
-	}
-	return st.Render(workspaceFit(content, innerW, innerH))
+	return workspaceFit(content, innerW, innerH)
 }
 
 func workspaceFallback(content, fallback string) string {

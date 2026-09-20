@@ -269,6 +269,9 @@ func (c Ctx) chipStyle(tone ChipTone, fg color.Color) lipgloss.Style {
 		// bold-only — the marker slot still carries the selection.
 		st := lipgloss.NewStyle().Bold(true)
 		if c.AccentColor != (zeroAdaptive) {
+			if _, native := c.ElevColor(ElevGround).(lipgloss.NoColor); native {
+				return st.Foreground(c.AccentColor)
+			}
 			st = st.Background(c.AccentColor)
 			if g := c.ElevColor(ElevGround); g != nil {
 				st = st.Foreground(g)

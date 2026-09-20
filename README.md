@@ -13,7 +13,7 @@
 </div>
 
 <p align="center">
-  <img src="./assets/dashboard.png" alt="aiusage terminal dashboard showing token use, cost, trends, and usage by tool" width="1280">
+  <img src="./docs/tui-preview.png" alt="aiusage terminal dashboard with visible range, group, sort, chart, and row-filter controls" width="1280">
 </p>
 
 <p align="center"><sub>Real aiusage dashboard, captured with synthetic demo data.</sub></p>
@@ -37,14 +37,19 @@ that were already recorded are not counted twice.
 Download a ready-to-run archive for Linux or macOS from
 [GitHub Releases](https://github.com/RandomCodeSpace/aiusage/releases).
 
-If you have Go 1.25.13 or newer:
+Source builds support Go 1.25.13 through 1.26.5. Go 1.26.5 is the hard
+upper limit and the pinned CI/release toolchain:
 
 ~~~console
-go install github.com/RandomCodeSpace/aiusage@latest
+GOTOOLCHAIN=local go install github.com/RandomCodeSpace/aiusage@latest
 ~~~
 
 Release builds support Linux and macOS on amd64 and arm64. Windows is not
 currently supported.
+
+For a local checkout, run `sh scripts/check-go-version.sh` before building
+with `GOTOOLCHAIN=local go build .`. This prevents Go from automatically
+selecting a newer toolchain. Release builds also enforce the version range.
 
 ## First run
 
@@ -145,20 +150,32 @@ Run `aiusage <command> --help` for every option.
 
 ## Dashboard controls
 
+The Overview keeps range, grouping, sorting, chart metrics, and the row filter
+visible above the comparison. Click an option directly, or focus a control row
+with its shortcut and use the arrow keys and Enter. Brackets mark the applied
+choice; the focus marker shows what Enter will apply.
+
 | Key | Action |
 |---|---|
 | `1` to `5` | Switch between Overview, Tools, Models, Sessions, and Activity |
 | `Tab` | Move to the next view |
 | `t` | Change the time range |
+| `F6` to `F9` | Select Today, 7d, 30d, or All in Overview |
 | `[` / `]` | Move the time window backward or forward |
+| `o` | Focus the Overview grouping choices |
+| `s` | Focus the Overview sort choices; cycle sorting in other views |
+| `c` | Focus the Overview chart metric choices |
 | `p` | Change the Overview or Activity pivot |
 | `/` | Search or filter the current view |
-| `s` | Change sorting |
 | `Enter` / `Esc` | Open or close details |
+| `d` | Inspect the selected Overview row |
 | `r` | Refresh |
 | `q` | Quit |
 
-The footer always shows the controls available in the current view.
+The Overview filter narrows comparison rows only. Summary totals and the chart
+continue to describe the selected time range and drill-down scope. Clear the
+filter with the visible Clear action. In a small terminal, comparison controls
+take priority; the Details action opens information that does not fit inline.
 
 ## Keep collection running
 

@@ -191,7 +191,7 @@ func TestSummarizeQueryCount(t *testing.T) {
 
 // TestSummaryAccelerationRouting proves the fast path is conditional rather
 // than a semantic change: exact 15-minute bounds read the current rollup,
-// arbitrary-second bounds read the authoritative ledger, and a stale
+// arbitrary-second starts read the authoritative ledger, and a stale
 // watermark causes a rollup probe followed by the ledger fallback. The same
 // routing applies to the unpriced groups used for display-time costing.
 func TestSummaryAccelerationRouting(t *testing.T) {

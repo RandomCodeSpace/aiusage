@@ -57,18 +57,14 @@ func (m Model) renderWorkspaceTrend(w, h int) string {
 	title := m.workspaceChartStyle(metric).Bold(true).Render(
 		fmt.Sprintf("%s trend · %s", metric, workspaceChartUnit(metric)),
 	)
-	chooser := m.renderWorkspaceChartChooser(metric)
 	if h == 1 {
 		return workspaceChartFit(title, w, h)
 	}
-	if h == 2 {
-		return workspaceChartFit(title+"\n"+chooser, w, h)
-	}
 
-	bodyH := h - 2
+	bodyH := h - 1
 	body := m.workspaceTrendBody(metric, w, bodyH)
 	body = workspaceChartFit(body, w, bodyH)
-	return workspaceChartFit(title+"\n"+body+"\n"+chooser, w, h)
+	return workspaceChartFit(title+"\n"+body, w, h)
 }
 
 func (m Model) workspaceTrendBody(metric UsageMetric, w, h int) string {
@@ -137,20 +133,6 @@ func (m Model) drawWorkspaceTrend(points []timeserieslinechart.TimePoint, start,
 	// renderers are intentionally not used for this workspace plot.
 	plot.Draw()
 	return plot.View()
-}
-
-func (m Model) renderWorkspaceChartChooser(selected UsageMetric) string {
-	parts := make([]string, 0, len(workspaceChartMetrics))
-	for _, metric := range workspaceChartMetrics {
-		label := string(metric)
-		if metric == selected {
-			label = m.th.CrumbActive.Render("[" + label + "]")
-		} else {
-			label = m.th.Crumb.Render(label)
-		}
-		parts = append(parts, m.zoneMark("workspace-chart-"+string(metric), label))
-	}
-	return m.th.Subtle.Render("Chart: ") + strings.Join(parts, " ")
 }
 
 func (m Model) workspaceChartStyle(metric UsageMetric) lipgloss.Style {

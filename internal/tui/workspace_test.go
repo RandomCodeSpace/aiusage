@@ -392,7 +392,7 @@ func TestWorkspaceCompactMenuMouseAfterScroll(t *testing.T) {
 	_, m := newWorkspaceModel(t)
 	m = send(m, tea.WindowSizeMsg{Width: 42, Height: 12})
 	frame := plainFrame(m)
-	for _, label := range []string{"Input", "Output", "Cache", "Cost", "cpu", "mem", "disk", "More"} {
+	for _, label := range []string{"Range", "Group", "Sort", "Chart", "Filter rows", "Input", "Output", "Cache", "Cost", "Compare 2 rows", "resize for table", "More"} {
 		if !strings.Contains(frame, label) {
 			t.Fatalf("tiny workspace lost %s: %s", label, frame)
 		}

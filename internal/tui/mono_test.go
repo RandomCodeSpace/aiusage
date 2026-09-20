@@ -156,10 +156,9 @@ func TestMonoStateAndRangeChips(t *testing.T) {
 	if !strings.Contains(out, "? help") {
 		t.Errorf("the help action chip did not survive the strip:\n%s", out)
 	}
-	// The sort chip is a press target (issue #23), so what it will do has to be
-	// readable before pressing it — with colour gone, the word is all there is.
-	if !strings.Contains(out, "Sort: "+m.sort.Label()) {
-		t.Errorf("the sort action chip did not survive the strip:\n%s", out)
+	// The applied sort remains readable among the persistent choices.
+	if !strings.Contains(out, "Sort s [Cost]") {
+		t.Errorf("the applied sort did not survive the strip:\n%s", out)
 	}
 }
 

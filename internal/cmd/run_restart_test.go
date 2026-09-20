@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -106,5 +107,27 @@ func TestRunOwnsCollectionBeforeOpeningDaemonLoop(t *testing.T) {
 	}
 	if !lockWasHeld {
 		t.Fatal("run entered the daemon loop without already owning the collection lock")
+	}
+}
+
+func TestRunPreservesCustomDBParentPermissions(t *testing.T) {
+	isolateState(t)
+	stubDaemon(t, nil)
+	dataDir := t.TempDir()
+	if err := os.Chmod(dataDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(dataDir, "usage.db")
+	if out, err := runCmd(t, "--db", db, "--config", offlineConfig(t), "run"); err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	for path, want := range map[string]os.FileMode{dataDir: 0o775, db: 0o600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %03o, want %03o", path, got, want)
+		}
 	}
 }

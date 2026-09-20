@@ -659,7 +659,9 @@ func TestTUISubcommandRemoved(t *testing.T) {
 // pre-#25 releases did (dir 0755, DB/WAL/SHM/log 0644) and asserts the
 // daemon-start repair makes everything owner-only.
 func TestRepairPrivatePermsTightensExistingInstall(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cfg := config.Default()
+	dataDir := filepath.Dir(cfg.DBPath)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -667,8 +669,9 @@ func TestRepairPrivatePermsTightensExistingInstall(t *testing.T) {
 		t.Fatalf("chmod dir: %v", err)
 	}
 
-	db := filepath.Join(dataDir, "usage.db")
+	db := cfg.DBPath
 	logPath := filepath.Join(t.TempDir(), "aiusage.log")
+	cfg.LogPath = logPath
 	files := []string{db, db + "-wal", db + "-shm", logPath}
 	for _, p := range files {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
@@ -679,7 +682,7 @@ func TestRepairPrivatePermsTightensExistingInstall(t *testing.T) {
 		}
 	}
 
-	repairPrivatePerms(config.Config{DBPath: db, LogPath: logPath})
+	repairPrivatePerms(cfg)
 
 	fi, err := os.Stat(dataDir)
 	if err != nil {
@@ -696,6 +699,28 @@ func TestRepairPrivatePermsTightensExistingInstall(t *testing.T) {
 		if perm := fi.Mode().Perm(); perm != 0o600 {
 			t.Errorf("%s mode = %03o, want 600", p, perm)
 		}
+	}
+}
+
+func TestRepairPrivatePermsUsesConfiguredHome(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	cfg := config.Default()
+	cfg.SetHome(t.TempDir())
+	cfg.LogPath = ""
+	dataDir := filepath.Dir(cfg.DBPath)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repairPrivatePerms(cfg)
+	info, err := os.Stat(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("home-derived data dir mode = %03o, want 700", got)
 	}
 }
 
