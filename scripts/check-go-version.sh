@@ -4,7 +4,9 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 minimum=$(awk '$1 == "go" { print $2; exit }' "$repo_dir/go.mod")
-maximum=$(cat "$repo_dir/.go-version")
+# The build pin may use an older Go series with newer security backports.
+# Keep the user's hard ceiling independent of that pin.
+maximum=1.26.5
 actual=$(GOTOOLCHAIN=local go env GOVERSION)
 
 if ! awk -v actual="$actual" -v minimum="$minimum" -v maximum="$maximum" 'BEGIN {

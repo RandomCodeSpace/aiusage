@@ -37,8 +37,9 @@ that were already recorded are not counted twice.
 Download a ready-to-run archive for Linux or macOS from
 [GitHub Releases](https://github.com/RandomCodeSpace/aiusage/releases).
 
-Source builds support Go 1.25.13 through 1.26.5. Go 1.26.5 is the hard
-upper limit and the pinned CI/release toolchain:
+Source builds accept Go 1.25.13 through 1.26.5. Go 1.26.5 is the hard
+upper limit. CI and releases use Go 1.25.13, which includes security backports
+missing from Go 1.26.5. Use the version in `.go-version` for source builds:
 
 ~~~console
 GOTOOLCHAIN=local go install github.com/RandomCodeSpace/aiusage@latest
